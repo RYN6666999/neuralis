@@ -4,29 +4,31 @@
 
 ## 這是什麼
 
-`neuralis` 是我們在 `laap-AGI`（Lorry Jovens 的 Lifeform Architecture for Autonomous Psyche）之上獨立開發的擴充層。包含：
+`neuralis` 是我們在 `laap-AGI` 之上獨立開發的認知擴充層。
 
-- **`laap/agi/cognitive_bus.py`** — 認知事件總線實作（非 stub），提供 publish/subscribe 模式讓所有 AGI 模組通訊
-- **`laap/agi/*.py`** — AGI 認知模組（world_model, causal, analogical, meta_learning 等），目前為 stub，逐步升級為實作
-- **`laap/evolution/`** — 自我演化與 RSI 引擎
-- **`laap/laap_tools/`** — LLM 馴服器、引導生成、自我模型工具
-- **`aris_brain/`** — 階層記憶儲存（MemoryStore + MemoryBridge）
+### 核心實作
+- **`laap/psi_core.py`** — PSI 認知引擎（五維需求驅動 + 情緒梯度場 + 背景心跳執行緒）
+- **`laap/agi/cognitive_bus.py`** — 認知事件總線（publish/subscribe 模式）
+- **`laap/agi/causal.py`** — 因果推理引擎（dict-based）
+- **`laap/agi/world_model.py`** — 世界模型（實體/關係管理）
+- **`laap/agi/analogical.py`** — 類比推理引擎（跨域映射）
+- **`laap/startup.py`** — PsiCore 自動啟動器
 
-## 設計原則
-
-1. **獨立版本控制** — neuralis 有自己的 git history，不受 laap-AGI upstream 影響
-2. **非侵入** — 所有 stub 模組在作者端都有 try/except fallback，不會導致 laap-AGI 啟動失敗
-3. **逐步實作** — 從 stub 開始，逐步注入真正實作
-4. **Overlay 架構** — 透過 PYTHONPATH 疊加在 laap-AGI 之上，不需修改作者原始碼
+### 與 laap-AGI 的關係
+- laap-AGI 是上游開源專案（Apache 2.0）
+- neuralis 只包含我們自己創作的程式碼（MIT）
+- 透過 PYTHONPATH 疊加執行，不需修改作者原始碼
 
 ## 使用方式
 
 ```bash
-# 將 neuralis 疊加到 laap-AGI 環境
-source ~/neuralis/scripts/activate.sh
+# 一鍵啟動
+source ~/neuralis/scripts/start.sh
 
-# 啟動 laap-AGI
-cd ~/laap-AGI && source .venv/bin/activate && python aris_brain/laap_brain_api.py
+# 或分步
+source ~/neuralis/scripts/activate.sh
+cd ~/laap-AGI && source .venv/bin/activate
+python aris_brain/laap_brain_api.py --port 11530
 ```
 
 ## 目錄結構
@@ -34,19 +36,27 @@ cd ~/laap-AGI && source .venv/bin/activate && python aris_brain/laap_brain_api.p
 ```
 neuralis/
 ├── laap/
-│   ├── __init__.py
+│   ├── psi_core.py              ← PSI 認知引擎（🔥 新建）
+│   ├── startup.py                ← 自動啟動器
 │   ├── agi/
-│   │   ├── cognitive_bus.py    ← 事件總線（實作）
-│   │   ├── world_model.py       ← 世界模型（stub）
-│   │   ├── causal.py            ← 因果引擎（stub）
-│   │   ├── analogical.py        ← 類比引擎（stub）
-│   │   └── ...                  ← 其他 AGI 模組
+│   │   ├── cognitive_bus.py      ← 事件總線（實作）
+│   │   ├── causal.py             ← 因果引擎（升級）
+│   │   ├── world_model.py        ← 世界模型（升級）
+│   │   ├── analogical.py         ← 類比引擎（升級）
+│   │   └── ...                   ← 其他 stub
 │   ├── evolution/
 │   └── laap_tools/
 ├── aris_brain/
 │   ├── memory_store.py
 │   └── memory_bridge.py
-├── docs/specs/
+├── docs/
+│   ├── research/
+│   │   └── laap-ecosystem-report.md  ← PyPI 生態系研究
+│   └── specs/
+│       ├── core-architecture.md       ← 論文提煉
+│       ├── fable5-minimal-design.md   ← 極簡設計
+│       └── neuralis-handoff.md
 └── scripts/
-    └── activate.sh
+    ├── activate.sh
+    └── start.sh                       ← 一鍵啟動
 ```

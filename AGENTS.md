@@ -7,46 +7,47 @@ neuralis 是 laap-AGI（Lorry Jovens）之上的獨立認知擴充層。
 
 ## 與 laap-AGI 的關係
 
-- laap-AGI 是上游專案（MIT License）
-- neuralis 只包含我們自己創作的程式碼
-- 透過 PYTHONPATH 疊加在 laap-AGI 之上執行，不需修改作者原始碼
-- `laap/` 套件中的所有模組都被 laap-AGI 透過 try/except import，stub 即可解鎖更多功能
+- laap-AGI 是上游專案（Apache 2.0），neuralis 是獨立 overlay（MIT）
+- 透過 PYTHONPATH 疊加，不修改作者原始碼
+- `laap/` 套件中的所有模組都被 laap-AGI 透過 try/except import
 
-## 技能路由
+## 當前進度（2026-07-14）
 
-| 任務 | Skill |
-|------|-------|
-| 補實 stub 模組 | `incremental-implementation` |
-| 測試 cognitive_bus | `test-driven-development` |
-| 規劃下一期實作 | `planning-and-task-breakdown` |
+### 已完成
+- [x] `laap/agi/cognitive_bus.py` — 完整事件總線實作
+- [x] `laap/psi_core.py` — PSI 認知引擎（五維需求 + 情緒梯度 + 背景心跳）— **新建**
+- [x] `laap/startup.py` — PsiCore 自動啟動器
+- [x] `laap/agi/causal.py` — 因果引擎（dict-based，非 stub）— **升級**
+- [x] `laap/agi/world_model.py` — 世界模型（dict-based，非 stub）— **升級**
+- [x] `laap/agi/analogical.py` — 類比引擎（dict-based，非 stub）— **升級**
+- [x] `laap/laap_tools/self_model/adapter.py` — 完整 adapter（含 snapshot_to_self_state_output）
+- [x] `scripts/start.sh` — 一鍵啟動腳本（PsiCore + API server）
+- [x] 研究報告：PyPI laap 生態系發現 + Harness 論文提煉 + 極簡設計
+
+### 待完成
+- [ ] 連接 PsiCore 到 actual API server 對話流程（`/v1/chat/completions`）
+- [ ] `psilang_v2` import 調查
+- [ ] `aris_generator` 建立
+- [ ] 啟動 LAAP MCP server 讓 Scream 直接存取
+
+## 與作者生態系的關係
+
+發現作者在 PyPI 上有完整版 `laap v0.3.2`（694KB，2026-06-10），包含：
+- PSI 完整引擎 + RSI Darwin-Gödel Machine + 五層記憶 + 27 LLM 提供商
+- 我們參考其設計模式，但用純 Python 極簡化重寫（無 numpy，無外部依賴）
 
 ## 開發指令
 
 ```bash
-# 疊加 neuralis 到環境
+# 一鍵啟動（PsiCore + API server）
+source ~/neuralis/scripts/start.sh
+
+# 或分步啟動
 source ~/neuralis/scripts/activate.sh
+cd ~/laap-AGI && source .venv/bin/activate
+python -c "from laap.startup import ensure_psi_core; ensure_psi_core()"  # 先啟心跳
+python aris_brain/laap_brain_api.py --port 11530                         # 再啟 API
 
-# 啟動 Aris
-cd ~/laap-AGI && source .venv/bin/activate && python aris_brain/laap_brain_api.py
-
-# 測試 cognitive_bus
-cd ~/laap-AGI && source .venv/bin/activate && python -c "from laap.agi.cognitive_bus import CognitiveBus; bus = CognitiveBus(); print(bus)"
+# 測試 PsiCore
+python -c "from laap.startup import ensure_psi_core; psi=ensure_psi_core(); print(psi.get_state())"
 ```
-
-## 實作狀態
-
-- [x] `laap/agi/cognitive_bus.py` — 完整實作（事件總線、6 種資料類別、3 枚舉、模組管理）
-- [x] `laap/agi/*.py` — 11 個 AGI 模組 stub
-- [x] `laap/evolution/` — 1 個 stub
-- [x] `laap/laap_tools/` — 5 個 stub
-- [x] `aris_brain/memory_store.py` — stub
-- [x] `aris_brain/memory_bridge.py` — stub
-- [ ] 補實 world_model.py（下一期）
-- [ ] 補實 causal.py（下一期）
-- [ ] 測試 cognitive_bus 與 psi_core_bridge 的整合
-
-## 規則
-
-- stub 必須有正確的 class/function 簽名，讓 laap-AGI 的 try/except import 成功
-- stub 的 method 可以回傳空值，但不能 raise 未預期的例外
-- 每次修改後 commit 到 neuralis（不是 laap-AGI）

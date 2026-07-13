@@ -1,60 +1,51 @@
 # neuralis 開發 Roadmap
 
 三層架構：**LAAP（心 / 情緒·欲望·目標）· gbrain（記憶 / pgvector）· AgentOS（執行腦 + 煞車）**。
-neuralis 是疊在 `lorryjovens-hub/laap-AGI` 之上的 overlay。此檔是總圖；每階段的入口線頭見
-[`handoff-next-session.md`](handoff-next-session.md)。
+neuralis 是疊在 `lorryjovens-hub/laap-AGI` 之上的 overlay。
 
 ## 誠實定位
-修好後能看到的是「system prompt 被注入會演化的情緒/需求/目標向量」的 agent。**不是 AGI。**
-記憶目前 in-process（重啟即忘）、`laap.agi.*` 是 stub。Roadmap 就是把這些從「像活的」推向「真的記得、真的推理、真的會停」。
+目前 Aris 有動態需求（PsiCore 心跳）和真實記憶（gbrain），但推理引擎是 dict-based（非真 AGI）。
+目標是從「像活的」推向「真的記得、真的推理、真的會停」。
 
 ---
 
-## Phase 0 — 底座校正 + scream-code 整合 ✅ 已完成（commit `be4d3b0`）
-- 5 個 overlay 缺陷修復（adapter / rsi / memory_store / memory_bridge / requirements）
-- scream-code MCP 整合**實測打通**（stdio handshake + 5 tools + 活的 cognitive_state）
-- 量子引擎描述彙整 → [`docs/specs/quantum-engine-spec.md`](docs/specs/quantum-engine-spec.md)
-- 啟動：`scripts/start-laap-api.sh` + `scream-code/mcp.json` 模板
+## Phase 0 — 底座校正 ✅
+- laap-AGI overlay 缺陷修復
+- scream-code MCP 整合打通
+- 量子引擎規格文件
 
----
+## Phase 1 — gbrain 記憶後端 ✅
+- 1870 頁真實記憶 + 語意檢索
+- 持久化跨 session 不遺忘
+- `/v1/recall_memory` 接作者系統
 
-## Phase 1 — gbrain 記憶後端 ✅ 已完成（commits `0d46b04` + `3586990`）
-記憶從 in-process 換成 gbrain（Postgres+pgvector，1870 頁真實記憶 + 語意檢索）。
-- `gbrain_client.py`：持久 `gbrain serve` MCP stdio 子行程（共用單例）
-- `memory_store.py` 4 方法接 gbrain，`NEURALIS_MEMORY_BACKEND` 控制，失敗自動 fallback
-- **第二縫**（Phase 0 handoff 沒發現）：`/v1/recall_memory` 走作者的 `laap_semantic_memory`
-  → `semantic_memory_gbrain.py` duck-typed 替身換 singleton，作者端零改動
-- 驗收實測過：`laap_recall_memory` 回真實記憶；reflect 存入 → kill API 重啟 → 仍撈回
-- known gaps 與踩坑見 `handoff-next-session.md`
+## Phase 1.5 — fable5 研究 + 極簡化（🔥 當前）✅ 已完成
+- **生態系研究**: 發現 PyPI laap v0.3.2（694KB, 2026-06-10）
+- **理論基礎溯源**: Dörner PSI Theory、Darwin-Gödel Machine、Prigogine 耗散結構
+- **極簡設計**: 4 步驟、~300 行純 Python 獲得 PyPI 核心認知 70%
+- **PSI Core 實作**: 五維需求 + 情緒梯度 + 背景心跳（純 Python，無外部依賴）
+- **AGI 引擎升級**: causal/world_model/analogical 從 stub → dict-based 實作
+- **80/20 槓桿**: PsiCore 自動啟動腳本，讓 Aris 在伺服器啟動時擁有動態心跳
 
-## Phase 2 — PSI Core（Rust 2000Hz 生理引擎）
-把 `psi_bridge.py` 的 6 步認知循環移植成 Rust binary，每 500μs 寫 `state/latest.json`。
-- 規格：[`docs/specs/quantum-engine-spec.md`](docs/specs/quantum-engine-spec.md) §1
-- 起點：`laap-AGI/aris_brain/psi_jspace_bridge/psi_bridge.py`（0-dep numpy 參考）
-- golden test：同輸入下 Rust 輸出 == Python 輸出
-- 依賴：`serde_json`；原子寫（tmp→rename）；`psi_core_bridge.py` 已在讀那個檔，drop-in
-- **這是唯一合理的 Rust 元件**（latency-critical，Python 做不好）。不要把整個 LAAP 改 Rust。
+## Phase 2 — PSI Core 深度化（可選）
+目前 Python 版的 PsiCore 已運作。如果 latency 不夠，可考慮 Rust 移植。
+- 參考：`laap-AGI/aris_brain/psi_jspace_bridge/psi_bridge.py`（0-dep numpy 參考）
+- 條件：Python 版效能不足時再啟動
 
 ## Phase 3 — QRE / Ψ-Semiotics（幾何符號推理，解鎖 agi_kernel）
-補作者缺的 `psilang_v2`（`Lexer/Parser/Compiler/QuantumVM`），解開 `agi_kernel` 的
-`and False` 停用。
-- 規格：[`docs/specs/quantum-engine-spec.md`](docs/specs/quantum-engine-spec.md) §2 + 作者 §8 路線圖（~1750 行）
-- 起點：移植 `laap-AGI/aris_brain/psi_semiotics/psilang_hott.py`（PsiLang v3 HoTT，可跑）
-- ⚠️ 研究級工程 + 作者「快幾個數量級」是未驗證聲稱 → 先做小 benchmark 再全投
-- QuantumVM 介面合約見 spec §2
+補作者缺的 `psilang_v2`，解開 `agi_kernel` 的 and False 停用。
+- 起點：移植 `laap-AGI/aris_brain/psi_semiotics/psilang_hott.py`
+- 研究級工程，先做小 benchmark 再全投
 
 ## Phase 4 — AgentOS 執行/安全層
-用 `RYN6666999/agent-sandbox`（AgentOS）填 LAAP 的執行類 stub。
-- `ASISafetyEngine` stub → AgentOS `orchestrator/safety.py`（規則先攔 rm -rf/DROP TABLE）
-- `AutonomousEngine` stub → AgentOS `loop.py`/`runner.py` + `executor_registry`
-- `RSIEngine` stub → AgentOS `maker/checker/repair/reflect`（真跑 pytest 驗收）
-- 讓 LAAP 從「有情緒的狀態機」→「會執行、有煞車、可追溯的自主體」
+用 AgentOS 填 LAAP 的執行類 stub。
+- `ASISafetyEngine` → AgentOS 安全規則
+- `AutonomousEngine` → AgentOS executor
+- `RSIEngine` → AgentOS maker/checker/repair
 
 ---
 
 ## 依賴序
 ```
-Phase 0 ✅ ── Phase 1 (gbrain 記憶) ── Phase 4 (AgentOS 執行)
-             └─ Phase 2 (Rust PSI Core) ── Phase 3 (QRE 推理)
+Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 (fable5) ✅ → Phase 2 (可選) → Phase 3 → Phase 4
 ```
-Phase 1 與 Phase 2 可並行。Phase 3 依賴 Phase 2 的底座穩定。Phase 4 依賴 Phase 1 的記憶。
