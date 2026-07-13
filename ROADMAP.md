@@ -4,8 +4,7 @@
 neuralis 是疊在 `lorryjovens-hub/laap-AGI` 之上的 overlay。
 
 ## 誠實定位
-目前 Aris 有動態需求（PsiCore 心跳）和真實記憶（gbrain），但推理引擎是 dict-based（非真 AGI）。
-目標是從「像活的」推向「真的記得、真的推理、真的會停」。
+目前 Aris 有動態需求（PsiCore 心跳）、真實記憶（gbrain 1870 頁）、AGI 四層引擎（AGIKernel）、42 工具（ToolExecutor）。推理引擎是 dict-based（非真 AGI），但這不是我們的核心競爭力——記憶才是。
 
 ---
 
@@ -19,33 +18,53 @@ neuralis 是疊在 `lorryjovens-hub/laap-AGI` 之上的 overlay。
 - 持久化跨 session 不遺忘
 - `/v1/recall_memory` 接作者系統
 
-## Phase 1.5 — fable5 研究 + 極簡化（🔥 當前）✅ 已完成
-- **生態系研究**: 發現 PyPI laap v0.3.2（694KB, 2026-06-10）
-- **理論基礎溯源**: Dörner PSI Theory、Darwin-Gödel Machine、Prigogine 耗散結構
-- **極簡設計**: 4 步驟、~300 行純 Python 獲得 PyPI 核心認知 70%
-- **PSI Core 實作**: 五維需求 + 情緒梯度 + 背景心跳（純 Python，無外部依賴）
-- **AGI 引擎升級**: causal/world_model/analogical 從 stub → dict-based 實作
-- **80/20 槓桿**: PsiCore 自動啟動腳本，讓 Aris 在伺服器啟動時擁有動態心跳
+## Phase 1.5 — fable5 研究 + 極簡化 ✅
+- 生態系研究: PyPI laap v0.3.2 發現
+- 理論基礎溯源: Dörner PSI / Darwin-Gödel / Prigogine
+- PSI Core 實作 (純 Python, 無外部依賴)
+- AGI 引擎 stub → dict-based 升級
+- 80/20 槓桿: ToolExecutor + AgentOS 整合 (42 工具)
 
-## Phase 2 — PSI Core 深度化（可選）
-目前 Python 版的 PsiCore 已運作。如果 latency 不夠，可考慮 Rust 移植。
-- 參考：`laap-AGI/aris_brain/psi_jspace_bridge/psi_bridge.py`（0-dep numpy 參考）
-- 條件：Python 版效能不足時再啟動
+## Phase 2 — PSI Core 深度化 ✅
+Python 版 PsiCore 已運作，五維需求 + 情緒梯度 + 背景心跳。
 
-## Phase 3 — QRE / Ψ-Semiotics（幾何符號推理，解鎖 agi_kernel）
-補作者缺的 `psilang_v2`，解開 `agi_kernel` 的 and False 停用。
-- 起點：移植 `laap-AGI/aris_brain/psi_semiotics/psilang_hott.py`
-- 研究級工程，先做小 benchmark 再全投
+## Phase 3 — psilang_v2 + AGIKernel ✅
+- 補作者缺的 `psilang_v2` Lexer/Parser/Compiler/QuantumVM 管線
+- 解鎖 AGIKernel 四層引擎：PsiLangCore + SelfHeal + SelfEvolve + Autonomy
 
-## Phase 4 — AgentOS 執行/安全層
-用 AgentOS 填 LAAP 的執行類 stub。
-- `ASISafetyEngine` → AgentOS 安全規則
-- `AutonomousEngine` → AgentOS executor
-- `RSIEngine` → AgentOS maker/checker/repair
+## Phase 5 — 記憶固化循環（🔄 當前優先）
+> 記憶有存取、缺睡眠。補上 consolidation 讓 Aris 越用越記得清楚。
+
+- 背景排程：定期摘要、去重、標重要度、寫回 gbrain
+- 情緒權重：PsiCore 的 valence ± arousal 作為記憶檢索加權
+- 純 overlay，不碰作者碼
+
+## Phase 4 — AgentOS 執行/安全層（⚠️ 順序：煞車先於能力）
+**重要：此階段的執行順序不可逆。**
+
+### Phase 4a — 安全閘 (Safeguard) 🥇
+AgentOS `safety.py` + `checker.py` 先部署，確保工具執行有邊界。
+- 危險指令閘 (`rm -rf`、`DROP TABLE` 等)
+- 沙箱隔離 (sandbox)
+- 人工批准閘門 (approval gate)
+
+### Phase 4b — 工具深度整合 🥈
+- 接 PyPI laap 的 21 工具層
+- 接 Obscura 瀏覽器眼睛
+- 接 Web 搜尋
+
+### Phase 4c — RSI 自我改進 🥉
+- RSIEngine maker/checker/repair 只在沙箱內執行
+- 每次改進提案需通過安全審查
+- 最低權限原則：只改自己的 overlay 程式碼
 
 ---
 
 ## 依賴序
 ```
-Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 (fable5) ✅ → Phase 2 (可選) → Phase 3 → Phase 4
+Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 ✅ → Phase 2 ✅ → Phase 3 ✅
+                                                     ↓
+                                              Phase 5 (記憶固化) ← 現在這裡
+                                                     ↓
+                                              Phase 4a (安全閘) → 4b → 4c
 ```

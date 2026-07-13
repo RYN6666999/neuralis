@@ -15,39 +15,37 @@ neuralis 是 laap-AGI（Lorry Jovens）之上的獨立認知擴充層。
 
 ### 已完成
 - [x] `laap/agi/cognitive_bus.py` — 完整事件總線實作
-- [x] `laap/psi_core.py` — PSI 認知引擎（五維需求 + 情緒梯度 + 背景心跳）— **新建**
-- [x] `laap/startup.py` — PsiCore 自動啟動器
-- [x] `laap/agi/causal.py` — 因果引擎（dict-based，非 stub）— **升級**
-- [x] `laap/agi/world_model.py` — 世界模型（dict-based，非 stub）— **升級**
-- [x] `laap/agi/analogical.py` — 類比引擎（dict-based，非 stub）— **升級**
-- [x] `laap/laap_tools/self_model/adapter.py` — 完整 adapter（含 snapshot_to_self_state_output）
-- [x] `scripts/start.sh` — 一鍵啟動腳本（PsiCore + API server）
-- [x] 研究報告：PyPI laap 生態系發現 + Harness 論文提煉 + 極簡設計
+- [x] `laap/psi_core.py` — PSI 認知引擎（五維需求 + 情緒梯度 + 背景心跳）
+- [x] `laap/tool_executor.py` — 工具執行層 (42 工具: gbrain/qmd/rg/httpx + AgentOS 38)
+- [x] `laap/startup.py` — startup_all(): PsiCore + ToolExecutor 一次啟動
+- [x] `laap/psilang_v2.py` — PsiLang v2 語言管線 (Lexer→Parser→Compiler→QuantumVM)
+- [x] `laap/agi/causal.py` — 因果引擎 (dict-based, 維持現狀)
+- [x] `laap/agi/world_model.py` — 世界模型 (dict-based, 維持現狀)
+- [x] `laap/agi/analogical.py` — 類比引擎 (dict-based, 維持現狀)
+- [x] 研究報告: PyPI 生態系 + Harness 論文提煉 + 外部 feedback 記錄
 
-### 待完成
-- [ ] 連接 PsiCore 到 actual API server 對話流程（`/v1/chat/completions`）
-- [ ] `psilang_v2` import 調查
-- [ ] `aris_generator` 建立
-- [ ] 啟動 LAAP MCP server 讓 Scream 直接存取
+### 已知限制（誠實標記）
+- `causal/world_model/analogical` 是 dict-based 非真 AGI → 策略性維持現狀，不深挖
+- PsiCore 心跳未接到 `/v1/chat/completions` → 對話中需求不影響回應
+- 無記憶固化循環 → 記憶有存取、缺睡眠
+- Phase 4 安全閘未部署 → RSI 能力尚未開放
 
-## 與作者生態系的關係
-
-發現作者在 PyPI 上有完整版 `laap v0.3.2`（694KB，2026-06-10），包含：
-- PSI 完整引擎 + RSI Darwin-Gödel Machine + 五層記憶 + 27 LLM 提供商
-- 我們參考其設計模式，但用純 Python 極簡化重寫（無 numpy，無外部依賴）
+### 待完成（優先順序）
+- [ ] P5: 記憶固化循環（consolidation + 情緒權重）
+- [ ] P0: PsiCore 接對話流 (`/v1/chat/completions`)
+- [ ] 4a: AgentOS 安全閘 (safety gate)
+- [ ] 4b: Obscura 瀏覽器眼睛
+- [ ] 4c: RSI 自我改進 (沙箱限定)
 
 ## 開發指令
 
 ```bash
-# 一鍵啟動（PsiCore + API server）
+# 一鍵啟動
 source ~/neuralis/scripts/start.sh
 
-# 或分步啟動
+# 或分步
 source ~/neuralis/scripts/activate.sh
 cd ~/laap-AGI && source .venv/bin/activate
-python -c "from laap.startup import ensure_psi_core; ensure_psi_core()"  # 先啟心跳
-python aris_brain/laap_brain_api.py --port 11530                         # 再啟 API
-
-# 測試 PsiCore
-python -c "from laap.startup import ensure_psi_core; psi=ensure_psi_core(); print(psi.get_state())"
+python -c "from laap.startup import startup_all; startup_all()"
+python aris_brain/laap_brain_api.py --port 11530
 ```
