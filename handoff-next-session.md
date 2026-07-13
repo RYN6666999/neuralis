@@ -1,54 +1,83 @@
 # 線頭 — 給下一手
 
-> 上上手（Opus 4.8, 2026-07-14）完成 Phase 0。上一手（Fable 5, 2026-07-14）完成
-> **Phase 1：gbrain 記憶後端**，commits `0d46b04` + `3586990`。**先讀 [`ROADMAP.md`](ROADMAP.md)。**
+> 最後更新: 2026-07-14 | 最新 commit: `fb101c1`
+> 當前 Phase: **Phase 5（記憶固化循環）** — 剛從 Phase 3 推進至此
+
+---
 
 ## 已驗證的現況（不是宣稱，是實跑過）
-- Phase 0 全部維持：Python 3.12 venv boot 乾淨、`engines_loaded: true`、
-  scream-code MCP 5 tools 通、cognitive_state 會演化
-- **Phase 1 驗收全過（2026-07-14 實測）：**
-  - `POST /v1/recall_memory {"query":"LAAP 情緒 記憶"}` 從回空 → 回 3 條真實腦庫記憶
-  - reflect 存入 token → recall top-hit 撈回 → **kill API 重啟 → 仍撈回同一頁**
-    （`laap/memory/episodic/mem-*` 存進 gbrain Postgres，真持久）
-  - `scripts/check-memory-gbrain.py` 自檢 4/4 過（local + gbrain 雙後端）
-  - `MemoryStore().recall('LAAP 情緒引擎')` 回全腦 1870 頁的真實記憶（core 層）
 
-## Phase 1 架構（兩個記憶縫，不是一個）
-上上手的 handoff 只講了 memory_store 縫；實際有兩條：
-1. **memory_store.py**（內部認知：aris_cognitive_bridge 每輪 recall/store、PSI embedding）
-   → 4 方法接 gbrain，`NEURALIS_MEMORY_BACKEND=auto|gbrain|local`，失敗自動 fallback in-process
-2. **laap_semantic_memory**（`/v1/recall_memory` + reflect 持久化 — 作者檔，不可改）
-   → `semantic_memory_gbrain.py` duck-typed 替身換 lazy singleton，掛載點在
-   memory_store.py 檔尾（boot 必經）。作者端零改動。
+### 心臟：PsiCore
+- `laap/psi_core.py` — 五維需求 (competence/autonomy/relatedness/certainty/growth) + 情緒梯度場
+- 背景心跳執行緒 (1s tick) — 需求衰減 + 雜訊 + 情緒平滑更新
+- 關鍵詞偵測 → 需求滿足 → CognitiveBus 事件發布
+- 啟動: `from laap.startup import startup_all` → 回傳 (bus, psi, tools)
 
-共用 `gbrain_client.py`：持久 `gbrain serve`（MCP stdio）子行程，lazy spawn +
-死亡重啟。實測延遲：init 1.8s（一次）、search/query ~1-1.3s、put_page ~5s（含 embed）。
+### 手腳：ToolExecutor (42 工具)
+- `laap/tool_executor.py` — CognitiveBus → AgentOS executor_registry 橋接
+- 4 內建: gbrain (hybrid search)、qmd (本地知識)、file-search (rg)、http-get (httpx)
+- 38 from AgentOS: web-search、agnes-analyze、claude-code、33 skill executors
+- 驗證：`from laap.startup import startup_all; startup_all()` → 42 tools
 
-## 環境重建（不變）
+### 大腦：AGIKernel（Phase 3 — 2026-07-14 新解鎖）
+- `laap/psilang_v2.py` — Lexer → Parser → Compiler → QuantumVM 管線 (dict-based)
+- AGIKernel 四層引擎：PsiLangCore(1024D) + SelfHeal + SelfEvolve + Autonomy
+- 驗證：`from aris_brain.agi_kernel import AGIKernel; AGIKernel()` ✅
+- 注意：agi_memory + .psi 核心定義檔為作者端缺失，不影響架構
+
+### 記憶：gbrain（Phase 1 — 已完成）
+- 1870 頁真實記憶 + hybrid search
+- 跨 session 不遺忘（kill server → restart → 仍撈回同一頁）
+- `gbrain_client.py` — 持久 gbrain subprocess (MCP stdio)
+- `semantic_memory_gbrain.py` — duck-typed 替身接作者 `/v1/recall_memory`
+- 誠實限制：hash embedding 天花板、recall 同步阻塞 ~1s、無 retention policy
+
+### 理論基礎（Phase 1.5 — 2026-07-14）
+- 論文: `docs/specs/core-architecture.md` — Harness Consciousness Engineering 提煉
+- 設計: `docs/specs/fable5-minimal-design.md` — 極簡化策略
+- 生態: `docs/research/laap-ecosystem-report.md` — PyPI laap v0.3.2 發現
+- feedback: `docs/research/external-feedback.md` — 外部架構審查記錄
+
+### 已知限制（誠實）
+- `laap/agi/causal/world_model/analogical` = dict-based，非真 AGI → 策略性維持現狀
+- PsiCore 心跳未接到 `/v1/chat/completions` → 對話中需求不影響回應
+- 無記憶固化循環 → 記憶有存取、缺睡眠（Phase 5 的內容）
+- Phase 4 安全閘未部署 → RSI 能力尚未開放
+
+---
+
+## 立即要抓的線頭 = Phase 5（記憶固化循環）
+
+見 ROADMAP §Phase 5。純 overlay，不碰作者碼。
+
+### 要做的事
+1. **背景排程**：在 PsiCore 心跳執行緒中加 consolidation step
+2. **摘要壓縮**：取 session 記憶 → 去重 → 摘要 → 標重要度
+3. **情緒權重**：PsiCore 的 valence × arousal 作為記憶重要性指標
+4. **寫回 gbrain**：固化後的記憶存入 gbrain 長期區
+
+### 環境啟動
 ```bash
-uv venv laapenv --python 3.12    # 與 neuralis、laap-AGI 同層
-uv pip install --python laapenv/bin/python -r neuralis/requirements.txt
-neuralis/scripts/start-laap-api.sh   # 起 :11546，冪等
+cd ~/laap-AGI && source .venv/bin/activate
+PYTHONPATH="$HOME/neuralis:$PYTHONPATH" python -c "
+from laap.startup import startup_all
+bus, psi, tools = startup_all()
+"
 ```
-⚠️ 從有 `OPENAI_API_KEY` 的 shell 起（zshrc 有）— gbrain vec 檢索靠它，
-無 key 退化 lex-only（CJK/多詞 query 品質差很多，見下面踩坑）。
 
-## 立即要抓的線頭 = Phase 2（Rust PSI Core）
-見 ROADMAP §Phase 2 + `docs/specs/quantum-engine-spec.md` §1。
-起點：`laap-AGI/aris_brain/psi_jspace_bridge/psi_bridge.py`（0-dep numpy 參考實作）。
-golden test：同輸入 Rust 輸出 == Python 輸出。與 Phase 4（AgentOS）可並行。
+### Phase 5 完成條件
+- [ ] 背景 consolidation 排程已註冊（與 PsiCore 心跳同生命週期）
+- [ ] 情緒強度作為記憶權重已實作
+- [ ] gbrain 寫回驗證：固化前 → 固化後 → 檢索有差
+- [ ] handoff 更新 + push
 
-## Phase 1 known gaps（何時補）
-- **hash embedding 天花板**：`get_memory_embedding` 用 deterministic feature hashing
-  （384-dim 契約保留、空召回=零向量降級契約保留），語意=詞袋級。
-  升級路徑：gbrain 曝露原生 3072-dim 向量後做投影。影響低（作者端只拿去做注意力偏置）。
-- **recall 是同步阻塞 ~1s**，跑在 aiohttp handler 裡會卡 event loop。單人本地用可接受；
-  多併發時改 run_in_executor。
-- **semantic add 的 meta 只存 meta_type**，完整 meta dict 沒進 frontmatter（YAML-lite 限制）。
-- **laap/memory/* 頁只增不減**，沒 retention policy。量大後考慮 gbrain 端清理或降 importance 歸檔。
-- **gbrain lex quirk**（上游）：多詞 AND + stemming 不對稱 — `search "neuralis"` 全空但
-  頁面存在（doc 端沒 stem、query 端有）。vec 正常時無感；無 key 時明顯。可回報 gbrain repo。
+---
 
-## 誠實定位（不變）
-有情緒狀態機 + 真持久記憶了；`laap.agi.*` 推理仍是 stub。不是 AGI。
-Phase 2/3 才開始碰推理層。
+## 環境重建
+```bash
+cd ~/laap-AGI && source .venv/bin/activate
+PYTHONPATH="$HOME/neuralis:$PYTHONPATH" python aris_brain/laap_brain_api.py --port 11530
+```
+
+⚠️ gbrain vec 檢索需要 `OPENAI_API_KEY` 環境變數（zshrc 有）。
+無 key 退化 lex-only（CJK/多詞 query 品質差很多）。
