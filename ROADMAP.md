@@ -18,13 +18,14 @@ neuralis 是疊在 `lorryjovens-hub/laap-AGI` 之上的 overlay。此檔是總�
 
 ---
 
-## Phase 1 — gbrain 記憶後端 ⭐ 下一步（最高 ROI）
-把 `memory_store.py` / `memory_bridge.py` 從 in-process 換成 gbrain（Postgres+pgvector，
-1868 頁真實記憶 + 語意檢索）。**seam 已留在 `memory_store.py` 檔尾。**
-- 改 4 個方法：`store`→gbrain put_page、`recall`→gbrain search/query、`get_stats`、`get_memory_embedding`→gbrain 向量檢索
-- 作者端零改動（介面不變）
-- 驗收：`laap_recall_memory` 從回空 → 回檢索到的真實記憶片段；重啟後記憶仍在
-- **這是「假記憶→真記憶」的單點跳躍，先做這個。**
+## Phase 1 — gbrain 記憶後端 ✅ 已完成（commits `0d46b04` + `3586990`）
+記憶從 in-process 換成 gbrain（Postgres+pgvector，1870 頁真實記憶 + 語意檢索）。
+- `gbrain_client.py`：持久 `gbrain serve` MCP stdio 子行程（共用單例）
+- `memory_store.py` 4 方法接 gbrain，`NEURALIS_MEMORY_BACKEND` 控制，失敗自動 fallback
+- **第二縫**（Phase 0 handoff 沒發現）：`/v1/recall_memory` 走作者的 `laap_semantic_memory`
+  → `semantic_memory_gbrain.py` duck-typed 替身換 singleton，作者端零改動
+- 驗收實測過：`laap_recall_memory` 回真實記憶；reflect 存入 → kill API 重啟 → 仍撈回
+- known gaps 與踩坑見 `handoff-next-session.md`
 
 ## Phase 2 — PSI Core（Rust 2000Hz 生理引擎）
 把 `psi_bridge.py` 的 6 步認知循環移植成 Rust binary，每 500μs 寫 `state/latest.json`。
