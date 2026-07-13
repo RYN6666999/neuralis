@@ -12,7 +12,7 @@ NEURALIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ ":$PYTHONPATH:" != *":$NEURALIS_DIR:"* ]]; then
     export PYTHONPATH="$NEURALIS_DIR:$PYTHONPATH"
     echo "[neuralis] 已疊加到 PYTHONPATH: $NEURALIS_DIR"
-    echo "[neuralis] 現在可以 import laap.* 和 aris_brain.*"
+    echo "[neuralis] ❤️ 啟動 LAAP server 時 Aris 將自動有心跳"
 else
     echo "[neuralis] 已在 PYTHONPATH 中"
 fi
