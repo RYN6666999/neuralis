@@ -160,6 +160,19 @@ class GbrainClient:
             self._kill()
 
 
+def hybrid_hits(client: "GbrainClient", query: str, limit: int) -> list:
+    """query（hybrid vec+lex）→ search（lex）兩層降級檢索。
+    回 gbrain 原始 hit dicts（slug/chunk_text/score/...）。失敗 raise GbrainError。"""
+    hits = []
+    try:
+        hits = client.call("query", {"query": query, "limit": limit, "expand": False})
+    except GbrainError as e:
+        logger.debug("[gbrain_client] query 失敗，退 lex: %s", e)
+    if not hits:
+        hits = client.call("search", {"query": query, "limit": limit})
+    return hits or []
+
+
 # ── module singleton ───────────────────────────────────────────
 _CLIENT: Optional[GbrainClient] = None
 _CLIENT_LOCK = threading.Lock()

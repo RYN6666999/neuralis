@@ -144,19 +144,13 @@ class MemoryStore:
         client = _gbrain()
         if client is None:
             return local
-        limit = max(top_k * 2, 10)
-        hits: List[Dict] = []
         try:
-            # hybrid（vec+lex）優先：多詞/CJK query 靠向量; 無 OPENAI_API_KEY 時退化可能回空
-            hits = client.call("query", {"query": query, "limit": limit, "expand": False})
+            # hybrid（vec+lex→lex）降級檢索; 無 OPENAI_API_KEY 時 vec 退化只剩 lex
+            from gbrain_client import hybrid_hits
+            hits = hybrid_hits(client, query, max(top_k * 2, 10))
         except Exception as e:
-            logger.debug(f"[memory_store] gbrain query 失敗，退 lex: {e}")
-        if not hits:
-            try:
-                hits = client.call("search", {"query": query, "limit": limit})
-            except Exception as e:
-                logger.warning(f"[memory_store] gbrain recall 失敗，用 in-process: {e}")
-                return local
+            logger.warning(f"[memory_store] gbrain recall 失敗，用 in-process: {e}")
+            return local
         remote = [self._hit_to_fragment(h) for h in hits]
         if layer is not None:
             remote = [f for f in remote if f.layer == layer]
@@ -238,3 +232,12 @@ class MemoryStore:
 
 # ── GBRAIN_BACKEND ─────────────────────────────────────────────
 # Phase 1 已接上（見模組 docstring）。強制舊行為: NEURALIS_MEMORY_BACKEND=local
+
+# /v1/recall_memory（laap_recall_memory tool）走作者的 laap_semantic_memory，
+# 不走本模組 — 在這裡掛替身是因為 memory_store 是 boot 必經的 neuralis 模組。
+if _backend_mode() != "local":
+    try:
+        from semantic_memory_gbrain import install as _install_semantic
+        _install_semantic()
+    except Exception as _e:  # 安裝失敗不影響 memory_store 本體
+        logger.debug(f"[memory_store] semantic gbrain 掛載跳過: {_e}")
