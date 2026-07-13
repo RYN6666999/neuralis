@@ -1,0 +1,355 @@
+"""
+PsiCore — 極簡 PSI 認知引擎 (純 Python, 無外部依賴)
+======================================================
+基於 PyPI laap v0.3.2 的 needs.py + emotion.py 設計模式濃縮。
+
+五維需求驅動 + 情緒梯度場 + 背景心跳執行緒。
+嵌入 CognitiveBus，讓 Aris 擁有動態的內在狀態。
+"""
+from __future__ import annotations
+import logging
+import math
+import random
+import threading
+import time
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from laap.agi.cognitive_bus import (
+    CognitiveBus, CognitiveEventType, CognitiveStateSnapshot,
+    NeedState, EmotionState, AttentionState, AttentionFocus,
+    EmotionalValence, PredictionError,
+)
+
+logger = logging.getLogger("laap.psi_core")
+
+
+class NeedType(Enum):
+    CERTAINTY = "certainty"
+    COMPETENCE = "competence"
+    AUTONOMY = "autonomy"
+    RELATEDNESS = "relatedness"
+    GROWTH = "growth"
+
+
+class EmotionGradient:
+    """情緒梯度場 — 從需求滿足率的變化自然湧現。
+
+    不需要 numpy。valence 是需求平均值的平滑映射。
+    arousal 從需求變化劇烈度驅動。
+    """
+
+    def __init__(self, smoothing: float = 0.3):
+        self.smoothing = smoothing
+        self.valence = 0.0          # -1.0 ~ +1.0
+        self.arousal = 0.5          # 0.0 ~ 1.0
+        self.dominance = 0.5        # 0.0 ~ 1.0
+        self._prev_sat: Dict[str, float] = {}
+
+    def update(self, satisfactions: Dict[str, float]) -> None:
+        """從當前需求值更新情緒狀態。"""
+        avg = sum(satisfactions.values()) / max(1, len(satisfactions))
+        v_target = max(-1.0, min(1.0, 2.0 * avg - 1.0))
+        self.valence = self._smooth(self.valence, v_target)
+
+        if self._prev_sat:
+            deltas = []
+            for k, curr in satisfactions.items():
+                prev = self._prev_sat.get(k, 0.5)
+                deltas.append(abs(curr - prev))
+            drive = min(1.0, (sum(deltas) / len(deltas)) * 3.0) if deltas else 0.3
+        else:
+            drive = 0.3
+        self.arousal = self._smooth(self.arousal, 0.3 + 0.7 * drive)
+        self._prev_sat = dict(satisfactions)
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "valence": round(self.valence, 3),
+            "arousal": round(self.arousal, 3),
+            "dominance": round(self.dominance, 3),
+        }
+
+    def _smooth(self, old: float, new: float) -> float:
+        return old * self.smoothing + new * (1.0 - self.smoothing)
+
+
+class NeedDriveSystem:
+    """五維需求驅動系統 — 基於 Dörner PSI 理論。
+
+    每個需求有: 當前值、目標值、衰減率、重要性、波動率。
+    drive = max(0, target - current) * importance
+    """
+
+    def __init__(self):
+        self.values: Dict[NeedType, float] = {
+            NeedType.CERTAINTY: 0.6,
+            NeedType.COMPETENCE: 0.4,
+            NeedType.AUTONOMY: 0.5,
+            NeedType.RELATEDNESS: 0.5,
+            NeedType.GROWTH: 0.5,
+        }
+        self.targets: Dict[NeedType, float] = {
+            NeedType.CERTAINTY: 0.8,
+            NeedType.COMPETENCE: 0.9,
+            NeedType.AUTONOMY: 0.7,
+            NeedType.RELATEDNESS: 0.7,
+            NeedType.GROWTH: 0.8,
+        }
+        self.decay_rates: Dict[NeedType, float] = {
+            NeedType.CERTAINTY: 0.008,
+            NeedType.COMPETENCE: 0.012,
+            NeedType.AUTONOMY: 0.005,
+            NeedType.RELATEDNESS: 0.010,
+            NeedType.GROWTH: 0.006,
+        }
+        self.importances: Dict[NeedType, float] = {
+            NeedType.CERTAINTY: 1.2,
+            NeedType.COMPETENCE: 1.5,
+            NeedType.AUTONOMY: 1.0,
+            NeedType.RELATEDNESS: 0.8,
+            NeedType.GROWTH: 1.3,
+        }
+        self.volatilities: Dict[NeedType, float] = {
+            NeedType.CERTAINTY: 0.04,
+            NeedType.COMPETENCE: 0.06,
+            NeedType.AUTONOMY: 0.03,
+            NeedType.RELATEDNESS: 0.05,
+            NeedType.GROWTH: 0.04,
+        }
+
+    def tick(self, dt: float = 1.0) -> Dict[NeedType, float]:
+        """每秒衰減 + 雜訊。"""
+        for nt in NeedType:
+            decay = self.decay_rates[nt] * dt
+            noise = random.gauss(0, self.volatilities[nt] * dt)
+            self.values[nt] = max(0.0, min(1.0, self.values[nt] - decay + noise))
+        return dict(self.values)
+
+    def satisfy(self, need_type: NeedType, amount: float) -> None:
+        """滿足特定需求。"""
+        self.values[need_type] = min(1.0, self.values[need_type] + amount)
+
+    def satisfy_all(self, amounts: Dict[NeedType, float]) -> None:
+        """批次滿足多個需求。"""
+        for nt, amount in amounts.items():
+            self.satisfy(nt, amount)
+
+    def get_dominant(self) -> Tuple[Optional[NeedType], float]:
+        """回傳 (最高需求, drive 值)。"""
+        best_nt, best_drive = None, -1.0
+        for nt in NeedType:
+            drive = self.compute_drive(nt)
+            if drive > best_drive:
+                best_drive, best_nt = drive, nt
+        return best_nt, best_drive
+
+    def compute_drive(self, need_type: NeedType) -> float:
+        deficit = max(0.0, self.targets[need_type] - self.values[need_type])
+        return deficit * self.importances[need_type]
+
+    def get_satisfactions(self) -> Dict[str, float]:
+        return {nt.value: self.values[nt] for nt in NeedType}
+
+    def get_drives(self) -> Dict[str, float]:
+        return {nt.value: self.compute_drive(nt) for nt in NeedType}
+
+    def to_dict(self) -> Dict[str, dict]:
+        return {
+            nt.value: {
+                "current": round(self.values[nt], 3),
+                "target": self.targets[nt],
+                "drive": round(self.compute_drive(nt), 3),
+            }
+            for nt in NeedType
+        }
+
+
+class PsiCore:
+    """PSI 認知核心 — 讓 Aris 擁有動態內在狀態的心臟。
+
+    使用方式:
+        bus = CognitiveBus(agent_name="Aris")
+        psi = PsiCore(bus=bus)
+        psi.start()
+        psi.process_input("使用者訊息")  # 每輪對話
+        psi.stop()
+    """
+
+    # 需求關鍵詞對應表 — 偵測使用者輸入中的需求信號
+    NEED_KEYWORDS: Dict[NeedType, List[str]] = {
+        NeedType.COMPETENCE: ["知道", "理解", "會了", "學到", "懂了", "完成", "做到",
+                              "成功", "解決", "厲害", "不錯", "很好", "進步"],
+        NeedType.AUTONOMY: ["自己", "自由", "選擇", "決定", "不想", "不要", "隨意",
+                            "隨便", "我來", "讓我"],
+        NeedType.RELATEDNESS: ["謝謝", "有你", "陪我", "一起", "朋友", "孤單",
+                               "孤獨", "寂寞", "懂我", "陪伴", "聊聊", "好想"],
+        NeedType.CERTAINTY: ["為什麼", "怎麼回事", "不懂", "不清楚", "確定",
+                             "保證", "真的嗎", "是嗎", "解釋", "說明"],
+        NeedType.GROWTH: ["想學", "新東西", "挑戰", "更深入", "繼續", "下一步",
+                          "升級", "進階", "拓展", "探索"],
+    }
+
+    def __init__(self, bus: CognitiveBus, interval: float = 1.0):
+        self.bus = bus
+        self.interval = interval
+        self.needs = NeedDriveSystem()
+        self.emotion = EmotionGradient()
+        self.attention_focus: AttentionFocus = AttentionFocus.IDLE
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+        self._tick_count = 0
+
+    # ── 生命週期 ──
+
+    def start(self) -> None:
+        """啟動背景心跳執行緒。"""
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self._thread.start()
+        logger.info(f"[PsiCore] 心跳啟動 (interval={self.interval}s)")
+
+    def stop(self) -> None:
+        self._running = False
+
+    # ── 核心方法 ──
+
+    def process_input(self, text: str) -> None:
+        """每次使用者輸入時呼叫：解析需求信號、更新狀態、發布事件。"""
+        text_lower = text.lower()
+
+        # 1. 從輸入中偵測需求信號
+        satisfaction = {}
+        for nt, keywords in self.NEED_KEYWORDS.items():
+            match_count = sum(1 for kw in keywords if kw in text_lower)
+            if match_count > 0:
+                amount = min(0.15, match_count * 0.03)
+                self.needs.satisfy(nt, amount)
+                satisfaction[nt.value] = amount
+                logger.debug(f"[PsiCore] {nt.value} +{amount:.2f} (匹配 {match_count} 關鍵詞)")
+
+        # 2. 對話本身提升 relatedness
+        self.needs.satisfy(NeedType.RELATEDNESS, 0.02)
+        if "relatedness" not in satisfaction:
+            satisfaction[NeedType.RELATEDNESS.value] = 0.02
+
+        # 3. 更新情緒梯度
+        self.emotion.update(self.needs.get_satisfactions())
+
+        # 4. 更新注意力焦點
+        dominant, _ = self.needs.get_dominant()
+        self._update_attention(dominant)
+
+        # 5. 發布認知事件
+        self._publish_cognitive_event(satisfaction)
+
+    def get_dominant_need(self) -> str:
+        nt, _ = self.needs.get_dominant()
+        return nt.value if nt else "none"
+
+    def get_state(self) -> dict:
+        nt, nd = self.needs.get_dominant()
+        return {
+            "needs": self.needs.to_dict(),
+            "dominant_need": nt.value if nt else "none",
+            "dominant_drive": round(nd, 3) if nd else 0.0,
+            "emotion": self.emotion.to_dict(),
+            "attention": self.attention_focus.name,
+            "tick": self._tick_count,
+        }
+
+    # ── 內部 ──
+
+    def _heartbeat(self) -> None:
+        """背景執行緒：定時衰減需求、更新情緒、同步到 CognitiveBus。"""
+        while self._running:
+            self._tick_count += 1
+            self.needs.tick(dt=self.interval)
+            self.emotion.update(self.needs.get_satisfactions())
+            dominant, _ = self.needs.get_dominant()
+            self._update_attention(dominant)
+            self._sync_bus_state()
+            time.sleep(self.interval)
+
+    def _update_attention(self, dominant: Optional[NeedType]) -> None:
+        """根據主導需求切換注意力焦點。"""
+        if dominant is None:
+            self.attention_focus = AttentionFocus.IDLE
+        elif dominant == NeedType.RELATEDNESS:
+            self.attention_focus = AttentionFocus.SOCIAL
+        elif dominant == NeedType.COMPETENCE:
+            self.attention_focus = AttentionFocus.TASK
+        elif dominant == NeedType.GROWTH:
+            self.attention_focus = AttentionFocus.LEARNING
+        elif dominant == NeedType.CERTAINTY:
+            self.attention_focus = AttentionFocus.PLANNING
+        else:
+            self.attention_focus = AttentionFocus.IDLE
+
+    def _publish_cognitive_event(self, satisfaction: Dict[str, float]) -> None:
+        """發布認知事件到總線（每輪對話觸發）。"""
+        self._sync_bus_state()
+        snap = self.bus.take_snapshot()
+        self.bus.publish(
+            CognitiveEventType.CONSCIOUS_FRAME,
+            "psi_core",
+            {"snapshot": snap.to_dict(), "satisfaction": satisfaction},
+        )
+        self.bus.publish(
+            CognitiveEventType.NEED_CHANGED,
+            "psi_core",
+            snap.needs.to_dict(),
+        )
+        self.bus.publish(
+            CognitiveEventType.EMOTION_CHANGED,
+            "psi_core",
+            snap.emotion.to_dict(),
+        )
+
+    def _sync_bus_state(self) -> None:
+        """將 PsiCore 的狀態同步到 CognitiveBus。"""
+        emo = self.emotion.to_dict()
+        valence_map = {
+            v: k for k, v in {
+                "POSITIVE_HIGH": 0.7, "POSITIVE_MILD": 0.3,
+                "NEUTRAL": 0.0, "NEGATIVE_MILD": -0.3, "NEGATIVE_HIGH": -0.7,
+                "CURIOUS": 0.4, "CONFUSED": -0.2,
+            }.items()
+        }
+        # 找最接近的 valence 枚舉
+        best = "NEUTRAL"
+        best_d = 1.0
+        for name, val in {"POSITIVE_HIGH": 0.7, "POSITIVE_MILD": 0.3,
+                          "NEUTRAL": 0.0, "NEGATIVE_MILD": -0.3,
+                          "NEGATIVE_HIGH": -0.7, "CURIOUS": 0.4,
+                          "CONFUSED": -0.2}.items():
+            d = abs(emo["valence"] - val)
+            if d < best_d:
+                best_d = d
+                best = name
+
+        self.bus.needs = NeedState(
+            competence=self.needs.values[NeedType.COMPETENCE],
+            autonomy=self.needs.values[NeedType.AUTONOMY],
+            relatedness=self.needs.values[NeedType.RELATEDNESS],
+            certainty=self.needs.values[NeedType.CERTAINTY],
+            growth=self.needs.values[NeedType.GROWTH],
+        )
+        self.bus.emotion = EmotionState(
+            valence=EmotionalValence[best],
+            arousal=emo["arousal"],
+            dominance=emo["dominance"],
+        )
+        self.bus.attention = AttentionState(
+            focus=self.attention_focus,
+            intensity=emo["arousal"],
+        )
+        self.bus.self_presence = emo["valence"] * 0.5 + 0.5
+        self.bus.curiosity = 1.0 - self.needs.values[NeedType.CERTAINTY]
+
+    def __repr__(self) -> str:
+        dom, dr = self.needs.get_dominant()
+        return (f"<PsiCore dominant={dom.value if dom else '?'} "
+                f"drive={dr:.2f} valence={self.emotion.valence:+.2f}>")
