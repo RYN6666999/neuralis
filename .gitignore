@@ -1,0 +1,30 @@
+# neuralis — 只追蹤我們自己的程式碼
+# 不追蹤任何來自 laap-AGI original repo 的檔案
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Environment
+.venv/
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
