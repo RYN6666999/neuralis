@@ -25,6 +25,8 @@ class CognitiveEventType(Enum):
     NEED_CHANGED = auto()
     EMOTION_CHANGED = auto()
     ATTENTION_SHIFTED = auto()
+    ACTION_REQUEST = auto()   # 工具執行請求 (PSI Core → Tool Executor)
+    ACTION_RESULT = auto()    # 工具執行結果 (Tool Executor → CognitiveBus)
 
 
 class EmotionalValence(Enum):
