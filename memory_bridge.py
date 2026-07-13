@@ -1,30 +1,42 @@
 """
-memory_bridge — top-level stub for laap-AGI's bare import
+memory_bridge — top-level module for laap-AGI's bare import.
 
 aris_cognitive_bridge.py does:
     from memory_bridge import get_memory_context, recall_related, store_important
 
-This module provides those functions as stubs.
+作者的實際呼叫方式（實測）:
+    recall_related(user_message: str, top_k=2)        -> 物件序列，取 r.content
+    get_memory_context(max_core=3, max_recent=3, max_working=2) -> str/序列
+    store_important(content, tags, importance)         -> id
+
+三個函式共用 memory_store 的單例，讓「存進去 → 之後召回」在同一 process 內真的成立。
 """
 import logging
-from typing import Any, List
+from typing import List, Union
+
+from memory_store import MemoryStore, MemoryFragment
 
 logger = logging.getLogger("memory_bridge")
 
-
-def get_memory_context(query: str, limit: int = 5) -> List[dict]:
-    """獲取與查詢相關的記憶上下文"""
-    logger.debug(f"[memory_bridge] get_memory_context stub: query={query[:40]}")
-    return []
+# 共用單例：store_important 寫進去的東西，recall_related / get_memory_context 讀得到
+_STORE = MemoryStore(capacity=1000)
 
 
-def recall_related(tags: List[str], top_k: int = 5) -> List[dict]:
-    """回憶相關記憶片段"""
-    logger.debug(f"[memory_bridge] recall_related stub: tags={tags}")
-    return []
+def store_important(content: str, tags: Union[List[str], None] = None, importance: float = 0.5) -> str:
+    frag = MemoryFragment(content=content, tags=list(tags or []), importance=importance)
+    mem_id = _STORE.store(frag)
+    logger.debug(f"[memory_bridge] store_important -> {mem_id}")
+    return mem_id
 
 
-def store_important(content: str, tags: List[str], importance: float = 0.5) -> str:
-    """儲存重要記憶"""
-    logger.debug(f"[memory_bridge] store_important stub: content={content[:40]}")
-    return "stub_memory_id"
+def recall_related(query: str, top_k: int = 5) -> List[MemoryFragment]:
+    """作者做 r.content[:50]，故回傳有 .content 的 MemoryFragment 序列。"""
+    return _STORE.recall(query=query, top_k=top_k)
+
+
+def get_memory_context(max_core: int = 3, max_recent: int = 3, max_working: int = 2) -> str:
+    """作者以 max_core/max_recent/max_working kwargs 呼叫；回傳可拼進 prompt 的字串。"""
+    core = _STORE.recall(top_k=max_core, layer="core")
+    recent = _STORE.recall(top_k=max_recent, layer="episodic")
+    parts = [f"[核心] {m.content}" for m in core] + [f"[近期] {m.content}" for m in recent]
+    return "\n".join(parts)

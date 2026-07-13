@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "laap-brain": {
+      "transport": "stdio",
+      "command": "/ABS/PATH/laapenv/bin/python",
+      "args": ["/ABS/PATH/laap-AGI/mcp_server/laap_mcp_server.py"],
+      "env": {
+        "LAAP_API_BASE": "http://localhost:11546",
+        "PYTHONPATH": "/ABS/PATH/neuralis:/ABS/PATH/laap-AGI"
+      }
+    }
+  }
+}
