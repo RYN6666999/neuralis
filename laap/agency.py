@@ -392,9 +392,12 @@ class AgencyLoop:
                 used_angle = a
                 break
         if used_angle:
+            from laap.constitution import get_constitution
             aw = stats["angle_weights"]
             old = aw.get(used_angle, 1.0)
-            aw[used_angle] = max(0.1, min(3.0, old + rpe * 0.5))
+            # 憲法：權重變速上限 + 小時預算凍結（防 gbrain 分數線異常時垃圾訊號永久累積）
+            allowed = get_constitution().guard_weight(need, used_angle, rpe * 0.5)
+            aw[used_angle] = max(0.1, min(3.0, old + allowed))
 
         # ── 探索率自適應 ──
         if len(self._rpe_buffer) >= 5:
@@ -413,7 +416,7 @@ class AgencyLoop:
                 mem_id = memory_bridge.store_important(
                     f"[自主行動:{need}] 查詢「{prompt}」→\n{result[:500]}",
                     tags=["agency", need], importance=importance)
-                self.psi.needs.satisfy_all({self._need_type(need): 0.2})
+                self.psi.needs.satisfy_all({self._need_type(need): 0.2}, source="agency")
                 self._seed_snippet = self._extract_seed(result)
             except Exception as e:
                 logger.warning(f"[Agency] 回寫失敗: {e}")

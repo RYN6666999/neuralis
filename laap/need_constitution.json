@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "description": "neuralis 需求憲法 — 需求值與 RPE 權重的不可變邊界、變化速率、來源預算。概念採自 lorryjovens-hub/laap-AGI aris_brain/psi_jspace_bridge/governor/need_constitution.json (Apache 2.0, by Lorry)，數值依 neuralis 動力學重調。",
+  "needs": {
+    "competence":  { "range": [0.05, 0.95], "max_delta_per_call": 0.15, "budget_per_hour": { "user": 0.6, "agency": 0.5 } },
+    "autonomy":    { "range": [0.10, 0.90], "max_delta_per_call": 0.12, "budget_per_hour": { "user": 0.5, "agency": 0.5 } },
+    "relatedness": { "range": [0.05, 0.95], "max_delta_per_call": 0.20, "budget_per_hour": { "user": 0.8, "agency": 0.4 } },
+    "certainty":   { "range": [0.05, 0.95], "max_delta_per_call": 0.12, "budget_per_hour": { "user": 0.6, "agency": 0.5 } },
+    "growth":      { "range": [0.05, 0.95], "max_delta_per_call": 0.12, "budget_per_hour": { "user": 0.6, "agency": 0.5 } }
+  },
+  "weights": {
+    "max_delta_per_update": 0.30,
+    "budget_per_hour_per_need": 1.2,
+    "note": "RPE 角度權重的變速上限。超預算 = 凍結（delta 歸零 + 審計），視窗滾動後自動解凍。防 gbrain 分數線異常時垃圾訊號被永久累積。"
+  }
+}

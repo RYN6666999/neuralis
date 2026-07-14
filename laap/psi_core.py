@@ -168,16 +168,22 @@ class NeedDriveSystem:
                 self.values[nt] = max(0.0, min(1.0, self.values[nt] + relax + noise))
             return dict(self.values)
 
-    def satisfy(self, need_type: NeedType, amount: float) -> None:
-        """滿足特定需求。"""
+    def satisfy(self, need_type: NeedType, amount: float, source: str = "user") -> None:
+        """滿足特定需求。amount 先過需求憲法（邊界/單次上限/來源小時預算）。"""
+        from laap.constitution import get_constitution
         with self._lock:
-            self.values[need_type] = min(1.0, self.values[need_type] + amount)
+            allowed = get_constitution().guard_need(
+                need_type.value, self.values[need_type], amount, source)
+            self.values[need_type] = max(0.0, min(1.0, self.values[need_type] + allowed))
 
-    def satisfy_all(self, amounts: Dict[NeedType, float]) -> None:
-        """批次滿足多個需求。"""
+    def satisfy_all(self, amounts: Dict[NeedType, float], source: str = "user") -> None:
+        """批次滿足多個需求（逐項過憲法）。"""
+        from laap.constitution import get_constitution
+        cons = get_constitution()
         with self._lock:
             for nt, amount in amounts.items():
-                self.values[nt] = min(1.0, self.values[nt] + amount)
+                allowed = cons.guard_need(nt.value, self.values[nt], amount, source)
+                self.values[nt] = max(0.0, min(1.0, self.values[nt] + allowed))
 
     def get_dominant(self) -> Tuple[Optional[NeedType], float]:
         """回傳 (最高需求, drive 值)。"""
