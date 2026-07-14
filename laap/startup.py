@@ -10,11 +10,36 @@ neuralis startup: 全部啟動器 (延遲初始化)
     bus, psi, tools = startup_all()
 """
 import logging
+import os
+import shutil
+from pathlib import Path
+
 logger = logging.getLogger("laap.startup")
 
 _psi_core = None
 _tool_executor = None
 _bus = None
+
+_PSI_DEF_NAMES = ("core_identity.psi", "core_psi.psi", "core_language.psi")
+
+
+def ensure_psi_defs() -> None:
+    """agi_kernel 的 PsiLangCore 需要三個 .psi 核心定義檔（作者端缺失，一缺整組失敗）。
+    缺哪個就從 laap/psi_defs/ 補上「標示為 bootstrap 佔位」的最小版 — 只補結構，
+    不替作者定義人格內容。作者已有的檔一律不碰。"""
+    laap_dir = os.environ.get("LAAP_AGI_DIR", str(Path(__file__).resolve().parents[2] / "laap-AGI"))
+    brain = Path(laap_dir) / "aris_brain"
+    if not brain.is_dir():
+        return
+    src_dir = Path(__file__).resolve().parent / "psi_defs"
+    for name in _PSI_DEF_NAMES:
+        dst = brain / name
+        if not dst.exists():
+            try:
+                shutil.copyfile(src_dir / name, dst)
+                logger.info(f"[startup] 補 bootstrap 佔位: {dst.name}")
+            except Exception as e:
+                logger.warning(f"[startup] 無法補 {name}: {e}")
 
 
 def ensure_psi_core():
@@ -69,6 +94,7 @@ def ensure_tools():
 
 def startup_all():
     """一次啟動所有系統。"""
+    ensure_psi_defs()
     ensure_psi_core()
     ensure_tools()
     return _bus, _psi_core, _tool_executor

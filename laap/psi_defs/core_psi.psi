@@ -1,0 +1,4 @@
+# neuralis bootstrap 佔位 — 作者的正式 core_psi.psi 缺失時的最小可載入版。
+qstate needs = |drive⟩ * 0.5
+concept psi_needs { valence: 0.0, tags: ["bootstrap", "placeholder"] }
+cycle regulate { perceive |needs⟩ * 0.3 }

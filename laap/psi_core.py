@@ -103,6 +103,10 @@ class NeedDriveSystem:
             NeedType.RELATEDNESS: 0.010,
             NeedType.GROWTH: 0.006,
         }
+        # 靜息值：daemon 模式下閒置時需求「鬆弛回這裡」而不是掉到 0。
+        # 舊行為（衰減向 0）會讓常駐 process 閒置 2-3 分鐘後全需求見底、效價 -1
+        # （「醒來就憂鬱」）。互動仍會推高需求，離開後緩慢回落到靜息狀態。
+        self.baselines: Dict[NeedType, float] = dict(self.values)
         self.importances: Dict[NeedType, float] = {
             NeedType.CERTAINTY: 1.2,
             NeedType.COMPETENCE: 1.5,
@@ -110,20 +114,23 @@ class NeedDriveSystem:
             NeedType.RELATEDNESS: 0.8,
             NeedType.GROWTH: 1.3,
         }
+        # 雜訊 σ 要配合鬆弛速度（OU 過程穩態漂移 ≈ σ/√(2·rate)）：
+        # 舊值 0.04-0.06 對 rate~0.008 會漂 ±0.4，狀態變隨機漫步。
+        # 這組給 ±0.03-0.05 的自然波動，互動造成的需求變化仍清晰可辨。
         self.volatilities: Dict[NeedType, float] = {
-            NeedType.CERTAINTY: 0.04,
-            NeedType.COMPETENCE: 0.06,
-            NeedType.AUTONOMY: 0.03,
-            NeedType.RELATEDNESS: 0.05,
-            NeedType.GROWTH: 0.04,
+            NeedType.CERTAINTY: 0.004,
+            NeedType.COMPETENCE: 0.006,
+            NeedType.AUTONOMY: 0.003,
+            NeedType.RELATEDNESS: 0.005,
+            NeedType.GROWTH: 0.004,
         }
 
     def tick(self, dt: float = 1.0) -> Dict[NeedType, float]:
-        """每秒衰減 + 雜訊。"""
+        """每秒向靜息值鬆弛 + 雜訊。"""
         for nt in NeedType:
-            decay = self.decay_rates[nt] * dt
+            relax = (self.baselines[nt] - self.values[nt]) * self.decay_rates[nt] * dt
             noise = random.gauss(0, self.volatilities[nt] * dt)
-            self.values[nt] = max(0.0, min(1.0, self.values[nt] - decay + noise))
+            self.values[nt] = max(0.0, min(1.0, self.values[nt] + relax + noise))
         return dict(self.values)
 
     def satisfy(self, need_type: NeedType, amount: float) -> None:

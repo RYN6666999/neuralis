@@ -31,7 +31,21 @@ def store_important(content: str, tags: Union[List[str], None] = None, importanc
 
 def recall_related(query: str, top_k: int = 5) -> List[MemoryFragment]:
     """作者做 r.content[:50]，故回傳有 .content 的 MemoryFragment 序列。"""
+    _feed_psi(query)
     return _STORE.recall(query=query, top_k=top_k)
+
+
+def _feed_psi(user_message: str) -> None:
+    """把使用者輸入餵進 PsiCore 需求偵測。作者的 _perceive 每輪呼叫 recall_related，
+    這裡是 overlay 能掛到「每輪對話」的最近點。PsiCore 沒起（get 回 None）就 no-op —
+    絕不因心臟缺席擋記憶召回。"""
+    try:
+        from laap.startup import get_psi_core
+        psi = get_psi_core()
+        if psi is not None:
+            psi.process_input(user_message)
+    except Exception as e:
+        logger.debug(f"[memory_bridge] psi feed 跳過: {e}")
 
 
 def get_memory_context(max_core: int = 3, max_recent: int = 3, max_working: int = 2) -> str:

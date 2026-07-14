@@ -1,0 +1,5 @@
+# neuralis bootstrap 佔位 — 作者的正式 core_identity.psi 缺失時的最小可載入版。
+# 只提供結構讓 AGIKernel 的 PsiLangCore 能初始化，不替作者定義人格內容。
+qstate self = |identity⟩ * 0.5
+concept identity { valence: 0.0, tags: ["bootstrap", "placeholder"] }
+cycle awaken { perceive |self⟩ * 0.3 }
