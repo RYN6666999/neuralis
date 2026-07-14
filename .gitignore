@@ -31,3 +31,5 @@ logs/
 agency-audit.jsonl
 consolidation-audit.jsonl
 safety-audit.jsonl
+approved-tools.txt
+approvals-pending.jsonl

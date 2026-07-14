@@ -64,10 +64,9 @@ Python 版 PsiCore 已運作，五維需求 + 情緒梯度 + 背景心跳。
 - DENY 全審計（safety-audit.jsonl）；自檢 `scripts/check-safety.py` 四段
 - 未做（升級路徑）：沙箱隔離、互動式批准閘門 — 開放寫入類工具前必補
 
-### Phase 4b — 工具深度整合 🥈
-- 接 PyPI laap 的 21 工具層
-- 接 Obscura 瀏覽器眼睛
-- 接 Web 搜尋
+### Phase 4b — 批准閘 + 工具深度整合（🔄 進行中）
+- ✅ 檔案式人工批准閘（`approve-tool.sh` + `approved-tools.txt` 待批清單，免重啟生效）
+- 未做：沙箱隔離、接 Obscura 瀏覽器眼睛、接 Web 搜尋、PyPI laap 21 工具層
 
 ### Phase 4c — RSI 自我改進 🥉
 - RSIEngine maker/checker/repair 只在沙箱內執行

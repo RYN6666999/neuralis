@@ -24,7 +24,10 @@ from typing import List, Tuple
 logger = logging.getLogger("laap.safety_gate")
 
 READONLY_SAFE = frozenset({"gbrain", "qmd", "file-search"})
-AUDIT_PATH = Path(__file__).resolve().parents[1] / "safety-audit.jsonl"
+_ROOT = Path(__file__).resolve().parents[1]
+AUDIT_PATH = _ROOT / "safety-audit.jsonl"
+APPROVED_PATH = _ROOT / "approved-tools.txt"      # 一行一工具，人工簽名（4b 批准閘）
+PENDING_PATH = _ROOT / "approvals-pending.jsonl"  # 被拒工具排隊等人批
 
 # AgentOS 不可用時的內建縮小版（與 orchestrator/safety.py 同源精神）
 _FALLBACK_PATTERNS = [
@@ -52,15 +55,38 @@ def _agentos_check(text: str) -> Tuple[bool, List[str]]:
         return bool(matched), matched
 
 
+def _file_approved() -> frozenset:
+    """approved-tools.txt：一行一工具，# 開頭是註解。每次讀（免重啟生效，檔案小）。"""
+    try:
+        lines = APPROVED_PATH.read_text(encoding="utf-8").splitlines()
+        return frozenset(l.strip() for l in lines if l.strip() and not l.startswith("#"))
+    except FileNotFoundError:
+        return frozenset()
+
+
 def _allowed_tools() -> frozenset:
     extra = os.environ.get("NEURALIS_TOOL_ALLOW", "")
-    return READONLY_SAFE | {t.strip() for t in extra.split(",") if t.strip()}
+    return READONLY_SAFE | {t.strip() for t in extra.split(",") if t.strip()} | _file_approved()
+
+
+def _queue_pending(tool: str, prompt: str) -> None:
+    """被拒的工具排進待批清單（同工具只排一次），人用 scripts/approve-tool.sh 批。"""
+    try:
+        if PENDING_PATH.exists() and f'"tool": "{tool}"' in PENDING_PATH.read_text(encoding="utf-8"):
+            return
+        with PENDING_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": time.time(), "tool": tool,
+                                "first_prompt": prompt[:120]}, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning(f"[SafetyGate] 待批清單寫入失敗: {e}")
 
 
 def check(tool: str, prompt: str) -> Tuple[bool, str]:
     """回 (allowed, reason)。reason 只在拒絕時有內容。"""
     if tool not in _allowed_tools():
-        reason = f"工具 {tool} 未批准（唯讀組以外需列入 NEURALIS_TOOL_ALLOW）"
+        _queue_pending(tool, prompt)
+        reason = (f"工具 {tool} 未批准 — 已排入待批清單，"
+                  f"批准: scripts/approve-tool.sh {tool}")
         _audit(tool, prompt, reason)
         return False, reason
     blocked, matches = _agentos_check(prompt)

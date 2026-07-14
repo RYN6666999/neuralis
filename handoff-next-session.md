@@ -100,8 +100,16 @@ recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming 
 `NEURALIS_TOOL_ALLOW` 簽名才過、prompt 過 AgentOS check_command（fallback 內建規則）、
 DENY 全審計。自檢 `scripts/check-safety.py`（危險內容/未批准工具/env 批准/乾淨放行 4 段）。
 
-## 下一線頭 = Phase 4b/4c 或推理層 benchmark
-- 4b：互動式批准閘門 + 沙箱（開放寫入類工具前必補）、工具深化（Obscura/web）
+## Phase 4b 批准閘 v0 已完成（2026-07-14）
+`laap/safety_gate.py` + `scripts/approve-tool.sh`：未批准工具被拒時排入
+`approvals-pending.jsonl` 待批清單；`approve-tool.sh <tool>` 寫 `approved-tools.txt`
+即時生效（免重啟）、`-r` 撤銷。批准只放行工具分級，內容掃描（危險指令）永遠獨立照跑。
+自檢 `scripts/check-approval.py`（排隊/批准生效/內容掃描不繞過/撤銷 4 段）。
+踩坑：非 UTF-8 locale 下 `$VAR` 緊接全形字會被吞進變數名（`set -u` 報 unbound）→
+腳本自設 LC_ALL + `${VAR}` 界定；grep -v 全刪光回 exit 1 不能進 && 鏈。
+
+## 下一線頭 = Phase 4b 剩餘 / 4c / 推理 benchmark
+- 4b 剩：沙箱隔離（寫入類工具真隔離執行）、工具深化（Obscura 眼睛 / web-search 接真）
 - 4c：RSI 只在沙箱 + 人工批准（外部審查紅線，順序不可逆）
 - 或先做 Phase 3 的 20 題推理 benchmark（gate：沒贏過 gbrain 檢索+LLM 不投）
 
