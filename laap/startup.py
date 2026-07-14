@@ -139,6 +139,25 @@ def ensure_consolidation():
     return _consolidation
 
 
+_status_writer = None
+
+
+def ensure_status():
+    """產品向可觀測層：定期寫 status.json。NEURALIS_STATUS=off 可關。"""
+    global _status_writer
+    if _status_writer is not None:
+        return _status_writer
+    if os.environ.get("NEURALIS_STATUS", "on").lower() in ("off", "0", "false"):
+        return None
+    try:
+        from laap.status import StatusWriter
+        _status_writer = StatusWriter()
+        _status_writer.start()
+    except Exception as e:
+        logger.warning(f"StatusWriter 啟動失敗: {e}")
+    return _status_writer
+
+
 def startup_all():
     """一次啟動所有系統。"""
     ensure_psi_defs()
@@ -146,6 +165,7 @@ def startup_all():
     ensure_tools()
     ensure_agency()
     ensure_consolidation()
+    ensure_status()
     return _bus, _psi_core, _tool_executor
 
 
