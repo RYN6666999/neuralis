@@ -1,6 +1,6 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 | 最新: 7/24 自啟動（launchd → watchdog → 完整 Aris）
+> 最後更新: 2026-07-14 | 最新: psi-respond — 情緒真的影響回應（實測 delta 進句子）
 > 當前 Phase: 產品向 — 心跳/記憶/自主/睡眠/煞車/對話流/韌性/**7/24** 全上線
 
 ## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
@@ -176,10 +176,28 @@ overlay），5 個 defect 在真系統全部已解。已改寫該檔為指路牌
 獨有內容已救回：`docs/research/what-lives-brainstorm.md`（六帽分析）。staged 的
 tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLoop 實作），未救。
 
+### ✅ 情緒真的影響回應了（2026-07-14）— 舊限制「需求不影響回應」已解
+改動只在 `laap/chatflow.py`（+新自檢），兩個縫一次縫上：
+1. **圓作者的檔案契約**：作者整個 aris_brain 都讀 `state/latest.json`（Rust psi core
+   本該每 100ms 寫，但 Rust 版缺失 → 檔案從未存在 → process_with_laap Step 3 的
+   psi_context 永遠空、fallback 回應結尾才會是懸空的「through .」）。現在 chatflow
+   在每次 chat 餵 psi 後寫入（chat 時間點最新鮮），schema 取讀端聯集。
+2. **psi-respond**：作者管線落到 canned fallback 時，改用真實狀態組回應 —
+   `_feed` 現在量測「這句話造成的實際 delta」（餵前後 state diff），回應報出
+   實測數字：「你這句話碰到了我 — relatedness +0.14…現在主導我的是 competence…」。
+   每個數字可回溯，不演。`NEURALIS_PSI_RESPOND=off` 可關。
+   ponytail 註記：v0 規則表組句不是認知；升級路徑 = LAAP 管線接上真 LLM 後，
+   把 st/delta 塞 system prompt 走 LLM。
+- 實跑：`scripts/check-psi-response.py` 5 段全過 — E2E 情感句 relatedness +0.14 vs
+  中性句 +0.02，回應內容隨狀態不同；作者契約檔 cycle 隨 chat 遞增（7→49）。
+  check-chatflow 回歸過（feed/executor 卸載/逾時降級）。
+
 ### 下一線頭（產品向，擇一）
 - **有價值產出**：Aris 目前自主行動只是「查了寫回記憶」，沒有對使用者的產出面。
   7/24 跑起來之後這是最大缺口 — 跑整晚該留下什麼給 Ryan 早上看？（morning brief？
   記憶整理報告？）這條最貼近「做了點不一樣的東西」的感覺。
+- psi-respond 接記憶聯想：回應目前只有狀態，把 memory_bridge.recall_related 的
+  top hit 織進句子（注意 recall ~1s 同步阻塞，要走 executor）
 - consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
 - injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
 - 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走

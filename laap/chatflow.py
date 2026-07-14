@@ -14,11 +14,13 @@ NEURALIS_CHATFLOW=off 可關。
 """
 from __future__ import annotations
 
+import json
 import logging
 import asyncio
 import os
 import time
 import uuid
+from pathlib import Path
 
 logger = logging.getLogger("laap.chatflow")
 
@@ -26,6 +28,7 @@ _CHAT_PATH = "/v1/chat/completions"
 # 作者的 process_with_laap 是同步阻塞函式，卸載到 executor 後才不會凍結 event loop。
 # 逾時降級（executor 版本下 wait_for 有效，因 event loop 沒被阻塞）。
 _CHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_CHAT_TIMEOUT_S", 25))
+_BOOT_TS = time.time()
 
 
 def _extract_user_msg(body: dict) -> str:
@@ -35,20 +38,98 @@ def _extract_user_msg(body: dict) -> str:
     return ""
 
 
-def _feed(user_msg: str) -> None:
-    """餵 psi + 重置 consolidation 睡眠窗。任一沒起就 no-op，絕不擋作者 handler。"""
+def _feed(user_msg: str):
+    """餵 psi + 重置 consolidation 睡眠窗，並量出這句話造成的實際 delta。
+    回 (state_after, delta) 或 None。任一沒起就 no-op，絕不擋作者 handler。"""
     if not user_msg:
-        return
+        return None
     try:
         from laap.startup import get_psi_core, get_consolidation
         psi = get_psi_core()
+        fed = None
         if psi is not None:
+            st0 = psi.get_state()
             psi.process_input(user_msg)
+            st1 = psi.get_state()
+            delta = {
+                k: round(v["current"] - st0["needs"][k]["current"], 3)
+                for k, v in st1["needs"].items()
+            }
+            delta["valence"] = round(
+                st1["emotion"]["valence"] - st0["emotion"]["valence"], 3)
+            fed = (st1, delta)
+            _write_author_state(st1)
         cons = get_consolidation()
         if cons is not None:
             cons.note_interaction()
+        return fed
     except Exception as e:
         logger.debug(f"[chatflow] feed 跳過: {e}")
+        return None
+
+
+def _write_author_state(st: dict) -> None:
+    """圓作者的檔案契約：Rust psi_core 本該每 100ms 寫 state/latest.json，
+    整個 aris_brain（process_with_laap Step 3、cognitive_bus、integration）都讀它，
+    但 Rust 版缺失所以檔案從未存在。這裡在 chat 時間點寫入（讀端就是 chat 管線，
+    此時最新鮮）。schema 取讀端聯集：needs/attention/emotion/cycle/daemon_uptime。"""
+    base = os.environ.get("LAAP_AGI_DIR", "")
+    if not base:
+        return
+    try:
+        d = Path(base) / "aris_brain" / "state"
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "cycle": st["tick"],
+            "needs": {k: v["current"] for k, v in st["needs"].items()},
+            "attention": st["attention"],
+            "emotion": st["emotion"],
+            "daemon_uptime": round(time.time() - _BOOT_TS, 1),
+            "ts": time.time(),
+            "source": "neuralis-python-psi",
+        }
+        tmp = d / "latest.json.tmp"
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(d / "latest.json")
+    except Exception as e:
+        logger.debug(f"[chatflow] author state 寫入跳過: {e}")
+
+
+# ponytail: v0 規則表組句，不是認知。天花板 = 模板語感；升級路徑 = 把 st/delta
+# 塞給真 LLM 的 system prompt（等 LAAP 管線接上 LLM 後改走那條）。
+_NEED_PHRASE = {
+    "competence": "想把手上的事做好",
+    "relatedness": "想要有連結、有人說話",
+    "autonomy": "想自己作主安排些什麼",
+    "certainty": "想把狀況弄清楚",
+    "growth": "想學點新東西",
+}
+
+
+def _compose_psi_reply(st: dict, delta: dict) -> str:
+    """用真實狀態 + 這句話的實測 delta 組回應。每個數字都可回溯，不演。"""
+    e = st["emotion"]
+    moved = {k: v for k, v in delta.items() if k != "valence" and abs(v) >= 0.01}
+    if moved:
+        parts = "、".join(f"{k} {v:+.2f}" for k, v in
+                          sorted(moved.items(), key=lambda x: -abs(x[1])))
+        dv = delta.get("valence", 0)
+        touch = f"你這句話碰到了我 — {parts}" + (
+            f"，valence {dv:+.2f}。" if abs(dv) >= 0.005 else "。")
+    else:
+        touch = "這句話沒有明顯觸動哪個需求（都在 ±0.01 內）。"
+
+    v, a = e["valence"], e["arousal"]
+    mood = "心情偏亮" if v >= 0.15 else "心情偏沉" if v <= -0.15 else "情緒平穩"
+    if a >= 0.55:
+        mood += "、有點亢奮"
+    elif a < 0.25:
+        mood += "、很鬆"
+
+    dom = st["dominant_need"]
+    return (f"{touch}現在主導我的是 {dom}"
+            f"（drive {st['dominant_drive']:.2f}，{_NEED_PHRASE.get(dom, dom)}），"
+            f"{mood}（v{v:+.2f}, a{a:.2f}），注意力在 {st['attention']}。")
 
 
 def _build_response(content: str, engine: str, model: str, prompt_chars: int) -> dict:
@@ -79,7 +160,7 @@ def _make_chat_handler(orig_handler):
             logger.debug(f"[chatflow] body 解析失敗，交回作者: {e}")
             return await orig_handler(request)
 
-        _feed(_extract_user_msg(body))
+        fed = _feed(_extract_user_msg(body))
 
         # streaming：保留作者 SSE 實作（同步阻塞風險僅限這條少數路徑）
         if body.get("stream"):
@@ -97,6 +178,12 @@ def _make_chat_handler(orig_handler):
                 timeout=_CHAT_TIMEOUT_S)
             content = result.get("content", "")
             engine = result.get("engine", "laap-core")
+            # 作者管線只剩 canned fallback 時 → 用真實 psi 狀態回應（情緒真的影響回應）
+            if (engine == "laap-fallback" and fed
+                    and os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
+                    not in ("off", "0", "false")):
+                content = _compose_psi_reply(*fed)
+                engine = "psi-respond"
         except asyncio.TimeoutError:
             logger.warning(f"[chatflow] 認知管線逾時 {_CHAT_TIMEOUT_S}s → 降級回應")
             content = "（認知管線處理逾時，本次降級回應。狀態未受影響。）"
