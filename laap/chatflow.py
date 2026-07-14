@@ -195,6 +195,15 @@ def _make_chat_handler(orig_handler):
 
         fed = _feed(_extract_user_msg(body))
 
+        # 催產素：每次對話提升信任權重
+        try:
+            from laap.startup import get_agency
+            ag = get_agency()
+            if ag is not None:
+                ag.note_interaction()
+        except Exception:
+            pass
+
         # streaming：保留作者 SSE 實作（同步阻塞風險僅限這條少數路徑）
         if body.get("stream"):
             return await orig_handler(request)

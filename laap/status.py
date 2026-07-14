@@ -59,6 +59,7 @@ def snapshot() -> dict:
                 n: {"expected": round(s["expected"], 3), "angle_weights": s.get("angle_weights", {})}
                 for n, s in getattr(agency, "_need_stats", {}).items()
             },
+            "trust": dict(getattr(agency, "_trust_scores", {})),
         }
 
     cons = get_consolidation()

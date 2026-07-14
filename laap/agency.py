@@ -48,6 +48,10 @@ class AgencyLoop:
     v0.1 — RPE（Reward Prediction Error）：
     行動後量結果 vs 預期（檢索命中率/分數），誤差回頭調規則表權重 +
     drive 閾值/探索率。靜態規則表變會學的 bandit（誠實標註不是認知）。
+
+    v0.2 — 神經調節物質：
+    腎上腺素：arousal 縮短 agency interval。
+    催產素：per-entity trust 權重，熟人 relatedness 增益更大。
     """
 
     def __init__(self, psi, tools, bus=None,
@@ -76,6 +80,9 @@ class AgencyLoop:
         self._exploration_rate = 0.15              # 探索非最優角度的機率
         self._rpe_total = 0.0                      # 累計 RPE（儀表用）
         self._rpe_count = 0
+        # ── 催產素：信任權重 ──
+        self._trust_scores: dict = {"user": 0.3}   # entity → trust 0-1
+        self._trust_decay_rate = 0.0005             # 每次評估衰減量
 
     # ── 生命週期 ──
 
@@ -126,7 +133,15 @@ class AgencyLoop:
         if len(self._action_ts) >= self.max_per_hour:
             return  # rate cap
 
+        # 催產素：信任衰減
+        for entity in self._trust_scores:
+            self._trust_scores[entity] = max(0.0, self._trust_scores[entity] - self._trust_decay_rate)
+
         drives = self.psi.needs.get_drives()
+        # 催產素：信任權重 → relatedness 增益（最高 +50%）
+        trust = self._trust_scores.get("user", 0.0)
+        drives["relatedness"] = drives.get("relatedness", 0.0) * (1.0 + trust * 0.5)
+
         # 依 drive 高→低找第一個「超閾值 + 不在 cooldown + 規則表有招」的需求
         for need, drive in sorted(drives.items(), key=lambda kv: kv[1], reverse=True):
             if drive < self.drive_threshold:
@@ -139,6 +154,14 @@ class AgencyLoop:
             tool, prompt = intent
             self._act(need, drive, tool, prompt)
             return  # 每次評估最多一個行動
+
+    def note_interaction(self, entity: str = "user") -> None:
+        """催產素：每次使用者互動提升信任權重（從 chatflow 呼叫）。
+
+        trust 上升快（+0.03/次），下降慢（decay 0.0005/評估週期）。
+        """
+        old = self._trust_scores.get(entity, 0.0)
+        self._trust_scores[entity] = min(1.0, old + 0.03)
 
     # ── 意圖形成（v1 = 規則表 + 種子優先序 + 去重，仍不是認知） ──
     # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
