@@ -130,9 +130,16 @@ Phase 3 psilang 是研究向。產品向沿「可見 → 有價值產出 → 韌
 ⚠️ 踩到：作者的 chat 管線很重、曾一次 HTTP 000 崩整個 process（無 traceback，疑似卡死/OOM）—
 psi 餵食獨立於它是刻意設計。
 
+### ✅ chat 管線凍結 event loop 隱患已修（commit `9b904a3`）
+根因：作者 handler 裡 `result = process_with_laap(...)` 同步阻塞跑在 async handler，
+慢輸入凍結整個 event loop（連 health 都不回）。修：chatflow 把非 streaming 的
+process_with_laap 卸載到 executor + timeout 降級。實測 2 個 1.5s 慢 chat 併發僅 1.51s
+（非 3s 序列化）；真 API 3 chat 併發 + health 全 200。⚠️ 那次 HTTP 000 崩潰的確切根因
+（OOM vs 假死）未穩定復現；此修解 event loop 阻塞隱患。
+
 ### 下一線頭（產品向，擇一）
-- **作者 chat 管線穩定性**：偶發卡死崩 process（見上）。若要常駐生產用，得查 process_with_laap
-  → bridge.process 為何慢/卡（可能某引擎無限迴圈）。但這碰作者碼，overlay 難修 → 或加 watchdog 自動重啟
+- **watchdog 自動重啟**：防真 OOM 崩潰（event loop 阻塞已修，但真崩潰仍需韌性層）。
+  獨立監控 health，連續 N 次失敗 → kill 殘進程 + 重跑 start-laap-api.sh。生產標準。
 - consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
 - injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
 - 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走
