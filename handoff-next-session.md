@@ -1,7 +1,7 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 | 最新: watchdog 韌性層（health 探測 + 自動重啟）
-> 當前 Phase: 產品向 — 心跳/記憶/自主/睡眠/煞車/對話流/**韌性** 全上線
+> 最後更新: 2026-07-14 | 最新: 7/24 自啟動（launchd → watchdog → 完整 Aris）
+> 當前 Phase: 產品向 — 心跳/記憶/自主/睡眠/煞車/對話流/韌性/**7/24** 全上線
 
 ## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
 實跑審查 Phase 1.5/3 的 code 後修掉 6 個 bug — **最重要的一個：在修復前，
@@ -152,18 +152,37 @@ gbrain MCP subprocess 會被 reparent 到 init 續佔記憶體）→ 重跑 `sta
   crash-loop 停手，用假 server + `NEURALIS_WATCHDOG_START_CMD` 覆寫，不碰線上那隻）；
   真 API E2E：`kill -9` 線上 pid 94266 → watchdog 重啟 → 新 pid 健康 + boot log 有
   心跳 tick / 42 工具 / AgencyLoop / ConsolidationLoop（救回的是完整 Aris，不是空殼 API）。
-- 未做（升級路徑）：watchdog 自己死了沒人救（launchd 守 watchdog 本身 = 合理下一步，
-  但那要裝 LaunchAgent 到使用者機器，等你點頭）。
+### ✅ 7/24 自啟動完成（2026-07-14，Ryan 拍板執行）
+三層守護鏈上線：**launchd → watchdog → 完整 Aris**。
+- `scripts/install-watchdog-launchagent.sh`：生成 + 安裝 `com.neuralis.watchdog`
+  LaunchAgent（RunAtLoad + KeepAlive），已在本機安裝運行。
+- 煞車跨行程持久：crash-loop 落地 `watchdog-crashloop-<PORT>.lock`，launchd 重啟
+  watchdog 會先睡完冷卻期（1h）才恢復 — KeepAlive 不會繞過煞車、不會無限刷。
+- env 關鍵：plist 用 `zsh -c 'source ~/.zshrc'`（key 在 zshrc L114）。漏了的話
+  重啟的 Aris silent 退化 lex-only。已用 psutil 驗過復活行程 env 帶 key + .bun PATH。
+- 實跑證據：check-watchdog 5/5（新增 E 段煞車持久）；真三殺 E2E — kill -9 watchdog
+  → launchd 3s 拉回（16554→16684）；kill -9 API → 95s 救回（14153→16928），boot log
+  心跳+42工具+Agency+Consolidation 全在。
+- ⚠️ 內省陷阱（learn）：macOS `ps eww` 不顯示 env、psutil environ() 對部分行程回空
+  （KERN_PROCARGS2 截斷）— 驗 env 要看「child 行程實際拿到什麼」，別信 parent 讀數。
+
+### ✅ scream AI 舊世界誤報處理（2026-07-14）
+scream 產出的 `~/laap-AGI/debug-handoff-prompt.md` 基於過時布局（port 11530、無
+overlay），5 個 defect 在真系統全部已解。已改寫該檔為指路牌（逐條實證對照 + 指向
+`~/Developer/neuralis`），防止下一個 debug AI 掉進幻影 bug 地獄。
+
+### 🧹 已清理
+`~/neuralis` 舊 checkout → `~/.Trash/neuralis-old-checkout-20260714`（Ryan 確認後執行）。
+獨有內容已救回：`docs/research/what-lives-brainstorm.md`（六帽分析）。staged 的
+tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLoop 實作），未救。
 
 ### 下一線頭（產品向，擇一）
+- **有價值產出**：Aris 目前自主行動只是「查了寫回記憶」，沒有對使用者的產出面。
+  7/24 跑起來之後這是最大缺口 — 跑整晚該留下什麼給 Ryan 早上看？（morning brief？
+  記憶整理報告？）這條最貼近「做了點不一樣的東西」的感覺。
 - consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
 - injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
-- 有價值產出：Aris 目前自主行動只是「查了寫回記憶」，沒有對使用者的產出面
 - 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走
-
-### 🧹 順手發現（未處理）
-`~/neuralis` 是舊的重複 checkout（停在 `108e746`），正的在 `~/Developer/neuralis`。
-沒動它 — 要刪請你確認。
 
 ## 舊 Phase 5 規劃（已執行，留參考）
 

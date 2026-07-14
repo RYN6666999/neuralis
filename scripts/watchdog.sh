@@ -20,12 +20,17 @@
 #   NEURALIS_WATCHDOG_START_CMD  重啟指令（預設 scripts/start-laap-api.sh PORT）
 #
 # 審計: watchdog-audit.jsonl（probe_fail / restart / restart_ok / restart_failed / crashloop）
+#
+# crash-loop 煞車跨行程持久（launchd 用）：撞上限時寫 watchdog-crashloop-<PORT>.lock，
+# 下次啟動若 lock 未過期（< WINDOW 秒）就睡到冷卻結束再試 —— launchd KeepAlive 重啟
+# watchdog 不會歸零煞車、也不會刷 log。手動解鎖：rm 該 lock 檔。
 set -uo pipefail   # 不用 -e：探測失敗是正常路徑，迴圈必須活下來
 export LC_ALL="${LC_ALL:-C}"
 
 PORT="${1:-11546}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUDIT="$HERE/watchdog-audit.jsonl"
+CRASHLOOP_LOCK="$HERE/watchdog-crashloop-$PORT.lock"
 
 INTERVAL="${NEURALIS_WATCHDOG_INTERVAL:-30}"
 TIMEOUT="${NEURALIS_WATCHDOG_TIMEOUT:-5}"
@@ -79,6 +84,19 @@ restart() {
     echo "[watchdog] ❌ 重啟後仍不健康"; audit restart_failed; return 1
 }
 
+# 開機先看煞車：上一世 crash-loop 的冷卻期還沒過就睡完它（launchd 重啟不繞過煞車）
+if [[ -f "$CRASHLOOP_LOCK" ]]; then
+    lock_ts="$(cat "$CRASHLOOP_LOCK" 2>/dev/null || echo 0)"
+    remaining=$(( lock_ts + WINDOW - $(date +%s) ))
+    if [[ $remaining -gt 0 ]]; then
+        echo "[watchdog] 🚨 上次 crash-loop 冷卻中，再等 ${remaining}s（手動解鎖: rm $CRASHLOOP_LOCK）"
+        audit cooldown ",\"remaining\":$remaining"
+        sleep "$remaining"
+    fi
+    rm -f "$CRASHLOOP_LOCK"
+    echo "[watchdog] 冷卻結束，恢復守望"
+fi
+
 echo "[watchdog] 盯 :$PORT — 每 ${INTERVAL}s 探測，連續 ${FAILS} 次失敗即重啟"
 audit start ",\"interval\":$INTERVAL,\"fails\":$FAILS"
 
@@ -105,7 +123,9 @@ while :; do
 
             if [[ ${#restarts[@]} -ge $MAX_RESTARTS ]]; then
                 # 重啟解不了 = 更嚴重的問題。繼續重啟只會刷 log 蓋掉真因。
+                # lock 檔讓煞車跨行程存活：launchd 重啟 watchdog 會先睡完冷卻期。
                 echo "[watchdog] 🚨 crash-loop：${WINDOW}s 內已重啟 ${#restarts[@]} 次，停手。看 laap-api.log"
+                date +%s > "$CRASHLOOP_LOCK"
                 audit crashloop ",\"restarts\":${#restarts[@]},\"window\":$WINDOW"
                 exit 1
             fi

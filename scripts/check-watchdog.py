@@ -62,7 +62,8 @@ def healthy(port: int, timeout: float = 1.0) -> bool:
         return False
 
 
-def run_watchdog(port: int, tmp: Path, start_cmd: str, cycles: int, fails: int = 1) -> tuple:
+def run_watchdog(port: int, tmp: Path, start_cmd: str, cycles: int,
+                 fails: int = 1, window: int = 3600) -> tuple:
     env = {
         **os.environ,
         "NEURALIS_WATCHDOG_INTERVAL": "1",
@@ -70,13 +71,17 @@ def run_watchdog(port: int, tmp: Path, start_cmd: str, cycles: int, fails: int =
         "NEURALIS_WATCHDOG_FAILS": str(fails),
         "NEURALIS_WATCHDOG_READY_WAIT": "5",
         "NEURALIS_WATCHDOG_MAX_RESTARTS": "2",
-        "NEURALIS_WATCHDOG_WINDOW": "3600",
+        "NEURALIS_WATCHDOG_WINDOW": str(window),
         "NEURALIS_WATCHDOG_MAX_CYCLES": str(cycles),
         "NEURALIS_WATCHDOG_START_CMD": start_cmd,
     }
     p = subprocess.run(["bash", str(WATCHDOG), str(port)], env=env,
                        capture_output=True, text=True, timeout=180)
     return p.returncode, p.stdout
+
+
+def lock_path(port: int) -> Path:
+    return ROOT / f"watchdog-crashloop-{port}.lock"
 
 
 def main():
@@ -154,7 +159,7 @@ def main():
         assert healthy(port), "重啟後應恢復健康"
         print("C. 假死殺掉重起: OK — events =", events)
 
-        # D. crash-loop：重啟指令根本起不來 → 撞上限就停手，不無限刷
+        # D. crash-loop：重啟指令根本起不來 → 撞上限就停手，不無限刷 + 落地 lock
         port = free_port()
         off = audit_offset()
         rc, out = run_watchdog(port, tmp, "/usr/bin/true", cycles=20)
@@ -162,10 +167,33 @@ def main():
         assert rc == 1, f"crash-loop 應以 exit 1 停手，得到 {rc}\n{out}"
         assert "crashloop" in events, f"應有 crashloop 審計: {events}"
         assert events.count("restart") == 2, f"應停在 MAX_RESTARTS=2: {events}"
-        print("D. crash-loop 停手: OK — events =", events)
+        assert lock_path(port).exists(), "crash-loop 應落地 lock 檔（launchd 煞車持久化）"
+        print("D. crash-loop 停手 + lock 落地: OK — events =", events)
+
+        # E. launchd 重啟 watchdog 不繞過煞車：lock 未過期 → 睡完冷卻期才恢復
+        port_e = free_port()
+        spawn("healthy", port_e)
+        for _ in range(20):
+            if healthy(port_e):
+                break
+            time.sleep(0.2)
+        lock_path(port_e).write_text(str(int(time.time())), encoding="utf-8")
+        off = audit_offset()
+        t0 = time.time()
+        rc, out = run_watchdog(port_e, tmp, start_cmd("healthy", port_e),
+                               cycles=1, window=3)
+        elapsed = time.time() - t0
+        events = [e["event"] for e in audit_since(off)]
+        assert "cooldown" in events, f"應有 cooldown 審計: {events}"
+        assert elapsed >= 2.5, f"應睡完冷卻期（~3s），實際 {elapsed:.1f}s"
+        assert not lock_path(port_e).exists(), "冷卻結束應清掉 lock"
+        assert "restart" not in events, f"冷卻後 server 健康，不該重啟: {events}"
+        print(f"E. 煞車跨行程持久: OK — 睡了 {elapsed:.1f}s, events = {events}")
 
         print("ALL WATCHDOG CHECKS PASSED")
     finally:
+        for f in ROOT.glob("watchdog-crashloop-*.lock"):
+            f.unlink(missing_ok=True)
         for p in spawned:
             p.kill()
         subprocess.run(["pkill", "-f", str(tmp / "fake_server.py")], check=False)

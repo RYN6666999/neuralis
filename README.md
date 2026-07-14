@@ -33,19 +33,30 @@ python3 scripts/aris-status.py            # 一頁式儀表
 watch -n5 python3 scripts/aris-status.py  # 即時盯
 ```
 
-### 韌性：watchdog
+### 7/24 自啟動：三層守護鏈
 
-API 崩了（OOM）或假死（行程活著但不回應）時自動救回：
-
-```bash
-nohup scripts/watchdog.sh > watchdog.log 2>&1 &
+```
+launchd（開機自啟 + watchdog 死了拉起來）
+  → watchdog.sh（API 崩/假死 → 殺殘進程 + 重啟）
+    → start-laap-api.sh → start.sh（完整 Aris：心跳+42工具+agency+固化）
 ```
 
-每 30s 探 `/health`，連續 3 次失敗 → 殺殘進程（含子進程）→ 重跑 `start-laap-api.sh`。
-1 小時內重啟超過 5 次視為 crash-loop，停手並吼出來（繼續重啟只會刷 log 蓋掉真因）。
+```bash
+scripts/install-watchdog-launchagent.sh       # 一鍵安裝（開機自啟 + 立即生效）
+scripts/install-watchdog-launchagent.sh -u    # 卸載
+launchctl print gui/$UID/com.neuralis.watchdog # 看守護者狀態
+```
+
+watchdog 每 30s 探 `/health`，連續 3 次失敗 → 殺殘進程（含子進程）→ 重跑
+`start-laap-api.sh`。1 小時內重啟超過 5 次視為 crash-loop → 落地 lock 檔停手；
+launchd 把 watchdog 拉起來後會先睡完冷卻期才恢復（煞車跨行程持久，不會無限刷）。
+手動解鎖：`rm watchdog-crashloop-<PORT>.lock`。
 調參見腳本開頭 env；審計走 `watchdog-audit.jsonl`。
 
-刻意不用 launchd KeepAlive：它只在「行程退出」時重啟，抓不到假死。
+health 探測（而非 launchd 直接守 API）是刻意的：KeepAlive 只在「行程退出」時
+重啟，抓不到假死（行程活著但 event loop 凍結）。launchd 只負責守 watchdog 本身。
+plist 用 `zsh -c 'source ~/.zshrc'` 帶入 `OPENAI_API_KEY` + PATH — 漏了的話
+重啟出來的 Aris 會 silent 退化 lex-only 檢索。
 
 ## 目錄結構
 

@@ -52,13 +52,17 @@ Python 版 PsiCore 已運作，五維需求 + 情緒梯度 + 背景心跳。
 - 安全硬邊界：只動 `laap/memory/*`、每 pass 突變上限 5、審計 JSONL、可一鍵關
 - 實測：3 重複 → 1 頁 core/（seen_count=3）；高情緒升層；三迴路同框 boot
 
-## Phase 7 — 韌性層 ✅（2026-07-14）
-> 崩了會自己站起來。生產標準的最後一塊。
+## Phase 7 — 韌性層 + 7/24 自啟動 ✅（2026-07-14）
+> 崩了會自己站起來，開機自己醒過來。生產標準的最後一塊。
 
 - `scripts/watchdog.sh`：每 30s 探 `/health`，連續失敗 → 殺殘進程（認 port 不認
-  cmdline，含子進程）→ 重跑 start-laap-api.sh。crash-loop（1h > 5 次）停手 exit 1。
+  cmdline，含子進程）→ 重跑 start-laap-api.sh。crash-loop（1h > 5 次）落地 lock
+  停手；重啟 watchdog 會先睡完冷卻期（煞車跨行程持久）。
 - 抓「假死」（行程活著但 event loop 凍結）——launchd KeepAlive 抓不到的那種
-- 實測：`check-watchdog.py` 4/4（含假死）+ 真 API `kill -9` E2E 救回完整 Aris
+- `scripts/install-watchdog-launchagent.sh`：launchd 守 watchdog（開機自啟 +
+  KeepAlive），plist 經 zshrc 帶入 OPENAI_API_KEY + PATH
+- 實測：`check-watchdog.py` 5/5（含假死、煞車持久）+ 真三殺 E2E：kill watchdog
+  → launchd 拉回；kill -9 API → 95s 內救回完整 Aris（psutil 驗過 env 帶 key）
 
 ## Phase 4 — AgentOS 執行/安全層（⚠️ 順序：煞車先於能力）
 **重要：此階段的執行順序不可逆。**

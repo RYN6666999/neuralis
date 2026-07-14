@@ -32,6 +32,7 @@ agency-audit.jsonl
 consolidation-audit.jsonl
 safety-audit.jsonl
 watchdog-audit.jsonl
+watchdog-crashloop-*.lock
 approved-tools.txt
 approvals-pending.jsonl
 status.json
