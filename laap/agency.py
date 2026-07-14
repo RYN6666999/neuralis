@@ -83,6 +83,11 @@ class AgencyLoop:
         # ── 催產素：信任權重 ──
         self._trust_scores: dict = {"user": 0.3}   # entity → trust 0-1
         self._trust_decay_rate = 0.0005             # 每次評估衰減量
+        # ── 自我強化循環防護 ──
+        self._last_was_gbrain: bool = False
+        self._self_cycle_count: int = 0
+        self._cycle_max: int = int(os.environ.get("NEURALIS_AGENCY_CYCLE_MAX", "3"))
+        self._cycle_guard: bool = os.environ.get("NEURALIS_AGENCY_CYCLE_GUARD", "on").lower() not in ("off", "0", "false")
 
     # ── 生命週期 ──
 
@@ -162,6 +167,7 @@ class AgencyLoop:
         """
         old = self._trust_scores.get(entity, 0.0)
         self._trust_scores[entity] = min(1.0, old + 0.03)
+        self._self_cycle_count = 0  # 真互動重置循環計數
 
     # ── 意圖形成（v1 = 規則表 + 種子優先序 + 去重，仍不是認知） ──
     # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
@@ -212,6 +218,15 @@ class AgencyLoop:
             return None  # relatedness / autonomy：v0 無唯讀動作可做
         topic = (getattr(self.psi, "last_input", "") or "").strip()[:80]
         seed = topic or self._seed_snippet   # 真對話優先，否則從上次記憶聯想
+        # 自我強化循環防護：連續多次無使用者輸入 + gbrain 查詢 → 閒置
+        if self._cycle_guard and not topic and self._last_was_gbrain and self._seed_snippet:
+            self._self_cycle_count += 1
+            if self._self_cycle_count >= self._cycle_max:
+                self._seed_snippet = ""
+                self.skipped_stale += 1
+                return None
+        else:
+            self._self_cycle_count = 0
         if not seed:
             self.skipped_stale += 1          # 無新鮮種子 → 閒著，不刷模板
             return None
@@ -251,6 +266,9 @@ class AgencyLoop:
         if tool not in READONLY_WHITELIST:
             logger.warning(f"[Agency] 拒絕非白名單工具: {tool}")
             return
+        # 自我強化循環防護：記錄上次工具類型
+        if self._cycle_guard:
+            self._last_was_gbrain = (tool == "gbrain")
         now = time.time()
         result = self.tools.execute(tool, prompt, timeout=30)
         ok = bool(result) and not result.startswith(("[錯誤]", "[未知工具]", "[AgentOS 錯誤]")) \

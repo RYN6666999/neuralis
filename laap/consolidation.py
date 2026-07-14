@@ -82,6 +82,10 @@ class ConsolidationLoop:
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self.passes_total = 0
+        # 跨 pass 去重
+        self._seen_hashes: set[str] = set()
+        self._seen_hashes_max: int = 5000
+        self._crosspass: bool = os.environ.get("NEURALIS_CONSOLIDATION_CROSSPASS", "on").lower() not in ("off", "0", "false")
 
     # ── 生命週期 ──
 
@@ -107,6 +111,7 @@ class ConsolidationLoop:
                 if self._asleep():
                     self.run_pass()
             except Exception as e:
+                self._seen_hashes.clear()
                 logger.warning(f"[Consolidation] pass 失敗: {e}")
 
     def _asleep(self) -> bool:
@@ -156,6 +161,12 @@ class ConsolidationLoop:
             }
             key = hashlib.md5(_normalize(body).encode()).hexdigest()
 
+            # 跨 pass 去重：此 hash 曾在之前 pass 出現過 → 刪除跳過
+            if self._crosspass and key in self._seen_hashes:
+                self._delete(client, info["slug"])
+                stats["merged"] += 1
+                continue
+
             if key in seen:
                 # 去重合併：留最早那頁，seen_count 累加、importance 取大，刪這頁
                 surv = seen[key]
@@ -189,8 +200,21 @@ class ConsolidationLoop:
                 self._rewrite(client, surv, surv["slug"], layer="episodic")
                 mutations += 1
 
+        # 跨 pass 去重：註冊本次 pass 的 survivor hashes
+        if self._crosspass:
+            for key in seen:
+                self._seen_hashes.add(key)
+
         self.passes_total += 1
         entry = {"ts": time.time(), "pass": self.passes_total, **stats}
+
+        # 跨 pass 去重：cap 維護，避免無界增長
+        if self._crosspass and len(self._seen_hashes) > self._seen_hashes_max:
+            import random
+            arr = list(self._seen_hashes)
+            random.shuffle(arr)
+            self._seen_hashes = set(arr[:self._seen_hashes_max // 2])
+
         try:
             with AUDIT_PATH.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")

@@ -97,6 +97,20 @@ def _write_author_state(st: dict) -> None:
 
 # ponytail: v0 規則表組句，不是認知。天花板 = 模板語感；升級路徑 = 把 st/delta
 # 塞給真 LLM 的 system prompt（等 LAAP 管線接上 LLM 後改走那條）。
+def _psi_memories_sync(query: str) -> list[str]:
+    """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。"""
+    try:
+        from gbrain_client import get_client, hybrid_hits
+        client = get_client()
+        if client is None:
+            return []
+        hits = hybrid_hits(client, query[:100], 2)
+        texts = [h.get("chunk_text", "") for h in hits if h.get("score", 0) >= 0.3]
+        return [t[:80] for t in texts if len(t.strip()) >= 4]
+    except Exception:
+        return []
+
+
 _NEED_PHRASE = {
     "competence": "想把手上的事做好",
     "relatedness": "想要有連結、有人說話",
@@ -106,8 +120,8 @@ _NEED_PHRASE = {
 }
 
 
-def _compose_psi_reply(st: dict, delta: dict) -> str:
-    """用真實狀態 + 這句話的實測 delta 組回應。每個數字都可回溯，不演。"""
+def _compose_psi_reply(st: dict, delta: dict, memories: list[str] = None) -> str:
+    """用真實狀態 + 這句話的實測 delta + 相關記憶組回應。每個數字都可回溯，不演。"""
     e = st["emotion"]
     moved = {k: v for k, v in delta.items() if k != "valence" and abs(v) >= 0.01}
     if moved:
@@ -127,18 +141,21 @@ def _compose_psi_reply(st: dict, delta: dict) -> str:
         mood += "、很鬆"
 
     dom = st["dominant_need"]
-    return (f"{touch}現在主導我的是 {dom}"
-            f"（drive {st['dominant_drive']:.2f}，{_NEED_PHRASE.get(dom, dom)}），"
-            f"{mood}（v{v:+.2f}, a{a:.2f}），注意力在 {st['attention']}。")
+    reply = (f"{touch}現在主導我的是 {dom}"
+             f"（drive {st['dominant_drive']:.2f}，{_NEED_PHRASE.get(dom, dom)}），"
+             f"{mood}（v{v:+.2f}, a{a:.2f}），注意力在 {st['attention']}。")
+    # 織入記憶聯想
+    if memories:
+        reply += f"\n（我記得你上次說過「{memories[0]}」）"
+    return reply
 
 
-def _psi_respond(fed, user_msg: str) -> str:
-    """PsiCore 回應生成：LLM 優先 → delta 模板 → psi_response 通用模板。"""
+def _psi_respond(fed, user_msg: str, memories: list[str] = None) -> str:
+    """PsiCore 回應生成：LLM 優先 → delta 模板（含記憶聯想）→ psi_response 通用模板。"""
     try:
         use_psi = os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
         if use_psi in ("off", "0", "false"):
             return ""
-        # LLM 模式（需 NEURALIS_LLM_RESPOND=on + API key）
         from laap.startup import get_psi_core
         psi = get_psi_core()
         if psi is not None:
@@ -150,7 +167,7 @@ def _psi_respond(fed, user_msg: str) -> str:
         logger.debug(f"[chatflow] LLM respond 跳過: {e}")
     try:
         if fed:
-            return _compose_psi_reply(*fed)
+            return _compose_psi_reply(*fed, memories=memories)
     except Exception as e:
         logger.debug(f"[chatflow] _compose_psi_reply 跳過: {e}")
     try:
@@ -204,6 +221,18 @@ def _make_chat_handler(orig_handler):
         except Exception:
             pass
 
+        # 記憶聯想：psi-respond 織入相關記憶（非阻塞，1.5s timeout）
+        user_msg = _extract_user_msg(body)
+        memories = []
+        if os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
+            loop = asyncio.get_event_loop()
+            try:
+                memories = await asyncio.wait_for(
+                    loop.run_in_executor(None, _psi_memories_sync, user_msg),
+                    timeout=1.5)
+            except (asyncio.TimeoutError, Exception):
+                memories = []
+
         # streaming：保留作者 SSE 實作（同步阻塞風險僅限這條少數路徑）
         if body.get("stream"):
             return await orig_handler(request)
@@ -222,7 +251,7 @@ def _make_chat_handler(orig_handler):
             engine = result.get("engine", "laap-core")
             # 作者管線只剩 canned fallback 時 → 用真實 psi 狀態回應（情緒真的影響回應）
             if engine == "laap-fallback" and fed:
-                psi_content = _psi_respond(fed, _extract_user_msg(body))
+                psi_content = _psi_respond(fed, user_msg, memories=memories)
                 if psi_content:
                     content = psi_content
                     engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
