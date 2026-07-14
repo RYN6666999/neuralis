@@ -20,13 +20,18 @@ perf: hybrid_hits 20s TTL 快取；tool_executor 的 gbrain 走持久 client（�
 `scripts/start.sh` → PsiCore 心跳 tick 走 + 42 工具 + engines_loaded=true +
 recall_memory 迴歸過 + 記憶自檢 4/4。
 
-**遺留（review 發現但未動）：**
-- AGIKernel 在 API boot 路徑仍卡 `core_identity.psi` 缺檔（author data file）—
-  「Phase 3 解鎖」只解鎖了直接建構，boot 路徑沒解。別合成假身份檔，等作者端。
-- PsiCore 需求 decay（~0.008/s）對常駐 daemon 太快：閒置 2-3 分鐘全需求見底、
-  效價 → -1（「醒來就憂鬱」）。要嘛接受、要嘛改 decay-toward-baseline，設計決策留給下手。
-- `process_input()` 還沒有任何呼叫者 — 心跳活了，但對話還沒餵進需求偵測。
-  Phase 5 接 consolidation 時順手接這條（`/v1/chat/completions` 或 reflect handler）。
+**遺留三項已於同日全清（commit `01a2ff3`）：**
+- ✅ decay-to-baseline：需求向靜息值鬆弛（OU 過程、雜訊配平）。閒置 600s 需求維持
+  0.39-0.54、效價 -0.03；互動推高後緩慢回落。不再「醒來就憂鬱」。
+- ✅ `process_input()` 已接上：`memory_bridge.recall_related`（作者 _perceive 每輪必經）
+  掛 psi feed。實測 relatedness 0.503→0.629。psi 沒起就 no-op。
+- ✅ AGIKernel boot 路徑解鎖：`laap/psi_defs/` 三個標示清楚的 bootstrap 佔位 .psi，
+  `startup_all()` 缺哪補哪（作者已有的不碰）。boot log「AGI内核加载失败」→「已创建」。
+- ✅ 兩個啟動腳本統一：`start-laap-api.sh`（背景）委派 `start.sh` — 背景 boot 也有
+  心跳 + 42 工具 + AGI 內核。
+
+**仍留給之後：** laap/memory/* retention policy；semantic add 的完整 meta 持久化；
+recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming quirk 回報上游。
 
 ---
 
