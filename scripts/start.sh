@@ -61,6 +61,13 @@ if agency:
           f"cap={agency.max_per_hour}/h（唯讀白名單，NEURALIS_AGENCY=off 可關）")
 else:
     print("[neuralis] ⚠️ AgencyLoop 未啟動")
+from laap.startup import get_consolidation
+cons = get_consolidation()
+if cons:
+    print(f"[neuralis] 😴 ConsolidationLoop: interval={cons.interval}s "
+          f"idle={cons.idle_s}s（睡眠窗打掃，NEURALIS_CONSOLIDATION=off 可關）")
+else:
+    print("[neuralis] ⚠️ ConsolidationLoop 未啟動")
 
 # 2. 以作者的 __main__ 入口起 API（同 process，argv 傳 port）
 api = os.path.join(os.environ["LAAP_AGI_DIR"], "aris_brain", "laap_brain_api.py")

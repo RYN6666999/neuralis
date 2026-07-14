@@ -40,10 +40,13 @@ def _feed_psi(user_message: str) -> None:
     這裡是 overlay 能掛到「每輪對話」的最近點。PsiCore 沒起（get 回 None）就 no-op —
     絕不因心臟缺席擋記憶召回。"""
     try:
-        from laap.startup import get_psi_core
+        from laap.startup import get_psi_core, get_consolidation
         psi = get_psi_core()
         if psi is not None:
             psi.process_input(user_message)
+        cons = get_consolidation()
+        if cons is not None:
+            cons.note_interaction()  # 有互動 → 重置睡眠窗（不在對話中打掃）
     except Exception as e:
         logger.debug(f"[memory_bridge] psi feed 跳過: {e}")
 

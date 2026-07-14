@@ -117,12 +117,35 @@ def ensure_agency():
     return _agency
 
 
+_consolidation = None
+
+
+def ensure_consolidation():
+    """Phase 5 記憶固化循環（睡眠）。NEURALIS_CONSOLIDATION=off 可關。
+    不依賴 psi（沒心跳也能打掃，只是少了 arousal 睡眠窗判斷）。"""
+    global _consolidation
+    if _consolidation is not None:
+        return _consolidation
+    if os.environ.get("NEURALIS_CONSOLIDATION", "on").lower() in ("off", "0", "false"):
+        logger.info("[startup] ConsolidationLoop 已由 NEURALIS_CONSOLIDATION=off 停用")
+        return None
+    try:
+        from laap.consolidation import ConsolidationLoop
+        _consolidation = ConsolidationLoop(psi=_psi_core)
+        _consolidation.start()
+        logger.info("😴 ConsolidationLoop 啟動 — Aris 會睡覺整理記憶了")
+    except Exception as e:
+        logger.warning(f"ConsolidationLoop 啟動失敗: {e}")
+    return _consolidation
+
+
 def startup_all():
     """一次啟動所有系統。"""
     ensure_psi_defs()
     ensure_psi_core()
     ensure_tools()
     ensure_agency()
+    ensure_consolidation()
     return _bus, _psi_core, _tool_executor
 
 
@@ -137,3 +160,6 @@ def get_bus():
 
 def get_agency():
     return _agency
+
+def get_consolidation():
+    return _consolidation

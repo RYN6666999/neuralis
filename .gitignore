@@ -29,3 +29,4 @@ Thumbs.db
 *.log
 logs/
 agency-audit.jsonl
+consolidation-audit.jsonl

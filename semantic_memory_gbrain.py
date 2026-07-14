@@ -47,12 +47,14 @@ class GbrainSemanticMemory:
         ts = time.time()
         mem_id = f"mem-{int(ts)}-{hashlib.md5(f'{text}:{ts}'.encode()).hexdigest()[:6]}"
         meta_type = (meta or {}).get("type", "")
+        from memory_store import emotion_intensity
         content = (
             f"---\n"
             f"title: laap memory {mem_id}\n"
             f"layer: episodic\n"
             f"source: laap-semantic\n"
             f"meta_type: {meta_type}\n"
+            f"emotion_intensity: {emotion_intensity()}\n"
             f"---\n\n"
             f"{text}\n"
         )

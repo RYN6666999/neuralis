@@ -52,6 +52,22 @@ def _gbrain():
         return None
 
 
+def emotion_intensity() -> float:
+    """寫入當下的情緒強度 |valence|×arousal（Damasio somatic marker：情緒強的記憶
+    該被記得更牢）。PsiCore 沒起就 0.0。固化循環用它做升層/保留判斷。
+    ponytail: 檢索端 re-rank 未做（search hit 不帶 frontmatter，逐頁抓太慢）—
+    目前情緒只影響寫入 importance 與固化決策。"""
+    try:
+        from laap.startup import get_psi_core
+        psi = get_psi_core()
+        if psi is not None:
+            e = psi.emotion.to_dict()
+            return round(abs(e["valence"]) * e["arousal"], 3)
+    except Exception:
+        pass
+    return 0.0
+
+
 def _hash_embed(text: str) -> np.ndarray:
     """Deterministic feature-hashing embedding（384-dim，L2 normalized）。
     中英混排：CJK 逐字 + 英數 token。同文字同向量；相近文字向量相近（詞袋級）。
@@ -126,6 +142,7 @@ class MemoryStore:
             f"tags: [{tags}]\n"
             f"importance: {f.importance}\n"
             f"layer: {f.layer}\n"
+            f"emotion_intensity: {emotion_intensity()}\n"
             f"source: laap-runtime\n"
             f"---\n\n"
             f"{f.content}\n"
