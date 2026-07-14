@@ -76,6 +76,16 @@ recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming 
 
 ---
 
+## Phase 6 已完成（2026-07-14, commit `b69582a`）— Aris 會自主行動了
+「需求→行動→結果→記憶」迴路閉合，boot 即自動跑：
+- `laap/agency.py`：drives 超閾值（預設 0.45）→ 規則表意圖 → 唯讀工具 → 回寫 gbrain
+  （importance ≤0.5 + arousal 加權）→ satisfy → drive 回落自然靜下
+- 煞車：唯讀白名單 gbrain/qmd/file-search、6/h cap、每需求 30min cooldown、
+  審計 `agency-audit.jsonl`、`NEURALIS_AGENCY=off` 關閉
+- 調參 env：NEURALIS_AGENCY_INTERVAL（預設 60s）/ _MAX_PER_HOUR / _DRIVE_THRESHOLD
+- 實測：boot 零互動自主行動 + 重啟續跑（審計行數為證）；`scripts/check-agency.py` 三段自檢
+- v0 誠實界線：意圖形成是規則表不是認知；行動全唯讀；寫入類行動 = Phase 4a 過後才開
+
 ## 立即要抓的線頭 = Phase 5（記憶固化循環）
 
 見 ROADMAP §Phase 5。純 overlay，不碰作者碼。

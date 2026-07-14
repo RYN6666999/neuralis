@@ -32,11 +32,21 @@ Python 版 PsiCore 已運作，五維需求 + 情緒梯度 + 背景心跳。
 - 補作者缺的 `psilang_v2` Lexer/Parser/Compiler/QuantumVM 管線
 - 解鎖 AGIKernel 四層引擎：PsiLangCore + SelfHeal + SelfEvolve + Autonomy
 
+## Phase 6 — Agency Loop v0 ✅（commit `b69582a`, 2026-07-14）
+> 「需求 → 行動 → 結果 → 記憶」迴路閉合。零件（心跳/記憶/工具）接成會自己跑的整體。
+
+- `laap/agency.py`：drives 超閾值 → 規則表形成意圖（v0 誠實標註：不是認知）→
+  唯讀工具執行 → 結果回寫 gbrain（importance ≤0.5 + 情緒加權）→ satisfy 需求
+- 煞車先行：唯讀白名單、6/h cap、每需求 30min cooldown、審計 JSONL、
+  `NEURALIS_AGENCY=off` 總開關
+- 實測：boot 後零互動自主行動 + 回寫 + 審計；kill 重啟迴路續跑；
+  `scripts/check-agency.py` 三段自檢
+
 ## Phase 5 — 記憶固化循環（🔄 當前優先）
 > 記憶有存取、缺睡眠。補上 consolidation 讓 Aris 越用越記得清楚。
 
 - 背景排程：定期摘要、去重、標重要度、寫回 gbrain
-- 情緒權重：PsiCore 的 valence ± arousal 作為記憶檢索加權
+- 情緒權重已有一半：agency 回寫走 arousal 加權（見 Phase 6）；剩檢索端加權 + 摘要去重
 - 純 overlay，不碰作者碼
 
 ## Phase 4 — AgentOS 執行/安全層（⚠️ 順序：煞車先於能力）
@@ -62,9 +72,12 @@ AgentOS `safety.py` + `checker.py` 先部署，確保工具執行有邊界。
 
 ## 依賴序
 ```
-Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 ✅ → Phase 2 ✅ → Phase 3 ✅
+Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 6 ✅ (agency loop)
                                                      ↓
                                               Phase 5 (記憶固化) ← 現在這裡
                                                      ↓
-                                              Phase 4a (安全閘) → 4b → 4c
+                                              Phase 4a (安全閘：迴路開放寫入類行動前的硬前提) → 4b → 4c
 ```
+
+推理層警語：Phase 3 的 QuantumVM 是 dict/random stub — 擴大投入前先建 20 題
+benchmark（類比/組合/檢索），沒贏過「gbrain 檢索 + LLM」就不投。
