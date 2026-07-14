@@ -199,6 +199,34 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 5. **format_state_injection()**（psi_core.py）— 狀態序列化為三層輸出
    （state_label / state_snippet / state_tuple），供外部消費。
 
+## 作者完全開源比對（2026-07-15，branch `feat/port-old-modules`，Apache 2.0）
+
+作者補齊了當年 ImportError 的整個 `laap/` 套件 + `psi_core/`（71 檔）。逐模組實讀比對：
+
+| 軸 | 作者開源版 | neuralis | 判決 |
+|---|---|---|---|
+| PSI core | 280 行 Python fallback：0.98 平滑到固定 0.5、**prediction_error 是 sin 假訊號**、情緒是類別標籤 | OU 衰減到 per-need target、VAD 維度情緒、RLock、真 RPE | **neuralis 勝** |
+| 情緒引擎 | `affective_engine.py`：5 維(PAD+Social+Stress)、耦合矩陣、損失趨避 1.5、1/f 噪聲、32 事件刺激表、`compute_cognitive_bias()` 8 個計算偏差、PersonalityProfile | 3 維 VAD from 需求滿足 | **作者勝 — 最值得移植** |
+| 需求治理 | `need_constitution.json`：硬邊界、按來源速率上限（LLM ±0.08/h vs user ±0.25/h）、禁 LLM 鏈式自我強化、hourly audit | 6/h cap + cooldown + 持久化煞車 | **作者概念勝 — 正好回答 RPE 回滾保護待辦** |
+| 記憶 | JSON stub（自註「可被 vector 版替換」） | gbrain 1886 頁 + 情緒加權檢索 + 固化 | **neuralis 壓倒** |
+| 學習 | psi_driver 五步循環的 Learn 是抽象介面；autonomy.py 是 HTN 目標架構藍圖（Callable 未接真工具，opt-in 預設 off） | RPE 真跑 7/24、權重持久化、審計 | **neuralis 勝（真跑 vs 藍圖）** |
+| 韌性/運維 | 無 | watchdog + launchd + 自檢群 | **neuralis 獨有** |
+
+**一句話：作者開源的是設計圖庫，neuralis 是跑著的系統。互補不重複。**
+LLM 定位一致（psi_driver:「LLM as I/O, not thinker」= 我們的 zero-LLM overlay 哲學）。
+
+### 可採收清單（Apache 2.0 → MIT 可移植，保留出處聲明）
+1. **需求憲法**（governor 概念）— 直接解 README「RPE 權重異常凍結/回滾」待辦：
+   per-need delta 上限 + 按來源（RPE vs user 對話）分速率限制 + 越界凍結。
+2. **affective_engine 接線**（= 行為豐富度優先序 3 的現成加速器）— 5 維情緒 +
+   耦合矩陣照搬，但**偏差必須接真參數**：attention_narrowing→agency 角度溫度、
+   risk_seeking→exploration_rate、temporal_discounting→consolidation 耐心。
+   作者只把 bias 塞進 kernel dict 沒人消費 — 我們接真迴路，青出於藍。
+3. **32 事件刺激表** — agency 的 RPE outcome 已算好 task_success/failure，
+   直接餵 AffectiveEventProcessor，零成本接情緒事件。
+- 參考不移植：autonomy.py HTN 架構 = 未來 S_span 擴展（`_ANGLE` 打通）的設計參考。
+- 重建 worktree 看原碼：`cd ~/Developer/laap-AGI && git worktree add /tmp/laap-open origin/feat/port-old-modules --detach`
+
 ## 戰略拍板：行為豐富度路線（2026-07-14 Ryan 與 Opus 4.8 討論定案）
 
 **核心判準：一個狀態變數的價值 = 它會不會「改變系統的計算方式」，不是它會不會
