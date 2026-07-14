@@ -86,7 +86,21 @@ recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming 
 - 實測：boot 零互動自主行動 + 重啟續跑（審計行數為證）；`scripts/check-agency.py` 三段自檢
 - v0 誠實界線：意圖形成是規則表不是認知；行動全唯讀；寫入類行動 = Phase 4a 過後才開
 
-## 立即要抓的線頭 = Phase 5（記憶固化循環）
+## Phase 5 已完成（2026-07-14, commit `75b1d46`）— Aris 會睡覺整理記憶了
+`laap/consolidation.py` 第三條背景迴路：睡眠窗（arousal 低 + 閒置 600s）觸發，
+去重合併（hash → seen_count）、升層（emotion ≥0.5 或 seen ≥3 → core/）、
+歸檔（30 天 stale → archive/）。只動 `laap/memory/*`（assert 硬邊界）、
+每 pass 突變上限 5、審計 `consolidation-audit.jsonl`、`NEURALIS_CONSOLIDATION=off` 可關。
+自檢：`scripts/check-consolidation.py`。
+情緒權重（外部審查 #2）寫入端已補（`emotion_intensity` 進 frontmatter）；
+檢索端 re-rank 未做 — hit 不帶 frontmatter，逐頁抓太慢，留給 gbrain 上游或之後。
+
+## 下一線頭 = Phase 4a 安全閘（順序不可逆：煞車 → 能力 → RSI）
+agency 開放任何寫入類行動前的硬前提（外部審查紅線）。起點：
+`~/agent-sandbox`（AgentOS）`orchestrator/safety.py` + `checker.py` 接進 ToolExecutor.execute
+（危險指令閘、沙箱、人工批准閘門）。之後才輪 4b 工具深化、4c RSI（沙箱 + 人工批准，必須）。
+
+## 舊 Phase 5 規劃（已執行，留參考）
 
 見 ROADMAP §Phase 5。純 overlay，不碰作者碼。
 

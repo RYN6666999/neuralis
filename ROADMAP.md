@@ -42,12 +42,15 @@ Python 版 PsiCore 已運作，五維需求 + 情緒梯度 + 背景心跳。
 - 實測：boot 後零互動自主行動 + 回寫 + 審計；kill 重啟迴路續跑；
   `scripts/check-agency.py` 三段自檢
 
-## Phase 5 — 記憶固化循環（🔄 當前優先）
-> 記憶有存取、缺睡眠。補上 consolidation 讓 Aris 越用越記得清楚。
+## Phase 5 — 記憶固化循環 ✅（commit `75b1d46`, 2026-07-14）
+> 記憶有存取、缺睡眠 → 補上了。零 LLM。
 
-- 背景排程：定期摘要、去重、標重要度、寫回 gbrain
-- 情緒權重已有一半：agency 回寫走 arousal 加權（見 Phase 6）；剩檢索端加權 + 摘要去重
-- 純 overlay，不碰作者碼
+- `laap/consolidation.py`：睡眠窗（arousal 低 + 閒置）觸發 — 去重合併（hash）、
+  升層（emotion ≥0.5 或 seen ≥3 → core/）、歸檔（30 天 stale → archive/）
+- 情緒權重：寫入端 `emotion_intensity = |valence|×arousal` 進 frontmatter（兩縫都補）；
+  檢索端 re-rank 留 ponytail 註記（hit 不帶 frontmatter）
+- 安全硬邊界：只動 `laap/memory/*`、每 pass 突變上限 5、審計 JSONL、可一鍵關
+- 實測：3 重複 → 1 頁 core/（seen_count=3）；高情緒升層；三迴路同框 boot
 
 ## Phase 4 — AgentOS 執行/安全層（⚠️ 順序：煞車先於能力）
 **重要：此階段的執行順序不可逆。**
@@ -72,11 +75,10 @@ AgentOS `safety.py` + `checker.py` 先部署，確保工具執行有邊界。
 
 ## 依賴序
 ```
-Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 6 ✅ (agency loop)
+Phase 0 ✅ → Phase 1 ✅ → Phase 1.5 ✅ → Phase 2 ✅ → Phase 3 ✅ → Phase 6 ✅ → Phase 5 ✅
                                                      ↓
-                                              Phase 5 (記憶固化) ← 現在這裡
-                                                     ↓
-                                              Phase 4a (安全閘：迴路開放寫入類行動前的硬前提) → 4b → 4c
+                                              Phase 4a (安全閘) ← 現在這裡
+                                              （迴路開放寫入類行動前的硬前提）→ 4b → 4c
 ```
 
 推理層警語：Phase 3 的 QuantumVM 是 dict/random stub — 擴大投入前先建 20 題
