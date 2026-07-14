@@ -15,11 +15,17 @@ NEURALIS_CHATFLOW=off 可關。
 from __future__ import annotations
 
 import logging
+import asyncio
 import os
+import time
+import uuid
 
 logger = logging.getLogger("laap.chatflow")
 
 _CHAT_PATH = "/v1/chat/completions"
+# 作者的 process_with_laap 是同步阻塞函式，卸載到 executor 後才不會凍結 event loop。
+# 逾時降級（executor 版本下 wait_for 有效，因 event loop 沒被阻塞）。
+_CHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_CHAT_TIMEOUT_S", 25))
 
 
 def _extract_user_msg(body: dict) -> str:
@@ -45,15 +51,62 @@ def _feed(user_msg: str) -> None:
         logger.debug(f"[chatflow] feed 跳過: {e}")
 
 
-def _wrap(handler):
-    async def wrapped(request):
+def _build_response(content: str, engine: str, model: str, prompt_chars: int) -> dict:
+    """複製作者 handle_chat_completions 的非 streaming OpenAI response 格式。"""
+    return {
+        "id": f"laap-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": content},
+                     "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": prompt_chars // 4,
+                  "completion_tokens": len(content) // 4, "total_tokens": 0},
+        "engine": engine,
+    }
+
+
+def _make_chat_handler(orig_handler):
+    """包住作者 chat handler：(1) 餵 psi (2) 非 streaming 走 executor 卸載 + timeout
+    （治 event loop 阻塞隱患）。streaming 走作者原 handler（少數，保留其 SSE 邏輯）。"""
+    from aiohttp import web
+
+    async def handler(request):
         try:
-            body = await request.json()   # aiohttp 快取 body，作者 handler 再讀無虞
-            _feed(_extract_user_msg(body))
+            body = await request.json()   # aiohttp 快取 body，作者/executor 再讀無虞
         except Exception as e:
-            logger.debug(f"[chatflow] 攔截跳過: {e}")
-        return await handler(request)     # 原封不動走作者 handler
-    return wrapped
+            logger.debug(f"[chatflow] body 解析失敗，交回作者: {e}")
+            return await orig_handler(request)
+
+        _feed(_extract_user_msg(body))
+
+        # streaming：保留作者 SSE 實作（同步阻塞風險僅限這條少數路徑）
+        if body.get("stream"):
+            return await orig_handler(request)
+
+        # 非 streaming：把同步的 process_with_laap 丟 executor，不凍結 event loop
+        model = body.get("model", "laap-core")
+        messages = body.get("messages", [])
+        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        try:
+            import laap_brain_api as api   # 執行時已載入（runpy 起 API 後）
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, api.process_with_laap, messages, model),
+                timeout=_CHAT_TIMEOUT_S)
+            content = result.get("content", "")
+            engine = result.get("engine", "laap-core")
+        except asyncio.TimeoutError:
+            logger.warning(f"[chatflow] 認知管線逾時 {_CHAT_TIMEOUT_S}s → 降級回應")
+            content = "（認知管線處理逾時，本次降級回應。狀態未受影響。）"
+            engine = "laap-timeout"
+        except Exception as e:
+            logger.debug(f"[chatflow] executor 路徑失敗，交回作者 handler: {e}")
+            return await orig_handler(request)
+        return web.json_response(_build_response(content, engine, model, prompt_chars))
+
+    return handler
 
 
 def install() -> bool:
@@ -71,8 +124,8 @@ def install() -> bool:
 
     def patched(self, path, handler, **kw):
         if path == _CHAT_PATH:
-            handler = _wrap(handler)
-            logger.info(f"[chatflow] 已包住 {path} — 對話流餵 psi")
+            handler = _make_chat_handler(handler)
+            logger.info(f"[chatflow] 已包住 {path} — 餵 psi + executor 卸載（防 event loop 阻塞）")
         return orig(self, path, handler, **kw)
 
     patched._laap_chatflow = True
