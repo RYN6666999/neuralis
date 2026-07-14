@@ -70,9 +70,10 @@ recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming 
 
 ### 已知限制（誠實）
 - `laap/agi/causal/world_model/analogical` = dict-based，非真 AGI → 策略性維持現狀
-- PsiCore 心跳未接到 `/v1/chat/completions` → 對話中需求不影響回應
-- 無記憶固化循環 → 記憶有存取、缺睡眠（Phase 5 的內容）
-- Phase 4 安全閘未部署 → RSI 能力尚未開放
+- ~~PsiCore 心跳未接到 `/v1/chat/completions`~~ → 已解（psi-respond，2026-07-14）：
+  回應報實測 delta。剩餘天花板：v0 規則表組句非認知，等接真 LLM
+- ~~無記憶固化循環~~ → 已解（Phase 5 ConsolidationLoop）
+- ~~Phase 4 安全閘未部署~~ → 4a/4b 已上線；RSI（4c）戰略決定不做
 
 ---
 
