@@ -166,6 +166,12 @@ def startup_all():
     ensure_agency()
     ensure_consolidation()
     ensure_status()
+    # 對話流攔截：必須在作者 app.router.add_post 之前 patch（startup 早於 runpy 起 API）
+    try:
+        from laap.chatflow import install as _install_chatflow
+        _install_chatflow()
+    except Exception as e:
+        logger.warning(f"chatflow hook 跳過: {e}")
     return _bus, _psi_core, _tool_executor
 
 
