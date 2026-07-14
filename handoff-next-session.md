@@ -210,7 +210,24 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 湧現** — 條件三個：簡單規則 ✅、閉環迴路 ✅、後果塑形 ❌（Aris 做任何事都不改變
 自己未來的傾向 — 沒有 stakes 就沒有養成）。補第三個 = 下面的第一優先。
 
-### 下一線頭（依優先序，功能性對應表）
+### ✅ 功能性多巴胺（RPE）已實作（2026-07-14）— 靜態規則表變會學的 bandit
+改動只在 `laap/agency.py`（+自檢+儀表）：
+1. **_score_result(result) → 0-1**：拆 gbrain 結果的分數線 hit 數 + 平均分數 +
+   內容長度三個訊號。無結果 = 0，高品質 = ~0.9。
+2. **RPE = outcome - expected**：每行動後量結果品質 vs EMA 預期值（α=0.1），
+   誤差 = 功能性多巴胺訊號。存入 `_need_stats[need]` 的 rpes buffer。
+3. **角度權重更新**：正 RPE → 該查詢角度權重升（×0.5）；負 RPE → 降。
+   權重 clamp 0.1-3.0。`_form_intent` 依權重 epsilon-greedy 選角度。
+4. **探索率自適應**：滑動 20 窗 RPE 均值 > 0.05 → 探索率升 0.005（上限 0.30）；
+   < -0.05 → 降 0.005（下限 0.05）。
+5. **儀表：`aris-status.py`** 顯示 RPE avg + exploration rate。
+   **審計：`agency-audit.jsonl`** 每行含 outcome/expected/rpe/exploration，
+   可回溯每步的學習訊號。
+6. **自檢：`scripts/check-dopamine.py`** — 4 段全過。
+ponytail：簡化 bandit（epsilon-greedy + EMA），不是 Thompson sampling。
+天花板：結果品質只量分數線，不考慮語義。升級路徑 = semantic score。
+
+### 下一線頭（依優先序，已完成=RPE）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。

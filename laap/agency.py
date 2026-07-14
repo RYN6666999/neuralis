@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -42,7 +43,12 @@ def _env_float(name: str, default: float) -> float:
 
 
 class AgencyLoop:
-    """背景執行緒：定期評估 PsiCore drives，超閾值就形成意圖並行動。"""
+    """背景執行緒：定期評估 PsiCore drives，超閾值就形成意圖並行動。
+
+    v0.1 — RPE（Reward Prediction Error）：
+    行動後量結果 vs 預期（檢索命中率/分數），誤差回頭調規則表權重 +
+    drive 閾值/探索率。靜態規則表變會學的 bandit（誠實標註不是認知）。
+    """
 
     def __init__(self, psi, tools, bus=None,
                  interval: Optional[float] = None,
@@ -64,6 +70,12 @@ class AgencyLoop:
         self._running = False
         self.actions_total = 0
         self.skipped_stale = 0                     # 因種子重複/缺席而跳過的次數（可觀測）
+        # ── RPE 狀態 ──
+        self._need_stats: dict = {}                # need → {expected, rpes, angle_weights}
+        self._rpe_buffer = deque(maxlen=20)        # 滑動視窗 RPE，調 threshold / 探索率
+        self._exploration_rate = 0.15              # 探索非最優角度的機率
+        self._rpe_total = 0.0                      # 累計 RPE（儀表用）
+        self._rpe_count = 0
 
     # ── 生命週期 ──
 
@@ -117,6 +129,44 @@ class AgencyLoop:
 
     _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗"}
 
+    def _score_result(self, result: str) -> float:
+        """量產 gbrain 結果的品質分數 0-1。
+
+        拆成分數線的 hit 數 + 平均分數 + 內容長度三個訊號。
+        ponytail: 簡化版，不考慮語義相關性。升級路徑 = semantic score 取代線性組合。
+        """
+        if not result or result == "無結果":
+            return 0.0
+        scores = []
+        for line in result.splitlines():
+            m = re.match(r'^\[([\d.]+)\]', line)
+            if m:
+                scores.append(float(m.group(1)))
+        if not scores:
+            # 有結果但無解析分數：給基礎分（有內容就是一種結果）
+            return min(0.4, len(result) / 500)
+        hit_count = len(scores)
+        avg_score = sum(scores) / len(scores)
+        # 組合：平均分為主 + hit 數加成（遞減），鼓勵多樣化但不鼓勵垃圾多
+        hit_bonus = min(0.3, hit_count * 0.06)
+        return min(1.0, avg_score + hit_bonus)
+
+    def _get_angle_weights(self, need: str) -> dict:
+        """從 RPE 歷史算每個查詢角度的權重（bandit-style）。
+
+        回 {angle_label: weight}，weight 越高越該選。
+        新角度權重 1.0（探索期）。RPE 正 → 權重升；負 → 降。
+        ponytail: 簡化 bandit（epsilon-greedy），不是 Thompson sampling。
+        """
+        stats = self._need_stats.get(need, {"angle_weights": {}})
+        weights = dict(stats.get("angle_weights", {}))
+        for angle in self._ANGLE.get(need, "").split():
+            if not angle:
+                continue
+            if angle not in weights:
+                weights[angle] = 1.0  # 新角度初始權重
+        return weights if weights else {"": 1.0}
+
     def _form_intent(self, need: str):
         if need not in self._ANGLE:
             return None  # relatedness / autonomy：v0 無唯讀動作可做
@@ -125,9 +175,17 @@ class AgencyLoop:
         if not seed:
             self.skipped_stale += 1          # 無新鮮種子 → 閒著，不刷模板
             return None
-        query = f"{seed} {self._ANGLE[need]}".strip()
+        # RPE 角度選擇：依權重抽樣（epsilon-greedy）
+        weights = self._get_angle_weights(need)
+        if not weights or not self._ANGLE.get(need, ""):
+            angle = ""
+        elif random.random() < self._exploration_rate:
+            angle = random.choice(list(weights.keys()))  # 探索
+        else:
+            angle = max(weights, key=weights.get)       # 利用
+        query = f"{seed} {angle}".strip()
         if self._too_similar(query):
-            self.skipped_stale += 1          # 跟最近查詢太像 → 不重複刷
+            self.skipped_stale += 1
             return None
         self._recent_queries.append(self._norm(query))
         return ("gbrain", query)
@@ -147,7 +205,7 @@ class AgencyLoop:
                 return True
         return False
 
-    # ── 行動 + 回寫 + 審計 ──
+    # ── 行動 + RPE + 回寫 + 審計 ──
 
     def _act(self, need: str, drive: float, tool: str, prompt: str) -> None:
         if tool not in READONLY_WHITELIST:
@@ -158,17 +216,47 @@ class AgencyLoop:
         ok = bool(result) and not result.startswith(("[錯誤]", "[未知工具]", "[AgentOS 錯誤]")) \
             and result != "無結果"
 
+        # ── RPE 計算 ──
+        outcome = self._score_result(result) if ok else 0.0
+        stats = self._need_stats.setdefault(need, {
+            "expected": 0.3, "rpes": [], "angle_weights": {}})
+        expected = stats["expected"]
+        rpe = outcome - expected
+        stats["expected"] = 0.9 * expected + 0.1 * outcome  # EMA
+        stats["rpes"].append(rpe)
+        self._rpe_buffer.append(rpe)
+        self._rpe_total += rpe
+        self._rpe_count += 1
+
+        # ── 角度權重更新 ──
+        used_angle = ""
+        for a in self._ANGLE.get(need, "").split():
+            if a and a in prompt:
+                used_angle = a
+                break
+        if used_angle:
+            aw = stats["angle_weights"]
+            old = aw.get(used_angle, 1.0)
+            aw[used_angle] = max(0.1, min(3.0, old + rpe * 0.5))
+
+        # ── 探索率自適應 ──
+        if len(self._rpe_buffer) >= 5:
+            avg_rpe = sum(self._rpe_buffer) / len(self._rpe_buffer)
+            if avg_rpe > 0.05:
+                self._exploration_rate = min(0.30, self._exploration_rate + 0.005)
+            elif avg_rpe < -0.05:
+                self._exploration_rate = max(0.05, self._exploration_rate - 0.005)
+
         mem_id = ""
         if ok:
             try:
                 import memory_bridge
                 emo = self.psi.emotion.to_dict()
-                importance = min(0.5, 0.25 + 0.25 * emo["arousal"])  # 自主寫入上限 0.5
+                importance = min(0.5, 0.25 + 0.25 * emo["arousal"])
                 mem_id = memory_bridge.store_important(
                     f"[自主行動:{need}] 查詢「{prompt}」→\n{result[:500]}",
                     tags=["agency", need], importance=importance)
                 self.psi.needs.satisfy_all({self._need_type(need): 0.2})
-                # 聯想鏈：從查到的結果抽首行非空片段當下次無對話時的種子
                 self._seed_snippet = self._extract_seed(result)
             except Exception as e:
                 logger.warning(f"[Agency] 回寫失敗: {e}")
@@ -176,11 +264,15 @@ class AgencyLoop:
         self._action_ts.append(now)
         self._need_last_action[need] = now
         self.actions_total += 1
-        self._audit({"ts": now, "need": need, "drive": round(drive, 3), "tool": tool,
-                     "prompt": prompt, "ok": ok, "result_len": len(result or ""),
-                     "mem_id": mem_id})
+        entry = {"ts": now, "need": need, "drive": round(drive, 3),
+                 "tool": tool, "prompt": prompt, "ok": ok,
+                 "result_len": len(result or ""), "mem_id": mem_id,
+                 "outcome": round(outcome, 3), "expected": round(expected, 3),
+                 "rpe": round(rpe, 3), "exploration": round(self._exploration_rate, 3)}
+        self._audit(entry)
         logger.info(f"[Agency] 行動#{self.actions_total} {need}(drive={drive:.2f}) "
-                    f"{tool}({prompt[:40]}) ok={ok} → mem={mem_id or '-'}")
+                    f"{tool}({prompt[:40]}) ok={ok} rpe={rpe:+.3f} "
+                    f"exp={self._exploration_rate:.2f} → mem={mem_id or '-'}")
 
     @staticmethod
     def _need_type(name: str):

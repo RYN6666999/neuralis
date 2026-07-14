@@ -51,6 +51,13 @@ def snapshot() -> dict:
             "max_per_hour": agency.max_per_hour,
             "drive_threshold": agency.drive_threshold,
             "actions_last_hour": len(getattr(agency, "_action_ts", [])),
+            "exploration_rate": round(getattr(agency, "_exploration_rate", 0.15), 3),
+            "rpe_count": getattr(agency, "_rpe_count", 0),
+            "rpe_avg": round(getattr(agency, "_rpe_total", 0.0) / max(1, getattr(agency, "_rpe_count", 0)), 4),
+            "need_stats": {
+                n: {"expected": round(s["expected"], 3), "angle_weights": s.get("angle_weights", {})}
+                for n, s in getattr(agency, "_need_stats", {}).items()
+            },
         }
 
     cons = get_consolidation()
