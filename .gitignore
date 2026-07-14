@@ -30,3 +30,4 @@ Thumbs.db
 logs/
 agency-audit.jsonl
 consolidation-audit.jsonl
+safety-audit.jsonl

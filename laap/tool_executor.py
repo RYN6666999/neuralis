@@ -48,7 +48,11 @@ class ToolExecutor:
         logger.info(f"[ToolExecutor] 工具註冊: {name}")
 
     def execute(self, tool: str, prompt: str, timeout: int = 30) -> str:
-        """執行工具，回傳結果文字。"""
+        """執行工具，回傳結果文字。所有呼叫先過安全閘（Phase 4a）。"""
+        from laap.safety_gate import check as safety_check
+        allowed, reason = safety_check(tool, prompt)
+        if not allowed:
+            return f"[安全閘] 拒絕: {reason}"
         logger.info(f"[ToolExecutor] 執行: {tool}({prompt[:60]})")
 
         # 1. 本機工具

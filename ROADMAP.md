@@ -55,11 +55,14 @@ Python 版 PsiCore 已運作，五維需求 + 情緒梯度 + 背景心跳。
 ## Phase 4 — AgentOS 執行/安全層（⚠️ 順序：煞車先於能力）
 **重要：此階段的執行順序不可逆。**
 
-### Phase 4a — 安全閘 (Safeguard) 🥇
-AgentOS `safety.py` + `checker.py` 先部署，確保工具執行有邊界。
-- 危險指令閘 (`rm -rf`、`DROP TABLE` 等)
-- 沙箱隔離 (sandbox)
-- 人工批准閘門 (approval gate)
+### Phase 4a — 安全閘 (Safeguard) ✅ v0（2026-07-14）
+`laap/safety_gate.py` 接進 ToolExecutor.execute — 所有工具呼叫先過閘：
+- 工具分級：唯讀組直接過；其他預設拒絕，`NEURALIS_TOOL_ALLOW` 明確簽名才放
+  （v0 人工批准 = env 簽名；互動式批准留 4b）
+- 內容掃描：AgentOS `orchestrator/safety.py` check_command（rm -rf / DROP TABLE /
+  restricted paths），載不到用內建縮小版
+- DENY 全審計（safety-audit.jsonl）；自檢 `scripts/check-safety.py` 四段
+- 未做（升級路徑）：沙箱隔離、互動式批准閘門 — 開放寫入類工具前必補
 
 ### Phase 4b — 工具深度整合 🥈
 - 接 PyPI laap 的 21 工具層

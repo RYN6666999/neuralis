@@ -95,10 +95,15 @@ recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming 
 情緒權重（外部審查 #2）寫入端已補（`emotion_intensity` 進 frontmatter）；
 檢索端 re-rank 未做 — hit 不帶 frontmatter，逐頁抓太慢，留給 gbrain 上游或之後。
 
-## 下一線頭 = Phase 4a 安全閘（順序不可逆：煞車 → 能力 → RSI）
-agency 開放任何寫入類行動前的硬前提（外部審查紅線）。起點：
-`~/agent-sandbox`（AgentOS）`orchestrator/safety.py` + `checker.py` 接進 ToolExecutor.execute
-（危險指令閘、沙箱、人工批准閘門）。之後才輪 4b 工具深化、4c RSI（沙箱 + 人工批准，必須）。
+## Phase 4a 安全閘 v0 已完成（2026-07-14）
+`laap/safety_gate.py` → ToolExecutor.execute 全呼叫過閘：唯讀組放行、其他工具
+`NEURALIS_TOOL_ALLOW` 簽名才過、prompt 過 AgentOS check_command（fallback 內建規則）、
+DENY 全審計。自檢 `scripts/check-safety.py`（危險內容/未批准工具/env 批准/乾淨放行 4 段）。
+
+## 下一線頭 = Phase 4b/4c 或推理層 benchmark
+- 4b：互動式批准閘門 + 沙箱（開放寫入類工具前必補）、工具深化（Obscura/web）
+- 4c：RSI 只在沙箱 + 人工批准（外部審查紅線，順序不可逆）
+- 或先做 Phase 3 的 20 題推理 benchmark（gate：沒贏過 gbrain 檢索+LLM 不投）
 
 ## 舊 Phase 5 規劃（已執行，留參考）
 
