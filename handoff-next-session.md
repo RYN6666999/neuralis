@@ -1,7 +1,7 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 | 最新 commit: `a1359c9`（全面檢查修復波）
-> 當前 Phase: **Phase 5（記憶固化循環）** — 剛從 Phase 3 推進至此
+> 最後更新: 2026-07-14 | 最新: watchdog 韌性層（health 探測 + 自動重啟）
+> 當前 Phase: 產品向 — 心跳/記憶/自主/睡眠/煞車/對話流/**韌性** 全上線
 
 ## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
 實跑審查 Phase 1.5/3 的 code 後修掉 6 個 bug — **最重要的一個：在修復前，
@@ -137,12 +137,33 @@ process_with_laap 卸載到 executor + timeout 降級。實測 2 個 1.5s 慢 ch
 （非 3s 序列化）；真 API 3 chat 併發 + health 全 200。⚠️ 那次 HTTP 000 崩潰的確切根因
 （OOM vs 假死）未穩定復現；此修解 event loop 阻塞隱患。
 
+### ✅ watchdog 韌性層（2026-07-14）
+`scripts/watchdog.sh` — 每 30s 探 `/health`，連續 3 次失敗 → 殺 port listener（含子進程，
+gbrain MCP subprocess 會被 reparent 到 init 續佔記憶體）→ 重跑 `start-laap-api.sh`。
+1h 內重啟 > 5 次 = crash-loop，停手 exit 1（繼續重啟只會刷 log 蓋掉真因）。
+審計 `watchdog-audit.jsonl`，儀表有「重啟 N 次」一行。全 env 可調（見腳本開頭）。
+
+啟動：`nohup scripts/watchdog.sh > watchdog.log 2>&1 &`
+
+- **刻意不用 launchd KeepAlive**：它只在行程「退出」時重啟，抓不到假死（行程活著、
+  event loop 凍結、health 不回）。那正是我們觀察到的崩法之一。health 探測兩種都抓。
+- **認 port 不認 cmdline**：start.sh 是 heredoc python，cmdline 認不出來 → `lsof -ti tcp:PORT`。
+- 實跑證據：`scripts/check-watchdog.py` 4/4（健康不動 / 死了重起 / **假死**重起 /
+  crash-loop 停手，用假 server + `NEURALIS_WATCHDOG_START_CMD` 覆寫，不碰線上那隻）；
+  真 API E2E：`kill -9` 線上 pid 94266 → watchdog 重啟 → 新 pid 健康 + boot log 有
+  心跳 tick / 42 工具 / AgencyLoop / ConsolidationLoop（救回的是完整 Aris，不是空殼 API）。
+- 未做（升級路徑）：watchdog 自己死了沒人救（launchd 守 watchdog 本身 = 合理下一步，
+  但那要裝 LaunchAgent 到使用者機器，等你點頭）。
+
 ### 下一線頭（產品向，擇一）
-- **watchdog 自動重啟**：防真 OOM 崩潰（event loop 阻塞已修，但真崩潰仍需韌性層）。
-  獨立監控 health，連續 N 次失敗 → kill 殘進程 + 重跑 start-laap-api.sh。生產標準。
 - consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
 - injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
+- 有價值產出：Aris 目前自主行動只是「查了寫回記憶」，沒有對使用者的產出面
 - 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走
+
+### 🧹 順手發現（未處理）
+`~/neuralis` 是舊的重複 checkout（停在 `108e746`），正的在 `~/Developer/neuralis`。
+沒動它 — 要刪請你確認。
 
 ## 舊 Phase 5 規劃（已執行，留參考）
 

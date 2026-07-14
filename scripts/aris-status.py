@@ -80,6 +80,16 @@ def main():
         for d in denies:
             print(f"   {d.get('tool')}: {str(d.get('denied'))[:50]}")
 
+    # watchdog：崩過幾次是運維第一時間要看的
+    wd = _tail(ROOT / "watchdog-audit.jsonl", 200)
+    restarts = [e for e in wd if e.get("event") in ("restart_ok", "restart_failed")]
+    if restarts:
+        last = restarts[-1]
+        ago = (time.time() - last.get("ts", 0)) / 60
+        loop = " 🚨 CRASH-LOOP 已停手" if any(e.get("event") == "crashloop" for e in wd[-5:]) else ""
+        print(f"🛡️  watchdog 重啟 {len(restarts)} 次 | 最近: {last['event']} "
+              f"({ago:.0f} 分鐘前){loop}")
+
 
 if __name__ == "__main__":
     main()

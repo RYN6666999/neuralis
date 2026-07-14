@@ -22,14 +22,30 @@
 ## 使用方式
 
 ```bash
-# 一鍵啟動
-source ~/neuralis/scripts/start.sh
+# 一鍵啟動（前景，PsiCore 心跳 + 全部迴路 + API :11546）
+~/Developer/neuralis/scripts/start.sh
 
-# 或分步
-source ~/neuralis/scripts/activate.sh
-cd ~/laap-AGI && source .venv/bin/activate
-python aris_brain/laap_brain_api.py --port 11530
+# 背景（冪等，已在跑就不重複起）
+~/Developer/neuralis/scripts/start-laap-api.sh
+
+# 看狀態
+python3 scripts/aris-status.py            # 一頁式儀表
+watch -n5 python3 scripts/aris-status.py  # 即時盯
 ```
+
+### 韌性：watchdog
+
+API 崩了（OOM）或假死（行程活著但不回應）時自動救回：
+
+```bash
+nohup scripts/watchdog.sh > watchdog.log 2>&1 &
+```
+
+每 30s 探 `/health`，連續 3 次失敗 → 殺殘進程（含子進程）→ 重跑 `start-laap-api.sh`。
+1 小時內重啟超過 5 次視為 crash-loop，停手並吼出來（繼續重啟只會刷 log 蓋掉真因）。
+調參見腳本開頭 env；審計走 `watchdog-audit.jsonl`。
+
+刻意不用 launchd KeepAlive：它只在「行程退出」時重啟，抓不到假死。
 
 ## 目錄結構
 
@@ -57,6 +73,10 @@ neuralis/
 │       ├── fable5-minimal-design.md   ← 極簡設計
 │       └── neuralis-handoff.md
 └── scripts/
-    ├── activate.sh
-    └── start.sh                       ← 一鍵啟動
+    ├── start.sh                       ← 一鍵啟動（心跳 + API 同 process）
+    ├── start-laap-api.sh              ← 背景啟動（冪等）
+    ├── watchdog.sh                    ← 韌性：health 探測 + 自動重啟
+    ├── aris-status.py                 ← 一頁式狀態儀表
+    ├── approve-tool.sh                ← 工具批准閘
+    └── check-*.py                     ← 各層自檢（改到哪跑哪）
 ```
