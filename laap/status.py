@@ -48,6 +48,7 @@ def snapshot() -> dict:
             "actions_total": agency.actions_total,
             "skipped_stale": getattr(agency, "skipped_stale", 0),
             "interval_s": agency.interval,
+            "effective_interval_s": round(agency._effective_interval(), 1),
             "max_per_hour": agency.max_per_hour,
             "drive_threshold": agency.drive_threshold,
             "actions_last_hour": len(getattr(agency, "_action_ts", [])),

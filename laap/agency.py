@@ -95,12 +95,29 @@ class AgencyLoop:
 
     def _loop(self) -> None:
         while self._running:
-            time.sleep(self.interval)
+            interval = self._effective_interval()
+            time.sleep(interval)
             try:
                 self._evaluate()
             except Exception as e:
                 # 同心跳原則：單次評估失敗不停迴路
                 logger.warning(f"[Agency] 評估失敗: {e}")
+
+    def _effective_interval(self) -> float:
+        """腎上腺素：高 arousal 縮短 agency interval。
+
+        arousal 0-1，interval 範圍 [base × 0.3, base × 1.0]。
+        閒置平淡時 (arousal<0.3) 維持基礎 interval；興奮/緊張時加速評估。
+        ponytail: 線性映射，不是真腎上腺素動力學。升級路徑 = 非線性曲線。
+        """
+        try:
+            arousal = getattr(self.psi.emotion, "arousal", 0.3)
+        except Exception:
+            arousal = 0.3
+        # arousal 0.3 → factor 1.0, arousal 0.9 → factor 0.3
+        factor = max(0.3, 1.0 - (arousal - 0.3) * 1.2)
+        effective = self.interval * factor
+        return effective
 
     def _evaluate(self) -> None:
         now = time.time()

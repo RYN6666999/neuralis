@@ -53,9 +53,11 @@ def main():
 
     ag = data.get("agency")
     if ag:
+        eff = ag.get('effective_interval_s', ag['interval_s'])
         rpe = f"RPE avg={ag.get('rpe_avg', 0):+.4f} exp={ag.get('exploration_rate', 0.15):.2f}" if ag.get('rpe_count', 0) else ""
         print(f"🔄 自主行動 累計={ag['actions_total']} (跳過空轉={ag.get('skipped_stale', 0)}) | "
               f"近一小時={ag['actions_last_hour']}/{ag['max_per_hour']} | 閾值={ag['drive_threshold']}"
+              f" | interval={eff}s"
               + (f" | {rpe}" if rpe else ""))
 
     co = data.get("consolidation")
