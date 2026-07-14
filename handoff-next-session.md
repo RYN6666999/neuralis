@@ -123,9 +123,16 @@ Phase 3 psilang 是研究向。產品向沿「可見 → 有價值產出 → 韌
 （上次結果摘要當下次種子）。移除固定模板 fallback → 無新鮮種子就閒著（skipped_stale
 接進儀表）。徹底砍掉「反覆刷同一模板」的重複垃圾記憶。起點 `laap/agency.py` `_form_intent`。
 
+### ✅ 對話流接上心臟（commit `88a0fee`）
+`laap/chatflow.py` monkey-patch aiohttp add_post 包住 `/v1/chat/completions`，請求進入
+第一時間餵 psi（作者 handler 前、不阻塞、不管作者管線成敗）。實測 E2E：發 chat →
+`psi.last_input` = chat 輸入。agency 現在有真對話種子，聯想鏈不自我循環。
+⚠️ 踩到：作者的 chat 管線很重、曾一次 HTTP 000 崩整個 process（無 traceback，疑似卡死/OOM）—
+psi 餵食獨立於它是刻意設計。
+
 ### 下一線頭（產品向，擇一）
-- 對話流真正接上：`process_input` 現在只在 recall_related 被動觸發；讓 `/v1/chat/completions`
-  主流程也餵 psi，agency 才有源源不絕的真對話種子（否則聯想鏈跑幾輪就自我循環）
+- **作者 chat 管線穩定性**：偶發卡死崩 process（見上）。若要常駐生產用，得查 process_with_laap
+  → bridge.process 為何慢/卡（可能某引擎無限迴圈）。但這碰作者碼，overlay 難修 → 或加 watchdog 自動重啟
 - consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
 - injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
 - 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走
