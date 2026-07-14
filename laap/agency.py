@@ -329,11 +329,11 @@ class AgencyLoop:
         if not seed:
             self.skipped_stale += 1          # 無新鮮種子 → 閒著，不刷模板
             return None
-        # RPE 角度選擇：依權重抽樣（epsilon-greedy）
+        # RPE 角度選擇：依權重抽樣（epsilon-greedy，探索率被情緒偏差調變）
         weights = self._get_angle_weights(need)
         if not weights or not self._ANGLE.get(need, ""):
             angle = ""
-        elif random.random() < self._exploration_rate:
+        elif random.random() < self._effective_exploration():
             angle = random.choice(list(weights.keys()))  # 探索
         else:
             angle = max(weights, key=weights.get)       # 利用
@@ -343,6 +343,21 @@ class AgencyLoop:
             return None
         self._recent_queries.append(self._norm(query))
         return ("gbrain", query)
+
+    def _effective_exploration(self) -> float:
+        """情緒偏差調變探索率（affective 引擎的偏差接真參數 — 移植的意義所在）。
+
+        risk_seeking 升探索、attention_narrowing 收窄探索（壓力/高喚起時聚焦利用）。
+        底值仍由 RPE 自適應調（_act），這裡是情緒的即時調變層。
+        """
+        eff = self._exploration_rate
+        try:
+            biases = self.psi.affective.compute_cognitive_bias()
+            eff = (eff + 0.3 * biases["risk_seeking"]) * \
+                  (1.0 - 0.6 * max(0.0, biases["attention_narrowing"]))
+        except Exception:
+            pass  # affective 沒起 → 用底值
+        return max(0.02, min(0.5, eff))
 
     @staticmethod
     def _norm(text: str) -> str:
@@ -398,6 +413,15 @@ class AgencyLoop:
             # 憲法：權重變速上限 + 小時預算凍結（防 gbrain 分數線異常時垃圾訊號永久累積）
             allowed = get_constitution().guard_weight(need, used_angle, rpe * 0.5)
             aw[used_angle] = max(0.1, min(3.0, old + allowed))
+
+        # ── RPE 結果 → 5 維情緒事件（行動後果塑形情緒，情緒再回頭調變探索）──
+        try:
+            if abs(rpe) > 0.05:
+                self.psi.affective.post_event(
+                    "task_success" if rpe > 0 else "task_failure",
+                    intensity=min(1.0, abs(rpe) * 2))
+        except Exception:
+            pass
 
         # ── 探索率自適應 ──
         if len(self._rpe_buffer) >= 5:

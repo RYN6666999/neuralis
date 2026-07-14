@@ -50,6 +50,12 @@ def main():
               f"(drive={psi['dominant_drive']}) | 注意力={psi['attention']}")
         print(f"    情緒 valence={e['valence']:+.2f} arousal={e['arousal']:.2f} | "
               f"最近輸入: {psi['last_input'] or '(無)'}")
+        af = psi.get("affective")
+        if af:
+            b = af.get("biases", {})
+            print(f"    5維 mood={af['mood']} | 偏差 risk={b.get('risk_seeking', 0):+.2f} "
+                  f"narrow={b.get('attention_narrowing', 0):+.2f} "
+                  f"creat={b.get('creativity', 0):+.2f} | 事件={af.get('events_total', 0)}")
 
     ag = data.get("agency")
     if ag:

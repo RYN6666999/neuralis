@@ -250,6 +250,10 @@ class PsiCore:
         self.interval = interval
         self.needs = NeedDriveSystem()
         self.emotion = EmotionGradient()
+        # 5 維情緒引擎（採作者版）：與 EmotionGradient 並存 — 舊消費者不動，
+        # 新消費者接 compute_cognitive_bias（agency 探索率等真參數）
+        from laap.affective import AffectiveState
+        self.affective = AffectiveState()
         self.attention_focus: AttentionFocus = AttentionFocus.IDLE
         self.last_input: str = ""   # 最近一次使用者輸入（AgencyLoop 的話題來源）
         self._thread: Optional[threading.Thread] = None
@@ -292,6 +296,9 @@ class PsiCore:
         if "relatedness" not in satisfaction:
             satisfaction[NeedType.RELATEDNESS.value] = 0.02
 
+        # 2.5 5 維情緒：使用者互動事件
+        self.affective.post_event("user_engagement", 0.5)
+
         # 3. 更新情緒梯度
         self.emotion.update(self.needs.get_satisfactions())
 
@@ -315,6 +322,7 @@ class PsiCore:
             "emotion": self.emotion.to_dict(),
             "attention": self.attention_focus.name,
             "tick": self._tick_count,
+            "affective": self.affective.to_dict(),
         }
 
     # ── 內部 ──
@@ -327,6 +335,7 @@ class PsiCore:
                 # 血清素：valence 調節 decay 速率
                 self.needs.tick(dt=self.interval, valence=self.emotion.valence)
                 self.emotion.update(self.needs.get_satisfactions())
+                self.affective.update(dt=self.interval)  # 5 維情緒動力學
                 dominant, _ = self.needs.get_dominant()
                 self._update_attention(dominant)
                 self._sync_bus_state()

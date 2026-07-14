@@ -38,6 +38,7 @@ def snapshot() -> dict:
                 "emotion": st["emotion"],
                 "attention": st["attention"],
                 "last_input": (getattr(psi, "last_input", "") or "")[:80],
+                "affective": st.get("affective"),
             }
         except Exception as e:
             out["psi"] = {"error": str(e)}
