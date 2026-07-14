@@ -110,10 +110,24 @@ DENY 全審計。自檢 `scripts/check-safety.py`（危險內容/未批准工具
 踩坑：非 UTF-8 locale 下 `$VAR` 緊接全形字會被吞進變數名（`set -u` 報 unbound）→
 腳本自設 LC_ALL + `${VAR}` 界定；grep -v 全刪光回 exit 1 不能進 && 鏈。
 
-## 下一線頭 = Phase 4b 剩餘 / 4c / 推理 benchmark
-- 4b 剩：沙箱隔離（寫入類工具真隔離執行）、工具深化（Obscura 眼睛 / web-search 接真）
-- 4c：RSI 只在沙箱 + 人工批准（外部審查紅線，順序不可逆）
-- 或先做 Phase 3 的 20 題推理 benchmark（gate：沒贏過 gbrain 檢索+LLM 不投）
+## 戰略方向已定：做可用的 agent（產品向，2026-07-14 使用者拍板）
+4c RSI / Phase 3 推理層都**不做** — 判斷：RSI 靠假推理驅動是本末倒置，
+Phase 3 psilang 是研究向。產品向沿「可見 → 有價值產出 → 韌性」走。
+
+### ✅ 可觀測儀表（commit `dc4eb5a`）
+`laap/status.py` StatusWriter 每 30s 寫 status.json；`scripts/aris-status.py` 一頁式儀表
+（心跳/自主行動/固化/記憶分層 + 最近動作 + 安全閘 DENY）。`watch -n5 python3 scripts/aris-status.py` 即時盯。
+
+### 下一線頭 = agency 意圖品質 🥈
+現在意圖形成是關鍵詞模板（「專案 進行中 任務 作法」），查回的東西跟真實 context
+未必相關 → 產生低價值記憶 → consolidation 要清（迴路空轉）。改：用 `psi.last_input`
+的實際內容當查詢種子，而非模板。純規則表內可做的真改進，直接減垃圾記憶。
+起點：`laap/agency.py` 的 `_form_intent`。
+
+### 之後
+- 沙箱隔離：YAGNI，工具全唯讀無破壞面，等要接寫入類工具再做
+- injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈，單人本地風險中等
+- 4c/Phase 3：戰略已定不走；若改研究向再議
 
 ## 舊 Phase 5 規劃（已執行，留參考）
 
