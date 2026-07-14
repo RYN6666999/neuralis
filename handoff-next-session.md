@@ -242,7 +242,13 @@ ponytail：簡化 bandit（epsilon-greedy + EMA），不是 Thompson sampling。
 ponytail：這是 prompt 塑形不是認知。升級路徑 = Aris 自己的對話管線接上 LLM 後，
 這層自然消失（被原生管線取代）。
 
-### 下一線頭（依優先序，已完成=RPE+LLM）
+### ✅ 腎上腺素（2026-07-14）— arousal 縮短 agency interval
+高 arousal = 興奮/緊張 → Aris 更頻繁地自主行動；低 arousal = 冷靜/放鬆 → 慢下來。
+- `_effective_interval()`：arousal 0.1→74s（放慢）、0.3→60s（正常）、0.9→18s（加速 3×）
+- 儀表顯示 current effective interval
+ponytail：線性映射，不是真腎上腺素動力學。升級路徑 = 非線性曲線 + 注意力窄化。
+
+### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
