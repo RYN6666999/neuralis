@@ -118,16 +118,17 @@ Phase 3 psilang 是研究向。產品向沿「可見 → 有價值產出 → 韌
 `laap/status.py` StatusWriter 每 30s 寫 status.json；`scripts/aris-status.py` 一頁式儀表
 （心跳/自主行動/固化/記憶分層 + 最近動作 + 安全閘 DENY）。`watch -n5 python3 scripts/aris-status.py` 即時盯。
 
-### 下一線頭 = agency 意圖品質 🥈
-現在意圖形成是關鍵詞模板（「專案 進行中 任務 作法」），查回的東西跟真實 context
-未必相關 → 產生低價值記憶 → consolidation 要清（迴路空轉）。改：用 `psi.last_input`
-的實際內容當查詢種子，而非模板。純規則表內可做的真改進，直接減垃圾記憶。
-起點：`laap/agency.py` 的 `_form_intent`。
+### ✅ agency 意圖品質 v1（commit `6520399`）
+種子優先序（真對話 > 記憶聯想 > 不硬查）+ 查詢去重（token Jaccard ≥0.7）+ 聯想鏈
+（上次結果摘要當下次種子）。移除固定模板 fallback → 無新鮮種子就閒著（skipped_stale
+接進儀表）。徹底砍掉「反覆刷同一模板」的重複垃圾記憶。起點 `laap/agency.py` `_form_intent`。
 
-### 之後
-- 沙箱隔離：YAGNI，工具全唯讀無破壞面，等要接寫入類工具再做
-- injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈，單人本地風險中等
-- 4c/Phase 3：戰略已定不走；若改研究向再議
+### 下一線頭（產品向，擇一）
+- 對話流真正接上：`process_input` 現在只在 recall_related 被動觸發；讓 `/v1/chat/completions`
+  主流程也餵 psi，agency 才有源源不絕的真對話種子（否則聯想鏈跑幾輪就自我循環）
+- consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
+- injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
+- 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走
 
 ## 舊 Phase 5 規劃（已執行，留參考）
 
