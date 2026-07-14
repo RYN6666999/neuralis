@@ -88,6 +88,10 @@ def _agency_summary(entries: list) -> str:
     lines = [f"- 自主行動 {total} 次，成功 {ok_count} 次（{ok_count/total*100:.0f}%）"]
     for n, c in sorted(needs.items(), key=lambda x: -x[1]):
         lines.append(f"  - {n}: {c} 次")
+    active_needs = len(needs)
+    lines.append(f"  - 行為豐富度: {active_needs} 個需求有主動行為 + "
+                 f"{5 - active_needs} 個被動/自然滿足(certainty/competence/growth 有 _ANGLE 查詢角度, "
+                 f"relatedness 靠 process_input+trust 被動, autonomy 由 agency loop 自然滿足)")
     if rpes:
         avg_rpe = sum(rpes) / len(rpes)
         lines.append(f"  - RPE 均值: {avg_rpe:+.4f}")

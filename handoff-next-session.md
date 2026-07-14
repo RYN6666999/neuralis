@@ -1,7 +1,7 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 深夜 | 最新: 催產素補完 + 養成期
-> 當前 Phase: 產品向 — 行為豐富度全線完成，轉養成期（調參不動架構）
+> 最後更新: 2026-07-15 | 最新: 撤 relatedness 假角度 + S_span 設計筆記
+> 當前 Phase: 產品向 — 行為豐富度誠實重標（3 active + 2 passive），轉養成期第 2 天
 
 ## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
 實跑審查 Phase 1.5/3 的 code 後修掉 6 個 bug — **最重要的一個：在修復前，
@@ -254,9 +254,11 @@ relatedness drive × (1 + trust × 0.5)，信任 1.0 時增益 50%。
 儀表顯示 current trust score。
 ponytail：單一 entity 簡化版。升級路徑 = multi-entity + 記憶 frontmatter 持久化。
 
-### ✅ 催產素補完（2026-07-14 深夜, commit `a5c4f94`）— relatedness 加入查詢角度
+### ⛔ 催產素補完（2026-07-14 深夜, commit `a5c4f94`）→ 2026-07-15 撤銷
 _ANGLE 新增 `"relatedness": "你 我們 陪伴 一起 感覺"`，trust 高時 agency 會查 gbrain
-相關記憶。五個角度各由 RPE 獨立調權重，持久化自動涵蓋。半套→完整閉環。
+相關記憶。2026-07-15 驗證：58 次自主行動零命中，relatedness 不該有查詢角度（文字匹配≠被陪伴）。
+**已撤銷**：relatedness 從 _ANGLE 移除，改誠實標為被動需求（process_input+trust）。
+見 `docs/specs/s-span-design-note.md`。
 
 ### ✅ 持久化（commit `7888d89`）— T_reach 從一次運行變永久累積
 RPE 學習狀態（_need_stats 含 angle_weights、_trust_scores、_exploration_rate）
@@ -312,8 +314,9 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 ## 🔄 下一 session 啟動提示詞
 
 ```
-你是 neuralis 的接棒者。當前 commit a5c4f94（催產素補完），行為豐富度全線完成。
-你進入養成期：調參不動架構。
+你是 neuralis 的接棒者。養成期 Day2（commit X, 2026-07-15）。
+行為豐富度誠實重標: certainty/competence/growth 有主動查詢角度,
+relatedness 靠 process_input+trust 被動滿足, autonomy 由 loop 本身自然滿足。
 
 先做：
 1. git pull（多 AI 平行作業，可能有不認識的新 commit）
@@ -321,7 +324,9 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 3. python3 scripts/morning-brief.py（最近 24h 摘要）
 
 可調參數見養成期表格。觀察 morning-brief 的三大指標。
-不要動：_ANGLE、需求五維結構、持久化煞車邏輯。
+不要動：需求五維結構、持久化煞車邏輯。
+養成期重要參考：docs/specs/s-span-design-note.md（S_span 新理解 — 
+  廣度靠「既有需求有多種動作」，不是靠鋪滿五個需求的查詢角度）
 ```
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +

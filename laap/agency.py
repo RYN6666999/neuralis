@@ -270,7 +270,7 @@ class AgencyLoop:
     # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
     # 舊版沒種子時退回固定模板反覆刷同一查詢，是重複垃圾記憶的根源。
 
-    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗", "relatedness": "你 我們 陪伴 一起 感覺"}
+    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗"}
 
     def _score_result(self, result: str) -> float:
         """量產 gbrain 結果的品質分數 0-1。
@@ -312,7 +312,9 @@ class AgencyLoop:
 
     def _form_intent(self, need: str):
         if need not in self._ANGLE:
-            return None  # autonomy：v0 無唯讀動作可做。relatedness v0.2 已加查詢角度
+            return None  # autonomy：由 agency loop 本身自然滿足（每次自主選擇=行使自主），
+                          # 不需要獨立角度。relatedness：被動需求（process_input+trust），
+                          # 2026-07-15 撤掉假角度。見 docs/specs/s-span-design-note.md
         topic = (getattr(self.psi, "last_input", "") or "").strip()[:80]
         seed = topic or self._seed_snippet   # 真對話優先，否則從上次記憶聯想
         # 自我強化循環防護：連續多次無使用者輸入 + gbrain 查詢 → 閒置
