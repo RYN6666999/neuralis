@@ -45,9 +45,15 @@ class EmotionGradient:
         self.arousal = 0.5          # 0.0 ~ 1.0
         self.dominance = 0.5        # 0.0 ~ 1.0
         self._prev_sat: Dict[str, float] = {}
+        self._lock = threading.RLock()
 
     def update(self, satisfactions: Dict[str, float]) -> None:
         """從當前需求值更新情緒狀態。"""
+        with self._lock:
+            self._update_impl(satisfactions)
+
+    def _update_impl(self, satisfactions: Dict[str, float]) -> None:
+        """update 的實際實作（鎖已取得）。"""
         avg = sum(satisfactions.values()) / max(1, len(satisfactions))
         v_target = max(-1.0, min(1.0, 2.0 * avg - 1.0))
         self.valence = self._smooth(self.valence, v_target)
@@ -64,11 +70,12 @@ class EmotionGradient:
         self._prev_sat = dict(satisfactions)
 
     def to_dict(self) -> Dict[str, float]:
-        return {
-            "valence": round(self.valence, 3),
-            "arousal": round(self.arousal, 3),
-            "dominance": round(self.dominance, 3),
-        }
+        with self._lock:
+            return {
+                "valence": round(self.valence, 3),
+                "arousal": round(self.arousal, 3),
+                "dominance": round(self.dominance, 3),
+            }
 
     def _smooth(self, old: float, new: float) -> float:
         return old * self.smoothing + new * (1.0 - self.smoothing)
@@ -124,52 +131,61 @@ class NeedDriveSystem:
             NeedType.RELATEDNESS: 0.005,
             NeedType.GROWTH: 0.004,
         }
+        self._lock = threading.RLock()
 
     def tick(self, dt: float = 1.0) -> Dict[NeedType, float]:
         """每秒向靜息值鬆弛 + 雜訊。"""
-        for nt in NeedType:
-            relax = (self.baselines[nt] - self.values[nt]) * self.decay_rates[nt] * dt
-            noise = random.gauss(0, self.volatilities[nt] * dt)
-            self.values[nt] = max(0.0, min(1.0, self.values[nt] + relax + noise))
-        return dict(self.values)
+        with self._lock:
+            for nt in NeedType:
+                relax = (self.baselines[nt] - self.values[nt]) * self.decay_rates[nt] * dt
+                noise = random.gauss(0, self.volatilities[nt] * dt)
+                self.values[nt] = max(0.0, min(1.0, self.values[nt] + relax + noise))
+            return dict(self.values)
 
     def satisfy(self, need_type: NeedType, amount: float) -> None:
         """滿足特定需求。"""
-        self.values[need_type] = min(1.0, self.values[need_type] + amount)
+        with self._lock:
+            self.values[need_type] = min(1.0, self.values[need_type] + amount)
 
     def satisfy_all(self, amounts: Dict[NeedType, float]) -> None:
         """批次滿足多個需求。"""
-        for nt, amount in amounts.items():
-            self.satisfy(nt, amount)
+        with self._lock:
+            for nt, amount in amounts.items():
+                self.values[nt] = min(1.0, self.values[nt] + amount)
 
     def get_dominant(self) -> Tuple[Optional[NeedType], float]:
         """回傳 (最高需求, drive 值)。"""
-        best_nt, best_drive = None, -1.0
-        for nt in NeedType:
-            drive = self.compute_drive(nt)
-            if drive > best_drive:
-                best_drive, best_nt = drive, nt
-        return best_nt, best_drive
+        with self._lock:
+            best_nt, best_drive = None, -1.0
+            for nt in NeedType:
+                drive = self.compute_drive(nt)
+                if drive > best_drive:
+                    best_drive, best_nt = drive, nt
+            return best_nt, best_drive
 
     def compute_drive(self, need_type: NeedType) -> float:
-        deficit = max(0.0, self.targets[need_type] - self.values[need_type])
-        return deficit * self.importances[need_type]
+        with self._lock:
+            deficit = max(0.0, self.targets[need_type] - self.values[need_type])
+            return deficit * self.importances[need_type]
 
     def get_satisfactions(self) -> Dict[str, float]:
-        return {nt.value: self.values[nt] for nt in NeedType}
+        with self._lock:
+            return {nt.value: self.values[nt] for nt in NeedType}
 
     def get_drives(self) -> Dict[str, float]:
-        return {nt.value: self.compute_drive(nt) for nt in NeedType}
+        with self._lock:
+            return {nt.value: self.compute_drive(nt) for nt in NeedType}
 
     def to_dict(self) -> Dict[str, dict]:
-        return {
-            nt.value: {
-                "current": round(self.values[nt], 3),
-                "target": self.targets[nt],
-                "drive": round(self.compute_drive(nt), 3),
+        with self._lock:
+            return {
+                nt.value: {
+                    "current": round(self.values[nt], 3),
+                    "target": self.targets[nt],
+                    "drive": round(self.compute_drive(nt), 3),
+                }
+                for nt in NeedType
             }
-            for nt in NeedType
-        }
 
 
 class PsiCore:
@@ -354,6 +370,74 @@ class PsiCore:
         )
         self.bus.self_presence = emo["valence"] * 0.5 + 0.5
         self.bus.curiosity = 1.0 - self.needs.values[NeedType.CERTAINTY]
+
+    # ── 狀態注入（用於 chatflow 回應生成） ──
+
+    def get_state_label(self) -> str:
+        """回傳回應調性標籤 (e.g. 'confident.helpful', 'lonely.seeking')。"""
+        nt, drive = self.needs.get_dominant()
+        need = nt.value if nt else "none"
+        valence = self.emotion.valence
+        positive = valence >= 0.3
+        _map = {
+            "competence": ("confident.helpful", "humble.learning"),
+            "relatedness": ("warm.grateful", "lonely.seeking"),
+            "certainty": ("curious.asking", "confused.uncertain"),
+            "growth": ("eager.exploring", "stuck.impatient"),
+            "autonomy": ("assertive.independent", "resistant.doubtful"),
+        }
+        pair = _map.get(need)
+        if pair is None:
+            return "neutral.present"
+        return pair[0] if positive else pair[1]
+
+    def format_state_injection(self) -> dict:
+        """將當前狀態序列化為三個層級，供 chatflow 回應生成使用。
+
+        回傳:
+            {
+                "state_label": str,       # 調性標籤
+                "state_snippet": str,     # 2-3 句自然語言
+                "state_tuple": dict,      # 數值 dict
+            }
+        """
+        state = self.get_state()
+        needs = state.get("needs", {})
+        emotion = state.get("emotion", {})
+        valence = emotion.get("valence", 0.0)
+        arousal = emotion.get("arousal", 0.5)
+        dominant = state.get("dominant_need", "none")
+        drive = state.get("dominant_drive", 0.0)
+
+        # state_label
+        label = self.get_state_label()
+
+        # state_snippet — 自然語言片段
+        mood_parts = []
+        if valence > 0.3:
+            mood_parts.append("positive" if arousal > 0.6 else "calm")
+        elif valence < -0.3:
+            mood_parts.append("uneasy" if arousal > 0.6 else "subdued")
+        else:
+            mood_parts.append("balanced")
+        snippet = (f"I'm feeling {', '.join(mood_parts)} — "
+                   f"{dominant} drive is at {drive:.2f}. "
+                   f"Valence {valence:+.2f}, arousal {arousal:.2f}.")
+
+        # state_tuple — 純數值
+        tuple_data = {
+            "dominant_need": dominant,
+            "dominant_drive": round(drive, 3),
+            "valence": round(valence, 3),
+            "arousal": round(arousal, 3),
+            "attention": state.get("attention", "IDLE"),
+        }
+
+        return {
+            "state_label": label,
+            "state_snippet": snippet,
+            "state_tuple": tuple_data,
+        }
 
     def __repr__(self) -> str:
         dom, dr = self.needs.get_dominant()

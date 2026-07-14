@@ -192,6 +192,12 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 - 實跑：`scripts/check-psi-response.py` 5 段全過 — E2E 情感句 relatedness +0.14 vs
   中性句 +0.02，回應內容隨狀態不同；作者契約檔 cycle 隨 chat 遞增（7→49）。
   check-chatflow 回歸過（feed/executor 卸載/逾時降級）。
+3. **psi_response.py**（新增）— 英文狀態感知回應模組，`generate_response()` 作為
+   `_compose_psi_reply` 降級選項（中文模板失敗時自動接英文通用模板）。
+4. **RLock 執行緒安全**（psi_core.py）— NeedDriveSystem 和 EmotionGradient 所有
+   公開方法加 `threading.RLock`，防止心跳 tick() 與 process_input() 並行資料競爭。
+5. **format_state_injection()**（psi_core.py）— 狀態序列化為三層輸出
+   （state_label / state_snippet / state_tuple），供外部消費。
 
 ### 下一線頭（產品向，擇一）
 - **有價值產出**：Aris 目前自主行動只是「查了寫回記憶」，沒有對使用者的產出面。

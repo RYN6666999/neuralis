@@ -132,6 +132,29 @@ def _compose_psi_reply(st: dict, delta: dict) -> str:
             f"{mood}（v{v:+.2f}, a{a:.2f}），注意力在 {st['attention']}。")
 
 
+def _psi_respond(fed, user_msg: str) -> str:
+    """PsiCore 回應生成：優先 delta 模板，降級到 psi_response 通用模板。"""
+    try:
+        use_psi = os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
+        if use_psi in ("off", "0", "false"):
+            return ""
+        if fed:
+            return _compose_psi_reply(*fed)
+    except Exception as e:
+        logger.debug(f"[chatflow] _compose_psi_reply 跳過: {e}")
+    try:
+        from laap.psi_response import generate_response
+        from laap.startup import get_psi_core
+        psi = get_psi_core()
+        if psi is not None:
+            result = generate_response(user_msg, psi.get_state())
+            if result.get("engine") == "psi-rules":
+                return result["content"]
+    except Exception as e:
+        logger.debug(f"[chatflow] psi_response 跳過: {e}")
+    return ""
+
+
 def _build_response(content: str, engine: str, model: str, prompt_chars: int) -> dict:
     """複製作者 handle_chat_completions 的非 streaming OpenAI response 格式。"""
     return {
@@ -179,11 +202,11 @@ def _make_chat_handler(orig_handler):
             content = result.get("content", "")
             engine = result.get("engine", "laap-core")
             # 作者管線只剩 canned fallback 時 → 用真實 psi 狀態回應（情緒真的影響回應）
-            if (engine == "laap-fallback" and fed
-                    and os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
-                    not in ("off", "0", "false")):
-                content = _compose_psi_reply(*fed)
-                engine = "psi-respond"
+            if engine == "laap-fallback" and fed:
+                psi_content = _psi_respond(fed, _extract_user_msg(body))
+                if psi_content:
+                    content = psi_content
+                    engine = "psi-respond"
         except asyncio.TimeoutError:
             logger.warning(f"[chatflow] 認知管線逾時 {_CHAT_TIMEOUT_S}s → 降級回應")
             content = "（認知管線處理逾時，本次降級回應。狀態未受影響。）"
