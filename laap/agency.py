@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -57,9 +58,12 @@ class AgencyLoop:
                                 else _env_float("NEURALIS_AGENCY_DRIVE_THRESHOLD", 0.45))
         self._action_ts: deque = deque()          # 最近一小時行動時間戳
         self._need_last_action: dict = {}          # need name → ts
+        self._recent_queries: deque = deque(maxlen=8)  # 近期查詢（normalized）去重用
+        self._seed_snippet: str = ""               # 上次行動結果摘要 → 下次聯想種子
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self.actions_total = 0
+        self.skipped_stale = 0                     # 因種子重複/缺席而跳過的次數（可觀測）
 
     # ── 生命週期 ──
 
@@ -107,18 +111,41 @@ class AgencyLoop:
             self._act(need, drive, tool, prompt)
             return  # 每次評估最多一個行動
 
-    # ── 意圖形成（v0 = 規則表，不是認知） ──
+    # ── 意圖形成（v1 = 規則表 + 種子優先序 + 去重，仍不是認知） ──
+    # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
+    # 舊版沒種子時退回固定模板反覆刷同一查詢，是重複垃圾記憶的根源。
+
+    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗"}
 
     def _form_intent(self, need: str):
+        if need not in self._ANGLE:
+            return None  # relatedness / autonomy：v0 無唯讀動作可做
         topic = (getattr(self.psi, "last_input", "") or "").strip()[:80]
-        if need == "certainty":
-            # 不確定感高 → 對最近話題查證；沒話題就盤點自身狀態脈絡
-            return ("gbrain", topic or "LAAP neuralis 最近進度")
-        if need == "growth":
-            return ("gbrain", f"{topic} 延伸 新方向".strip() if topic else "新想法 探索 學習")
-        if need == "competence":
-            return ("gbrain", f"{topic} 作法 經驗".strip() if topic else "專案 進行中 任務 作法")
-        return None  # relatedness / autonomy：v0 無唯讀動作可做
+        seed = topic or self._seed_snippet   # 真對話優先，否則從上次記憶聯想
+        if not seed:
+            self.skipped_stale += 1          # 無新鮮種子 → 閒著，不刷模板
+            return None
+        query = f"{seed} {self._ANGLE[need]}".strip()
+        if self._too_similar(query):
+            self.skipped_stale += 1          # 跟最近查詢太像 → 不重複刷
+            return None
+        self._recent_queries.append(self._norm(query))
+        return ("gbrain", query)
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        return " ".join(text.lower().split())
+
+    def _too_similar(self, query: str) -> bool:
+        """跟近期查詢 token Jaccard ≥ 0.7 視為太像（抓模板變體，不只完全相同）。"""
+        q = set(self._norm(query).split())
+        if not q:
+            return True
+        for prev in self._recent_queries:
+            p = set(prev.split())
+            if p and len(q & p) / len(q | p) >= 0.7:
+                return True
+        return False
 
     # ── 行動 + 回寫 + 審計 ──
 
@@ -141,6 +168,8 @@ class AgencyLoop:
                     f"[自主行動:{need}] 查詢「{prompt}」→\n{result[:500]}",
                     tags=["agency", need], importance=importance)
                 self.psi.needs.satisfy_all({self._need_type(need): 0.2})
+                # 聯想鏈：從查到的結果抽首行非空片段當下次無對話時的種子
+                self._seed_snippet = self._extract_seed(result)
             except Exception as e:
                 logger.warning(f"[Agency] 回寫失敗: {e}")
 
@@ -157,6 +186,23 @@ class AgencyLoop:
     def _need_type(name: str):
         from laap.psi_core import NeedType
         return NeedType(name)
+
+    _SEED_PREFIX = re.compile(r"^\[[\d.]+\]\s*|^\S+/\S+\s+--\s*|^#+\s*")
+
+    @classmethod
+    def _extract_seed(cls, result: str) -> str:
+        """從查詢結果抽下次種子：首個夠長、剝掉 [score]/slug--/# 前綴的行。
+        前綴迴圈剝（單次 sub 因 ^ 只匹配位置 0 剝不乾淨多層）。"""
+        for line in (result or "").splitlines():
+            s = line.strip()
+            for _ in range(3):
+                new = cls._SEED_PREFIX.sub("", s).strip()
+                if new == s:
+                    break
+                s = new
+            if len(s) >= 4:
+                return s[:60]
+        return ""
 
     @staticmethod
     def _audit(entry: dict) -> None:

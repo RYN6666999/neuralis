@@ -53,8 +53,8 @@ def main():
 
     ag = data.get("agency")
     if ag:
-        print(f"🔄 自主行動 累計={ag['actions_total']} | 近一小時={ag['actions_last_hour']}/"
-              f"{ag['max_per_hour']} | 閾值={ag['drive_threshold']}")
+        print(f"🔄 自主行動 累計={ag['actions_total']} (跳過空轉={ag.get('skipped_stale', 0)}) | "
+              f"近一小時={ag['actions_last_hour']}/{ag['max_per_hour']} | 閾值={ag['drive_threshold']}")
 
     co = data.get("consolidation")
     if co:

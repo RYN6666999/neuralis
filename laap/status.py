@@ -46,6 +46,7 @@ def snapshot() -> dict:
     if agency is not None:
         out["agency"] = {
             "actions_total": agency.actions_total,
+            "skipped_stale": getattr(agency, "skipped_stale", 0),
             "interval_s": agency.interval,
             "max_per_hour": agency.max_per_hour,
             "drive_threshold": agency.drive_threshold,
