@@ -52,7 +52,14 @@ class AgencyLoop:
     v0.2 — 神經調節物質：
     腎上腺素：arousal 縮短 agency interval。
     催產素：per-entity trust 權重，熟人 relatedness 增益更大。
+
+    v0.3 — 持久化：
+    RPE 學習狀態 (_need_stats, trust, exploration_rate) 定期寫入 gbrain，
+    開機讀回，跨 session 累積。slug: _internal/agency-state
     """
+
+    _STATE_SLUG = "_internal/agency-state"
+    _CHECKPOINT_INTERVAL = 5  # 每 N 次行動 checkpoint
 
     def __init__(self, psi, tools, bus=None,
                  interval: Optional[float] = None,
@@ -88,6 +95,8 @@ class AgencyLoop:
         self._self_cycle_count: int = 0
         self._cycle_max: int = int(os.environ.get("NEURALIS_AGENCY_CYCLE_MAX", "3"))
         self._cycle_guard: bool = os.environ.get("NEURALIS_AGENCY_CYCLE_GUARD", "on").lower() not in ("off", "0", "false")
+        # ── 持久化狀態 ──
+        self._checkpoint_counter: int = 0
 
     # ── 生命週期 ──
 
@@ -97,10 +106,13 @@ class AgencyLoop:
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+        # 持久化：開機讀回（非阻塞，在背景執行緒嘗試）
+        self._load_state()
         logger.info(f"[Agency] 迴路啟動 interval={self.interval}s cap={self.max_per_hour}/h "
                     f"threshold={self.drive_threshold}")
 
     def stop(self) -> None:
+        self._save_state()  # 先存
         self._running = False
 
     # ── 主迴路 ──
@@ -168,6 +180,74 @@ class AgencyLoop:
         old = self._trust_scores.get(entity, 0.0)
         self._trust_scores[entity] = min(1.0, old + 0.03)
         self._self_cycle_count = 0  # 真互動重置循環計數
+
+    # ── 持久化：RPE 學習狀態 → gbrain ──
+
+    def _save_state(self) -> None:
+        """把 RPE 學習狀態寫入 gbrain slug _internal/agency-state。
+
+        存：_need_stats (含 angle_weights), _trust_scores, _exploration_rate
+        不存：rpe_buffer (滑動窗，重啟重建), _checkpoint_counter (重啟歸零)
+        """
+        state = {
+            "need_stats": self._need_stats,
+            "trust_scores": self._trust_scores,
+            "exploration_rate": self._exploration_rate,
+        }
+        try:
+            from gbrain_client import get_client
+            client = get_client()
+            if client is None:
+                return
+            content = json.dumps(state, ensure_ascii=False)
+            # 用 frontmatter 標記版本，body 存 JSON
+            body = f"---\nversion: 1\n---\n{content}"
+            client.call("put_page", {"slug": self._STATE_SLUG, "content": body}, timeout=10.0)
+        except Exception as e:
+            logger.debug(f"[Agency] 狀態存檔失敗: {e}")
+
+    def _load_state(self) -> None:
+        """開機從 gbrain 讀回 RPE 學習狀態。retry 最多 3 次（embedding 冷啟動 ~3s）。"""
+        for attempt in range(3):
+            try:
+                import time as _t
+                from gbrain_client import get_client
+                client = get_client()
+                if client is None:
+                    _t.sleep(2)
+                    continue
+                page = client.call("get_page", {"slug": self._STATE_SLUG})
+                if not page:
+                    _t.sleep(2)
+                    continue
+                body = (page.get("compiled_truth") or "").strip()
+                if not body:
+                    return
+                # 剖掉 frontmatter (---\n...\n---)
+                if body.startswith("---"):
+                    parts = body.split("---", 2)
+                    if len(parts) >= 3:
+                        body = parts[2].strip()
+                if not body:
+                    return
+                state = json.loads(body)
+                # 只覆蓋持久化欄位，不碰執行期暫態
+                self._need_stats = state.get("need_stats", self._need_stats)
+                self._trust_scores = state.get("trust_scores", self._trust_scores)
+                self._exploration_rate = state.get("exploration_rate", self._exploration_rate)
+                # boot log 證據
+                for need, s in self._need_stats.items():
+                    aw = s.get("angle_weights", {})
+                    if aw:
+                        logger.info(f"[Agency] 持久化載入: {need} angle_weights={aw}")
+                logger.info(f"[Agency] 持久化載入: exploration_rate={self._exploration_rate:.3f}, "
+                            f"trust={self._trust_scores}")
+                return
+            except Exception as e:
+                if attempt < 2:
+                    _t.sleep(2)
+                else:
+                    logger.debug(f"[Agency] 狀態讀回失敗 (3次): {e}")
 
     # ── 意圖形成（v1 = 規則表 + 種子優先序 + 去重，仍不是認知） ──
     # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
@@ -328,6 +408,11 @@ class AgencyLoop:
                  "outcome": round(outcome, 3), "expected": round(expected, 3),
                  "rpe": round(rpe, 3), "exploration": round(self._exploration_rate, 3)}
         self._audit(entry)
+        # 持久化 checkpoint：每 N 次行動存一次
+        self._checkpoint_counter += 1
+        if self._checkpoint_counter >= self._CHECKPOINT_INTERVAL:
+            self._checkpoint_counter = 0
+            self._save_state()
         logger.info(f"[Agency] 行動#{self.actions_total} {need}(drive={drive:.2f}) "
                     f"{tool}({prompt[:40]}) ok={ok} rpe={rpe:+.3f} "
                     f"exp={self._exploration_rate:.2f} → mem={mem_id or '-'}")
