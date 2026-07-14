@@ -41,11 +41,13 @@ class EmotionGradient:
 
     def __init__(self, smoothing: float = 0.3):
         self.smoothing = smoothing
-        self.valence = 0.0          # -1.0 ~ +1.0
+        self.valence = 0.0          # -1.0 ~ +1.0（原始值）
         self.arousal = 0.5          # 0.0 ~ 1.0
         self.dominance = 0.5        # 0.0 ~ 1.0
         self._prev_sat: Dict[str, float] = {}
         self._lock = threading.RLock()
+        # 內啡肽：負 valence 尖峰緩釋用平滑值
+        self._endorphin_valence = 0.0  # 公開給 to_dict 的回報值
 
     def update(self, satisfactions: Dict[str, float]) -> None:
         """從當前需求值更新情緒狀態。"""
@@ -56,7 +58,17 @@ class EmotionGradient:
         """update 的實際實作（鎖已取得）。"""
         avg = sum(satisfactions.values()) / max(1, len(satisfactions))
         v_target = max(-1.0, min(1.0, 2.0 * avg - 1.0))
-        self.valence = self._smooth(self.valence, v_target)
+        raw = self._smooth(self.valence, v_target)
+        self.valence = raw
+
+        # 內啡肽：負 valence 尖峰緩釋。
+        # valence 上升時快速跟隨（升 100%），下跌時慢速釋放（只走 30%），
+        # 模擬內生 opioid 的疼痛緩解機制。
+        delta = raw - self._endorphin_valence
+        if delta > 0:
+            self._endorphin_valence = raw  # 快速跟隨
+        else:
+            self._endorphin_valence += delta * 0.3  # 緩慢下跌（只走 30%）
 
         if self._prev_sat:
             deltas = []
@@ -72,9 +84,10 @@ class EmotionGradient:
     def to_dict(self) -> Dict[str, float]:
         with self._lock:
             return {
-                "valence": round(self.valence, 3),
+                "valence": round(self._endorphin_valence, 3),
                 "arousal": round(self.arousal, 3),
                 "dominance": round(self.dominance, 3),
+                "raw_valence": round(self.valence, 3),
             }
 
     def _smooth(self, old: float, new: float) -> float:
