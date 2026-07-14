@@ -67,7 +67,9 @@ class GbrainClient:
             bufsize=1,
         )
         self._inbox = queue.Queue()
-        t = threading.Thread(target=self._reader, args=(self._proc,), daemon=True)
+        # inbox 以參數傳入：舊世代 reader 死前的 __eof__ 只會進舊 queue，
+        # 不會污染 respawn 後的新 queue（否則健康的新行程會被誤殺）
+        t = threading.Thread(target=self._reader, args=(self._proc, self._inbox), daemon=True)
         t.start()
         self._rpc("initialize", {
             "protocolVersion": "2024-11-05",
@@ -77,13 +79,13 @@ class GbrainClient:
         self._notify("notifications/initialized")
         logger.info("[gbrain_client] connected (%s serve)", self._binary)
 
-    def _reader(self, proc: subprocess.Popen) -> None:
+    def _reader(self, proc: subprocess.Popen, inbox: "queue.Queue[dict]") -> None:
         for line in proc.stdout:
             try:
-                self._inbox.put(json.loads(line))
+                inbox.put(json.loads(line))
             except json.JSONDecodeError:
                 continue
-        self._inbox.put({"__eof__": True})
+        inbox.put({"__eof__": True})
 
     def _ensure_alive(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
@@ -147,6 +149,10 @@ class GbrainClient:
             except GbrainError:
                 self._kill()  # 讓下一次呼叫觸發重啟
                 raise
+            except Exception as e:
+                # stdin 寫入 BrokenPipe 等非 GbrainError 也要殺行程 + 統一錯誤型別
+                self._kill()
+                raise GbrainError(f"{tool}: {e}") from e
         if result.get("isError"):
             raise GbrainError(f"{tool}: {result}")
         text = result["content"][0]["text"]
@@ -160,9 +166,21 @@ class GbrainClient:
             self._kill()
 
 
+_HITS_TTL = 20.0        # 同一輪互動內 recall/embedding 會用同一 query 連打 2-3 次
+_HITS_CACHE_MAX = 32
+_hits_cache: "dict[tuple, tuple[float, list]]" = {}
+_hits_cache_lock = threading.Lock()
+
+
 def hybrid_hits(client: "GbrainClient", query: str, limit: int) -> list:
-    """query（hybrid vec+lex）→ search（lex）兩層降級檢索。
+    """query（hybrid vec+lex）→ search（lex）兩層降級檢索，20s TTL 快取。
     回 gbrain 原始 hit dicts（slug/chunk_text/score/...）。失敗 raise GbrainError。"""
+    key = (query, limit)
+    now = time.time()
+    with _hits_cache_lock:
+        cached = _hits_cache.get(key)
+        if cached and now - cached[0] < _HITS_TTL:
+            return cached[1]
     hits = []
     try:
         hits = client.call("query", {"query": query, "limit": limit, "expand": False})
@@ -170,7 +188,12 @@ def hybrid_hits(client: "GbrainClient", query: str, limit: int) -> list:
         logger.debug("[gbrain_client] query 失敗，退 lex: %s", e)
     if not hits:
         hits = client.call("search", {"query": query, "limit": limit})
-    return hits or []
+    hits = hits or []
+    with _hits_cache_lock:
+        if len(_hits_cache) >= _HITS_CACHE_MAX:
+            _hits_cache.clear()  # 小快取直接清，不做 LRU
+        _hits_cache[key] = (now, hits)
+    return hits
 
 
 # ── module singleton ───────────────────────────────────────────

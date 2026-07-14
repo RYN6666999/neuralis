@@ -265,12 +265,16 @@ class PsiCore:
     def _heartbeat(self) -> None:
         """背景執行緒：定時衰減需求、更新情緒、同步到 CognitiveBus。"""
         while self._running:
-            self._tick_count += 1
-            self.needs.tick(dt=self.interval)
-            self.emotion.update(self.needs.get_satisfactions())
-            dominant, _ = self.needs.get_dominant()
-            self._update_attention(dominant)
-            self._sync_bus_state()
+            try:
+                self._tick_count += 1
+                self.needs.tick(dt=self.interval)
+                self.emotion.update(self.needs.get_satisfactions())
+                dominant, _ = self.needs.get_dominant()
+                self._update_attention(dominant)
+                self._sync_bus_state()
+            except Exception as e:
+                # 心跳絕不因單次 tick 失敗而停 — 停跳 = 靜默腦死
+                logger.warning(f"[PsiCore] tick {self._tick_count} 失敗: {e}")
             time.sleep(self.interval)
 
     def _update_attention(self, dominant: Optional[NeedType]) -> None:
@@ -311,13 +315,6 @@ class PsiCore:
     def _sync_bus_state(self) -> None:
         """將 PsiCore 的狀態同步到 CognitiveBus。"""
         emo = self.emotion.to_dict()
-        valence_map = {
-            v: k for k, v in {
-                "POSITIVE_HIGH": 0.7, "POSITIVE_MILD": 0.3,
-                "NEUTRAL": 0.0, "NEGATIVE_MILD": -0.3, "NEGATIVE_HIGH": -0.7,
-                "CURIOUS": 0.4, "CONFUSED": -0.2,
-            }.items()
-        }
         # 找最接近的 valence 枚舉
         best = "NEUTRAL"
         best_d = 1.0

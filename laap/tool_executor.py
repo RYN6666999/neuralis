@@ -85,8 +85,20 @@ class ToolExecutor:
     def _register_builtins(self):
         """註冊本機可直接叫的工具（不透過 AgentOS）。"""
 
-        # gbrain 記憶搜尋
+        # gbrain 記憶搜尋 — 走 neuralis 持久 MCP client（免 CLI 冷啟 ~3s/次），
+        # client 不可用再退 CLI
         def gbrain_search(query: str) -> str:
+            try:
+                from gbrain_client import get_client, hybrid_hits
+                client = get_client()
+                if client is not None:
+                    hits = hybrid_hits(client, query, 5)
+                    lines = [f"[{h.get('score', 0):.2f}] {h.get('slug','')} — "
+                             f"{(h.get('chunk_text') or h.get('title') or '')[:200]}"
+                             for h in hits]
+                    return "\n".join(lines) if lines else "無結果"
+            except Exception as e:
+                logger.debug(f"[ToolExecutor] gbrain client 失敗，退 CLI: {e}")
             result = subprocess.run(
                 ["gbrain", "query", query],
                 capture_output=True, text=True, timeout=15,

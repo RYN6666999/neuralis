@@ -39,10 +39,13 @@ def ensure_tools():
         return _tool_executor
     try:
         from laap.tool_executor import ToolExecutor
-        # 接 AgentOS executor_registry
+        # 接 AgentOS executor_registry（路徑可用 AGENTOS_DIR 覆蓋）
         try:
-            import sys
-            sys.path.insert(0, str(__import__('pathlib').Path.home() / "agent-sandbox"))
+            import os, sys
+            agentos_dir = os.environ.get(
+                "AGENTOS_DIR", str(__import__('pathlib').Path.home() / "agent-sandbox"))
+            if agentos_dir not in sys.path:
+                sys.path.insert(0, agentos_dir)
             from orchestrator import executor_registry
             registry = executor_registry
         except Exception:
@@ -51,6 +54,11 @@ def ensure_tools():
 
         if _bus is None:
             ensure_psi_core()
+        if _bus is None:
+            # PsiCore 起不來（如 psi_core_bridge 缺）→ 工具層仍該活：裸 bus 頂上
+            from laap.agi.cognitive_bus import CognitiveBus
+            _bus = CognitiveBus()
+            logger.info("[startup] PsiCore 不可用，ToolExecutor 用獨立 CognitiveBus")
         _tool_executor = ToolExecutor(bus=_bus, agentos_registry=registry)
         logger.info("🛠️  ToolExecutor 啟動 — Aris 有手腳了")
         logger.info(f"    工具數: {len(_tool_executor.list_tools())}")

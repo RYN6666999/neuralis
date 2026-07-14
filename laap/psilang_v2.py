@@ -155,6 +155,9 @@ class Parser:
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
 
     def _advance(self) -> Token:
+        if self.pos >= len(self.tokens):
+            # 殘缺輸入（如源碼結尾在 `qstate` 後截斷）不炸 parser
+            return Token('EOF', '')
         t = self.tokens[self.pos]
         self.pos += 1
         return t
