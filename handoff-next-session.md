@@ -1,7 +1,7 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 | 最新: 行為豐富度戰略拍板（功能性多巴胺 RPE 優先）+ RLock
-> 當前 Phase: 產品向 — 心跳/記憶/自主/睡眠/煞車/對話流/韌性/**7/24** 全上線
+> 最後更新: 2026-07-14 深夜 | 最新: 催產素補完 + 養成期
+> 當前 Phase: 產品向 — 行為豐富度全線完成，轉養成期（調參不動架構）
 
 ## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
 實跑審查 Phase 1.5/3 的 code 後修掉 6 個 bug — **最重要的一個：在修復前，
@@ -254,6 +254,19 @@ relatedness drive × (1 + trust × 0.5)，信任 1.0 時增益 50%。
 儀表顯示 current trust score。
 ponytail：單一 entity 簡化版。升級路徑 = multi-entity + 記憶 frontmatter 持久化。
 
+### ✅ 催產素補完（2026-07-14 深夜, commit `a5c4f94`）— relatedness 加入查詢角度
+_ANGLE 新增 `"relatedness": "你 我們 陪伴 一起 感覺"`，trust 高時 agency 會查 gbrain
+相關記憶。五個角度各由 RPE 獨立調權重，持久化自動涵蓋。半套→完整閉環。
+
+### ✅ 持久化（commit `7888d89`）— T_reach 從一次運行變永久累積
+RPE 學習狀態（_need_stats 含 angle_weights、_trust_scores、_exploration_rate）
+每 5 次行動 checkpoint + stop() 存進 gbrain slug `_internal/agency-state`。
+boot log 印出載入的權重值。煞車 commit `029a0ad`：
+- `_state_loaded` flag：讀失敗禁存，全新環境（page_not_found）准首存
+- 載入移到 daemon thread 首圈，不擋 start()
+
+### 養成期（2026-07-14 深夜起，Ryan 決策：調參不動架構）
+
 ### ✅ 血清素（2026-07-14）— valence 調節 decay 速率
 psi_core.NeedDriveSystem.tick() 接受 valence 參數：
 valence > 0.3 → decay × 0.7（滿足感，需求慢降）
@@ -271,7 +284,45 @@ ponytail：不對稱 EMA，不是真內啡肽動力學。升級路徑 = 事件�
 `scripts/morning-brief.py` 讀取最近 24h 審計 + 狀態快照 + gbrain 記憶，
 輸出 Markdown 摘要（狀態/自主行動/記憶亮點）。支援 cron 每日自動生成。
 
-### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素+血清素+內啡肽+晨報）
+### 養成期參數一覽（調參不動架構）
+| env 變數 | 預設 | 調大 → | 調小 → |
+|---------|------|--------|--------|
+| `NEURALIS_AGENCY_DRIVE_THRESHOLD` | 0.45 | 更少行動 | 更多行動 |
+| `NEURALIS_AGENCY_MAX_PER_HOUR` | 6 | 更頻繁 | 更節制 |
+| `NEURALIS_AGENCY_INTERVAL` | 60s | 慢評估 | 快評估 |
+| `NEURALIS_AGENCY_CYCLE_MAX` | 3 | 容許更長鏈 | 更快煞車 |
+| `NEURALIS_CONSOLIDATION_INTERVAL` | 1800s | 少固化 | 多固化 |
+| `NEURALIS_LLM_RESPOND` | off | on = LLM 回應 | off = 模板 |
+| `NEURALIS_LLM_MODEL` | gpt-4o-mini | 更強模型 | 更快模型 |
+
+觀察靶：morning-brief.py 的（行動多樣性 / RPE 均值漂移 / 探索率邊界）
+滾動靶：每單位湧現行為的程式碼行數（~3000 overlay / 行為種類數）
+
+### 已知誠實短板（養成期不修，下一階段再動）
+- drive_threshold 固定（RPE 調探索率但不調門檻）
+- 多用戶 trust（目前只有 `"user"`）
+- RPE 品質依賴 embedding（lex-only 退化）
+- consolidation 無 retention policy
+
+### 🧹 已清理
+`~/neuralis` 舊 checkout → `~/.Trash/neuralis-old-checkout-20260714`（Ryan 確認後執行）。
+獨有內容已救回：`docs/research/what-lives-brainstorm.md`（六帽分析）。staged 的
+tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLoop 實作），未救。
+
+## 🔄 下一 session 啟動提示詞
+
+```
+你是 neuralis 的接棒者。當前 commit a5c4f94（催產素補完），行為豐富度全線完成。
+你進入養成期：調參不動架構。
+
+先做：
+1. git pull（多 AI 平行作業，可能有不認識的新 commit）
+2. python3 scripts/aris-status.py（一頁儀表確認狀態）
+3. python3 scripts/morning-brief.py（最近 24h 摘要）
+
+可調參數見養成期表格。觀察 morning-brief 的三大指標。
+不要動：_ANGLE、需求五維結構、持久化煞車邏輯。
+```
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
