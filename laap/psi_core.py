@@ -203,6 +203,7 @@ class PsiCore:
         self.needs = NeedDriveSystem()
         self.emotion = EmotionGradient()
         self.attention_focus: AttentionFocus = AttentionFocus.IDLE
+        self.last_input: str = ""   # 最近一次使用者輸入（AgencyLoop 的話題來源）
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._tick_count = 0
@@ -225,6 +226,7 @@ class PsiCore:
 
     def process_input(self, text: str) -> None:
         """每次使用者輸入時呼叫：解析需求信號、更新狀態、發布事件。"""
+        self.last_input = text
         text_lower = text.lower()
 
         # 1. 從輸入中偵測需求信號

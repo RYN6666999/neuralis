@@ -54,6 +54,13 @@ else:
     print("[neuralis] ⚠️ PsiCore 未啟動（降級模式），API 照常起")
 if tools:
     print(f"[neuralis] 🛠️ ToolExecutor: {len(tools.list_tools())} 工具")
+from laap.startup import get_agency
+agency = get_agency()
+if agency:
+    print(f"[neuralis] 🔄 AgencyLoop: interval={agency.interval}s "
+          f"cap={agency.max_per_hour}/h（唯讀白名單，NEURALIS_AGENCY=off 可關）")
+else:
+    print("[neuralis] ⚠️ AgencyLoop 未啟動")
 
 # 2. 以作者的 __main__ 入口起 API（同 process，argv 傳 port）
 api = os.path.join(os.environ["LAAP_AGI_DIR"], "aris_brain", "laap_brain_api.py")

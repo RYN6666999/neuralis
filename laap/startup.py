@@ -92,11 +92,37 @@ def ensure_tools():
     return _tool_executor
 
 
+_agency = None
+
+
+def ensure_agency():
+    """Phase 6 agency loop：需求→行動→結果→記憶。NEURALIS_AGENCY=off 可關。
+    psi 或 tools 缺任一 → 不起（迴路兩端都要在）。"""
+    global _agency
+    if _agency is not None:
+        return _agency
+    if os.environ.get("NEURALIS_AGENCY", "on").lower() in ("off", "0", "false"):
+        logger.info("[startup] AgencyLoop 已由 NEURALIS_AGENCY=off 停用")
+        return None
+    if _psi_core is None or _tool_executor is None:
+        logger.info("[startup] AgencyLoop 不起（psi 或 tools 缺）")
+        return None
+    try:
+        from laap.agency import AgencyLoop
+        _agency = AgencyLoop(psi=_psi_core, tools=_tool_executor, bus=_bus)
+        _agency.start()
+        logger.info("🔄 AgencyLoop 啟動 — Aris 會自主行動了（唯讀白名單 + rate cap）")
+    except Exception as e:
+        logger.warning(f"AgencyLoop 啟動失敗: {e}")
+    return _agency
+
+
 def startup_all():
     """一次啟動所有系統。"""
     ensure_psi_defs()
     ensure_psi_core()
     ensure_tools()
+    ensure_agency()
     return _bus, _psi_core, _tool_executor
 
 
@@ -108,3 +134,6 @@ def get_tool_executor():
 
 def get_bus():
     return _bus
+
+def get_agency():
+    return _agency
