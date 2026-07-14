@@ -267,7 +267,11 @@ EmotionGradient 新增 `_endorphin_valence`：valence 上升時快速跟隨（10
 to_dict() 回報 endorphin 平滑後的 valence，附加 raw_valence 供診斷。
 ponytail：不對稱 EMA，不是真內啡肽動力學。升級路徑 = 事件型觸發 + 持續時間追踪。
 
-### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素+血清素+內啡肽）
+### ✅ 有價值產出（2026-07-14）— morning-brief.py 晨報
+`scripts/morning-brief.py` 讀取最近 24h 審計 + 狀態快照 + gbrain 記憶，
+輸出 Markdown 摘要（狀態/自主行動/記憶亮點）。支援 cron 每日自動生成。
+
+### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素+血清素+內啡肽+晨報）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
