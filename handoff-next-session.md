@@ -215,15 +215,22 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 **一句話：作者開源的是設計圖庫，neuralis 是跑著的系統。互補不重複。**
 LLM 定位一致（psi_driver:「LLM as I/O, not thinker」= 我們的 zero-LLM overlay 哲學）。
 
-### 可採收清單（Apache 2.0 → MIT 可移植，保留出處聲明）
-1. **需求憲法**（governor 概念）— 直接解 README「RPE 權重異常凍結/回滾」待辦：
-   per-need delta 上限 + 按來源（RPE vs user 對話）分速率限制 + 越界凍結。
-2. **affective_engine 接線**（= 行為豐富度優先序 3 的現成加速器）— 5 維情緒 +
-   耦合矩陣照搬，但**偏差必須接真參數**：attention_narrowing→agency 角度溫度、
-   risk_seeking→exploration_rate、temporal_discounting→consolidation 耐心。
-   作者只把 bias 塞進 kernel dict 沒人消費 — 我們接真迴路，青出於藍。
-3. **32 事件刺激表** — agency 的 RPE outcome 已算好 task_success/failure，
-   直接餵 AffectiveEventProcessor，零成本接情緒事件。
+### 可採收清單 — ✅ 全部執行完（2026-07-15，commits f41b36e + 情緒引擎）
+1. ✅ **需求憲法**（`laap/constitution.py` + `need_constitution.json`）— range 硬夾 +
+   單次上限 + 按來源（user/agency）小時預算凍結；RPE 權重變速 0.30/次 +
+   1.2/h/need 預算。解掉「垃圾訊號永久累積」待辦。`NEURALIS_CONSTITUTION=off` 可關。
+   自檢 `check-constitution.py` 9 段。審計 `constitution-audit.jsonl`。
+2. ✅ **affective_engine 移植**（`laap/affective.py`）— 5 維+耦合+損失趨避+1/f 噪聲。
+   偏差接真參數：`agency._effective_exploration()`（risk_seeking↑探索、
+   attention_narrowing↓探索，實測 0.150→0.108/0.197）。與 EmotionGradient 並存。
+   自檢 `check-affective.py` 7 段。儀表有「5維 mood + 偏差」行。
+3. ✅ **事件刺激表** — RPE→task_success/failure、process_input→user_engagement。
+   第二條閉環成立：行動後果塑形情緒 → 情緒調變探索。
+- ⚠️ 踩坑：作者耦合矩陣語義 raw[target]=C[target,source]×state[source]（愉悅洩壓，
+  非壓力壓愉悅）；作者動力學設計給 dt=0.1，粗步長會震盪 → affective.update 內部
+  切 0.1 子步。
+- 未接（升級路徑）：temporal_discounting→consolidation 耐心；PersonalityProfile
+  換人格參數組；psi-respond 用 affective mood 換 mood 詞。
 - 參考不移植：autonomy.py HTN 架構 = 未來 S_span 擴展（`_ANGLE` 打通）的設計參考。
 - 重建 worktree 看原碼：`cd ~/Developer/laap-AGI && git worktree add /tmp/laap-open origin/feat/port-old-modules --detach`
 
