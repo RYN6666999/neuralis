@@ -254,7 +254,14 @@ relatedness drive × (1 + trust × 0.5)，信任 1.0 時增益 50%。
 儀表顯示 current trust score。
 ponytail：單一 entity 簡化版。升級路徑 = multi-entity + 記憶 frontmatter 持久化。
 
-### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素）
+### ✅ 血清素（2026-07-14）— valence 調節 decay 速率
+psi_core.NeedDriveSystem.tick() 接受 valence 參數：
+valence > 0.3 → decay × 0.7（滿足感，需求慢降）
+valence < -0.3 → decay × 1.3（不滿足，需求快降）
+中性 → 正常 decay（×1.0）
+ponytail：三段線性，不是真血清素動力學。升級路徑 = 連續曲線。
+
+### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素+血清素）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
