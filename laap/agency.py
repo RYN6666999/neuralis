@@ -52,6 +52,7 @@ class AgencyLoop:
     v0.2 — 神經調節物質：
     腎上腺素：arousal 縮短 agency interval。
     催產素：per-entity trust 權重，熟人 relatedness 增益更大。
+    催產素 v0.2 補完：relatedness 加入查詢角度，trust 真正驅動行為。
 
     v0.3 — 持久化：
     RPE 學習狀態 (_need_stats, trust, exploration_rate) 定期寫入 gbrain，
@@ -269,7 +270,7 @@ class AgencyLoop:
     # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
     # 舊版沒種子時退回固定模板反覆刷同一查詢，是重複垃圾記憶的根源。
 
-    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗"}
+    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗", "relatedness": "你 我們 陪伴 一起 感覺"}
 
     def _score_result(self, result: str) -> float:
         """量產 gbrain 結果的品質分數 0-1。
@@ -311,7 +312,7 @@ class AgencyLoop:
 
     def _form_intent(self, need: str):
         if need not in self._ANGLE:
-            return None  # relatedness / autonomy：v0 無唯讀動作可做
+            return None  # autonomy：v0 無唯讀動作可做。relatedness v0.2 已加查詢角度
         topic = (getattr(self.psi, "last_input", "") or "").strip()[:80]
         seed = topic or self._seed_snippet   # 真對話優先，否則從上次記憶聯想
         # 自我強化循環防護：連續多次無使用者輸入 + gbrain 查詢 → 閒置
