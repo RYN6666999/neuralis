@@ -97,6 +97,8 @@ class AgencyLoop:
         self._cycle_guard: bool = os.environ.get("NEURALIS_AGENCY_CYCLE_GUARD", "on").lower() not in ("off", "0", "false")
         # ── 持久化狀態 ──
         self._checkpoint_counter: int = 0
+        self._state_loaded: bool = False   # True=成功讀回 or 全新首存；False=禁存
+        self._loaded_once: bool = False     # loop 層只載入一次
 
     # ── 生命週期 ──
 
@@ -106,8 +108,7 @@ class AgencyLoop:
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        # 持久化：開機讀回（非阻塞，在背景執行緒嘗試）
-        self._load_state()
+        # 持久化：開機讀回走 daemon thread（_loop 首圈），不擋 start()
         logger.info(f"[Agency] 迴路啟動 interval={self.interval}s cap={self.max_per_hour}/h "
                     f"threshold={self.drive_threshold}")
 
@@ -119,6 +120,10 @@ class AgencyLoop:
 
     def _loop(self) -> None:
         while self._running:
+            # 首圈：持久化讀回（在 daemon thread 裡，不擋 start）
+            if not self._loaded_once:
+                self._loaded_once = True
+                self._load_state()
             interval = self._effective_interval()
             time.sleep(interval)
             try:
@@ -186,9 +191,11 @@ class AgencyLoop:
     def _save_state(self) -> None:
         """把 RPE 學習狀態寫入 gbrain slug _internal/agency-state。
 
-        存：_need_stats (含 angle_weights), _trust_scores, _exploration_rate
-        不存：rpe_buffer (滑動窗，重啟重建), _checkpoint_counter (重啟歸零)
+        煞車：_state_loaded=False 時禁止寫入，防止讀失敗後的空 state 覆蓋好資料。
+        全新首存（get_page 回 None）會設為 True，不受影響。
         """
+        if not self._state_loaded:
+            return  # 讀失敗或從未嘗試 → 不蓋掉好資料
         state = {
             "need_stats": self._need_stats,
             "trust_scores": self._trust_scores,
@@ -200,42 +207,50 @@ class AgencyLoop:
             if client is None:
                 return
             content = json.dumps(state, ensure_ascii=False)
-            # 用 frontmatter 標記版本，body 存 JSON
             body = f"---\nversion: 1\n---\n{content}"
             client.call("put_page", {"slug": self._STATE_SLUG, "content": body}, timeout=10.0)
         except Exception as e:
             logger.debug(f"[Agency] 狀態存檔失敗: {e}")
 
     def _load_state(self) -> None:
-        """開機從 gbrain 讀回 RPE 學習狀態。retry 最多 3 次（embedding 冷啟動 ~3s）。"""
+        """開機從 gbrain 讀回 RPE 學習狀態。retry 最多 3 次（embedding 冷啟動 ~3s）。
+
+        成功讀回 → _state_loaded=True
+        頁不存在（全新安裝）→ _state_loaded=True（准首存）
+        頁存在但解析失敗 → _state_loaded=False（禁存，防蓋好資料）
+        """
         for attempt in range(3):
             try:
                 import time as _t
-                from gbrain_client import get_client
+                from gbrain_client import get_client, GbrainError
                 client = get_client()
                 if client is None:
                     _t.sleep(2)
                     continue
-                page = client.call("get_page", {"slug": self._STATE_SLUG})
-                if not page:
-                    _t.sleep(2)
-                    continue
-                body = (page.get("compiled_truth") or "").strip()
-                if not body:
+                try:
+                    page = client.call("get_page", {"slug": self._STATE_SLUG})
+                except GbrainError as e:
+                    if "page_not_found" in str(e):
+                        self._state_loaded = True  # 全新安裝，准首存
+                        return
+                    raise
+                # 頁不存在 → 全新安裝，准首存
+                if not page or not page.get("compiled_truth"):
+                    self._state_loaded = True
                     return
-                # 剖掉 frontmatter (---\n...\n---)
+                body = (page.get("compiled_truth") or "").strip()
                 if body.startswith("---"):
                     parts = body.split("---", 2)
                     if len(parts) >= 3:
                         body = parts[2].strip()
                 if not body:
+                    self._state_loaded = True  # 全新 → 准存
                     return
                 state = json.loads(body)
-                # 只覆蓋持久化欄位，不碰執行期暫態
                 self._need_stats = state.get("need_stats", self._need_stats)
                 self._trust_scores = state.get("trust_scores", self._trust_scores)
                 self._exploration_rate = state.get("exploration_rate", self._exploration_rate)
-                # boot log 證據
+                self._state_loaded = True
                 for need, s in self._need_stats.items():
                     aw = s.get("angle_weights", {})
                     if aw:
@@ -246,7 +261,8 @@ class AgencyLoop:
             except Exception as e:
                 if attempt < 2:
                     _t.sleep(2)
-                else:
+                # 頁存在但解析失敗 → _state_loaded 維持 False，禁存
+                if attempt == 2:
                     logger.debug(f"[Agency] 狀態讀回失敗 (3次): {e}")
 
     # ── 意圖形成（v1 = 規則表 + 種子優先序 + 去重，仍不是認知） ──
