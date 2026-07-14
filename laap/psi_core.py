@@ -133,11 +133,24 @@ class NeedDriveSystem:
         }
         self._lock = threading.RLock()
 
-    def tick(self, dt: float = 1.0) -> Dict[NeedType, float]:
-        """每秒向靜息值鬆弛 + 雜訊。"""
+    def tick(self, dt: float = 1.0, valence: float = 0.0) -> Dict[NeedType, float]:
+        """每秒向靜息值鬆弛 + 雜訊。
+
+        血清素：valence 調節 decay 速率。
+        valence > 0.3 → decay × 0.7（滿足感，需求慢降）
+        valence < -0.3 → decay × 1.3（不滿足，需求快降）
+        valence 中性 → 正常 decay。
+        """
         with self._lock:
+            # 血清素：valence 調節全局 decay 係數
+            sero_factor = 1.0
+            if valence > 0.3:
+                sero_factor = 0.7
+            elif valence < -0.3:
+                sero_factor = 1.3
             for nt in NeedType:
-                relax = (self.baselines[nt] - self.values[nt]) * self.decay_rates[nt] * dt
+                ar = self.decay_rates[nt] * sero_factor
+                relax = (self.baselines[nt] - self.values[nt]) * ar * dt
                 noise = random.gauss(0, self.volatilities[nt] * dt)
                 self.values[nt] = max(0.0, min(1.0, self.values[nt] + relax + noise))
             return dict(self.values)
@@ -292,7 +305,8 @@ class PsiCore:
         while self._running:
             try:
                 self._tick_count += 1
-                self.needs.tick(dt=self.interval)
+                # 血清素：valence 調節 decay 速率
+                self.needs.tick(dt=self.interval, valence=self.emotion.valence)
                 self.emotion.update(self.needs.get_satisfactions())
                 dominant, _ = self.needs.get_dominant()
                 self._update_attention(dominant)
