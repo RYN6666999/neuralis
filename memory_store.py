@@ -34,6 +34,44 @@ EMBED_DIM = 384  # 作者 get_memory_embedding 契約：384-dim float32
 _GBRAIN_NS = "laap/memory"          # gbrain 頁面命名空間: laap/memory/<layer>/<id>
 _STATS_TTL = 60.0                   # gbrain get_stats 快取（desire engine 每輪都問）
 
+# 檢索端情緒加權（Damasio somatic marker：情緒強的記憶該優先浮現）。
+# final = base_score × (1 + WEIGHT × emotion_intensity)。emotion∈[0,1]，故最多 +WEIGHT。
+# 只對 laap/memory/* 的 hit 生效（帶 emotion_intensity frontmatter）；全腦頁 emotion=0 不受影響。
+_EMOTION_RECALL_WEIGHT = float(os.environ.get("NEURALIS_EMOTION_RECALL_WEIGHT", 0.3))
+_EMOTION_TTL = 120.0                # slug→emotion 快取（consolidation 改動慢，同輪 recall/embedding 復用）
+_emotion_cache: Dict[str, tuple] = {}
+
+
+def _emotion_intensity_for(client, slug: str) -> float:
+    """抓某 laap 記憶頁的 emotion_intensity（帶 TTL 快取）。非 laap slug 或查不到回 0.0。
+    ponytail: search hit 不帶 frontmatter → 逐頁 get_page 補；laap hit 在 top-N 裡通常
+    只有 0-3 個，成本低。升級路徑=gbrain 上游讓 hit 直接帶 frontmatter。"""
+    if not slug.startswith(_GBRAIN_NS + "/"):
+        return 0.0
+    now = time.time()
+    cached = _emotion_cache.get(slug)
+    if cached and now - cached[0] < _EMOTION_TTL:
+        return cached[1]
+    try:
+        page = client.call("get_page", {"slug": slug}, timeout=10.0)
+        val = float((page.get("frontmatter") or {}).get("emotion_intensity", 0) or 0)
+    except Exception:
+        val = 0.0
+    if len(_emotion_cache) > 256:
+        _emotion_cache.clear()
+    _emotion_cache[slug] = (now, val)
+    return val
+
+
+def _emotion_rerank(client, hits: List[Dict]) -> List[Dict]:
+    """對 gbrain hits 按情緒強度加權重排。穩定：emotion=0 的 hit 乘 1、順序不變。"""
+    if not hits or _EMOTION_RECALL_WEIGHT <= 0:
+        return hits
+    for h in hits:
+        emo = _emotion_intensity_for(client, h.get("slug", ""))
+        h["_score_adj"] = float(h.get("score", 0.0)) * (1.0 + _EMOTION_RECALL_WEIGHT * emo)
+    return sorted(hits, key=lambda h: h.get("_score_adj", 0.0), reverse=True)
+
 
 def _backend_mode() -> str:
     mode = os.environ.get("NEURALIS_MEMORY_BACKEND", "auto").lower()
@@ -168,6 +206,7 @@ class MemoryStore:
         except Exception as e:
             logger.warning(f"[memory_store] gbrain recall 失敗，用 in-process: {e}")
             return local
+        hits = _emotion_rerank(client, hits)  # 情緒強的記憶優先浮現（Damasio）
         remote = [self._hit_to_fragment(h) for h in hits]
         if layer is not None:
             remote = [f for f in remote if f.layer == layer]

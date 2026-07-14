@@ -71,7 +71,9 @@ class GbrainSemanticMemory:
             return self._fallback().recall(query, top_k, min_score)
         try:
             from gbrain_client import hybrid_hits
+            from memory_store import _emotion_rerank
             hits = hybrid_hits(client, query, max(top_k * 2, 10))
+            hits = _emotion_rerank(client, hits)  # 情緒強的記憶優先（同 memory_store 路）
         except Exception as e:
             logger.warning(f"[semantic_gbrain] recall 失敗，退作者原版: {e}")
             return self._fallback().recall(query, top_k, min_score)
