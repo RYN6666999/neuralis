@@ -92,8 +92,10 @@ recall 同步阻塞 ~1s（多併發時 run_in_executor）；gbrain lex stemming 
 歸檔（30 天 stale → archive/）。只動 `laap/memory/*`（assert 硬邊界）、
 每 pass 突變上限 5、審計 `consolidation-audit.jsonl`、`NEURALIS_CONSOLIDATION=off` 可關。
 自檢：`scripts/check-consolidation.py`。
-情緒權重（外部審查 #2）寫入端已補（`emotion_intensity` 進 frontmatter）；
-檢索端 re-rank 未做 — hit 不帶 frontmatter，逐頁抓太慢，留給 gbrain 上游或之後。
+情緒權重（外部審查 #2）**已完整閉合**（commit `bf9743b`）：寫入端存 `emotion_intensity`
+frontmatter，檢索端 `_emotion_rerank` 按情緒加權排序（final = score×(1+0.3×emotion)，
+`NEURALIS_EMOTION_RECALL_WEIGHT` 可調），兩條 recall 縫都接。逐頁 get_page 補 frontmatter
++ 120s TTL 快取；升級路徑=gbrain 上游讓 hit 直接帶 frontmatter。自檢 `scripts/check-emotion-recall.py`。
 
 ## Phase 4a 安全閘 v0 已完成（2026-07-14）
 `laap/safety_gate.py` → ToolExecutor.execute 全呼叫過閘：唯讀組放行、其他工具
