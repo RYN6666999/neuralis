@@ -20,6 +20,7 @@ import asyncio
 import os
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 logger = logging.getLogger("laap.chatflow")
@@ -97,16 +98,62 @@ def _write_author_state(st: dict) -> None:
 
 # ponytail: v0 規則表組句，不是認知。天花板 = 模板語感；升級路徑 = 把 st/delta
 # 塞給真 LLM 的 system prompt（等 LAAP 管線接上 LLM 後改走那條）。
+_quoted_recently: deque = deque(maxlen=6)   # 引用過的記憶（避免每輪想起同一件事）
+_MEM_EXTRA_WAIT_S = float(os.environ.get("NEURALIS_PSI_MEMORY_WAIT", 2.5))
+_pending_memories: dict = {"ts": 0.0, "lines": []}   # 遲到的召回 → 下一輪「剛想起」
+
+
+def _collect_memories(task) -> list:
+    """已完成的平行召回直接收割；沒完成回空（caller 再決定等多久）。"""
+    if task is not None and task.done():
+        try:
+            return task.result() or []
+        except Exception:
+            pass
+    return []
+
+
+def _stash_late_memories(task) -> None:
+    try:
+        lines = task.result() or []
+        if lines:
+            _pending_memories["ts"] = time.time()
+            _pending_memories["lines"] = lines
+    except Exception:
+        pass
+
+
+def _take_pending_memories() -> list:
+    """上一輪遲到的召回，5 分鐘內有效（過期就不硬聊舊哏）。"""
+    if _pending_memories["lines"] and time.time() - _pending_memories["ts"] < 300:
+        lines, _pending_memories["lines"] = _pending_memories["lines"], []
+        return lines
+    _pending_memories["lines"] = []
+    return []
+
+
 def _psi_memories_sync(query: str) -> list[str]:
-    """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。"""
+    """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。
+    去重：近 6 輪引用過的段落不再引（不然同話題每句都想起同一件事，穿幫）。"""
     try:
         from gbrain_client import get_client, hybrid_hits
         client = get_client()
         if client is None:
             return []
-        hits = hybrid_hits(client, query[:100], 2)
-        texts = [h.get("chunk_text", "") for h in hits if h.get("score", 0) >= 0.3]
-        return [t[:80] for t in texts if len(t.strip()) >= 4]
+        hits = hybrid_hits(client, query[:100], 4)
+        out = []
+        for h in hits:
+            if h.get("score", 0) < 0.3:
+                continue
+            t = " ".join((h.get("chunk_text", "") or "").split())
+            key = t[:40]
+            if len(t) < 4 or key in _quoted_recently:
+                continue
+            _quoted_recently.append(key)
+            out.append(t[:80])
+            if len(out) >= 2:
+                break
+        return out
     except Exception:
         return []
 
@@ -144,9 +191,10 @@ def _compose_psi_reply(st: dict, delta: dict, memories: list[str] = None) -> str
     reply = (f"{touch}現在主導我的是 {dom}"
              f"（drive {st['dominant_drive']:.2f}，{_NEED_PHRASE.get(dom, dom)}），"
              f"{mood}（v{v:+.2f}, a{a:.2f}），注意力在 {st['attention']}。")
-    # 織入記憶聯想
+    # 織入記憶聯想 — 出處誠實：hit 是腦庫段落（wiki/行動紀錄/對話都可能），
+    # 不可宣稱「你說過」（誤標出處 = LARP）
     if memories:
-        reply += f"\n（我記得你上次說過「{memories[0]}」）"
+        reply += f"\n（這讓我想起腦裡的一段：「{memories[0]}」）"
     return reply
 
 
@@ -221,17 +269,14 @@ def _make_chat_handler(orig_handler):
         except Exception:
             pass
 
-        # 記憶聯想：psi-respond 織入相關記憶（非阻塞，1.5s timeout）
+        # 記憶聯想：與作者管線「平行」召回（gbrain hybrid 實測 5-9s，序列等 = 延遲牆）。
+        # 管線回來後只再等一小段；沒等到就 stash，下一輪用「剛想起」帶出 — 零延遲牆。
         user_msg = _extract_user_msg(body)
         memories = []
-        if os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
-            loop = asyncio.get_event_loop()
-            try:
-                memories = await asyncio.wait_for(
-                    loop.run_in_executor(None, _psi_memories_sync, user_msg),
-                    timeout=1.5)
-            except (asyncio.TimeoutError, Exception):
-                memories = []
+        mem_task = None
+        if user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
+            mem_task = asyncio.get_event_loop().run_in_executor(
+                None, _psi_memories_sync, user_msg)
 
         # streaming：保留作者 SSE 實作（同步阻塞風險僅限這條少數路徑）
         if body.get("stream"):
@@ -249,6 +294,14 @@ def _make_chat_handler(orig_handler):
                 timeout=_CHAT_TIMEOUT_S)
             content = result.get("content", "")
             engine = result.get("engine", "laap-core")
+            memories = _collect_memories(mem_task) + _take_pending_memories()
+            if mem_task and not mem_task.done():
+                try:
+                    got = await asyncio.wait_for(
+                        asyncio.shield(mem_task), timeout=_MEM_EXTRA_WAIT_S)
+                    memories = got + memories
+                except (asyncio.TimeoutError, Exception):
+                    mem_task.add_done_callback(_stash_late_memories)  # 下一輪「剛想起」
             # 作者管線只剩 canned fallback 時 → 用真實 psi 狀態回應（情緒真的影響回應）
             if engine == "laap-fallback" and fed:
                 psi_content = _psi_respond(fed, user_msg, memories=memories)
