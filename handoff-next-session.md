@@ -1,7 +1,32 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 | 最新 commit: `fb101c1`
+> 最後更新: 2026-07-14 | 最新 commit: `a1359c9`（全面檢查修復波）
 > 當前 Phase: **Phase 5（記憶固化循環）** — 剛從 Phase 3 推進至此
+
+## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
+實跑審查 Phase 1.5/3 的 code 後修掉 6 個 bug — **最重要的一個：在修復前，
+PsiCore 心臟從來沒有真的接上過**：
+1. `aris_brain/` 死碼目錄 shadow 掉作者 namespace package → `ensure_psi_core`
+   在文檔宣稱的 PYTHONPATH 布局下必敗（`psi_core_bridge` ImportError）。已刪。
+2. 舊 start.sh 把 PsiCore 起在獨立短命 `python -c` 行程，印完 banner 就死 —
+   API server 裡沒有心跳。已改：同一 process 內 `startup_all()` → runpy 起作者 API。
+3. ToolExecutor 在 psi 失敗時拿到 bus=None 直接炸（工具全滅）→ 裸 bus 頂上。
+4. 心跳執行緒無護欄，單次 tick 異常 = 靜默腦死 → try/except。
+5. psilang_v2 Parser 殘缺輸入 IndexError → EOF token。
+6. gbrain_client respawn 世代污染 race + 非 GbrainError 逃逸 → 修。
+perf: hybrid_hits 20s TTL 快取；tool_executor 的 gbrain 走持久 client（省 ~3s/次）。
+
+修復後實測（本機 `~/Developer/{neuralis,laap-AGI,laapenv}` 布局）：
+`scripts/start.sh` → PsiCore 心跳 tick 走 + 42 工具 + engines_loaded=true +
+recall_memory 迴歸過 + 記憶自檢 4/4。
+
+**遺留（review 發現但未動）：**
+- AGIKernel 在 API boot 路徑仍卡 `core_identity.psi` 缺檔（author data file）—
+  「Phase 3 解鎖」只解鎖了直接建構，boot 路徑沒解。別合成假身份檔，等作者端。
+- PsiCore 需求 decay（~0.008/s）對常駐 daemon 太快：閒置 2-3 分鐘全需求見底、
+  效價 → -1（「醒來就憂鬱」）。要嘛接受、要嘛改 decay-toward-baseline，設計決策留給下手。
+- `process_input()` 還沒有任何呼叫者 — 心跳活了，但對話還沒餵進需求偵測。
+  Phase 5 接 consolidation 時順手接這條（`/v1/chat/completions` 或 reflect handler）。
 
 ---
 
@@ -56,13 +81,13 @@
 3. **情緒權重**：PsiCore 的 valence × arousal 作為記憶重要性指標
 4. **寫回 gbrain**：固化後的記憶存入 gbrain 長期區
 
-### 環境啟動
+### 環境啟動（修正版 — 舊指令的 ~/laap-AGI + .venv + :11530 在本機不存在）
 ```bash
-cd ~/laap-AGI && source .venv/bin/activate
-PYTHONPATH="$HOME/neuralis:$PYTHONPATH" python -c "
-from laap.startup import startup_all
-bus, psi, tools = startup_all()
-"
+# 一鍵：PsiCore 心跳 + API 同 process（前景，port 預設 11546）
+~/Developer/neuralis/scripts/start.sh
+# 或只驗 startup_all（任意 cwd 都可，shadow bug 已修）
+PYTHONPATH="$HOME/Developer/neuralis:$HOME/Developer/laap-AGI" \
+  ~/Developer/laapenv/bin/python -c "from laap.startup import startup_all; print(startup_all())"
 ```
 
 ### Phase 5 完成條件
@@ -73,10 +98,12 @@ bus, psi, tools = startup_all()
 
 ---
 
-## 環境重建
+## 環境重建（本機實際布局：~/Developer/{neuralis,laap-AGI,laapenv}）
 ```bash
-cd ~/laap-AGI && source .venv/bin/activate
-PYTHONPATH="$HOME/neuralis:$PYTHONPATH" python aris_brain/laap_brain_api.py --port 11530
+uv venv ~/Developer/laapenv --python 3.12
+uv pip install --python ~/Developer/laapenv/bin/python -r ~/Developer/neuralis/requirements.txt
+~/Developer/neuralis/scripts/start.sh              # 前景，含 PsiCore 心跳，:11546
+# 或背景（無 PsiCore，純 API）: ~/Developer/neuralis/scripts/start-laap-api.sh
 ```
 
 ⚠️ gbrain vec 檢索需要 `OPENAI_API_KEY` 環境變數（zshrc 有）。
