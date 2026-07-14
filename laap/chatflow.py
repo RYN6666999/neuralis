@@ -133,18 +133,28 @@ def _compose_psi_reply(st: dict, delta: dict) -> str:
 
 
 def _psi_respond(fed, user_msg: str) -> str:
-    """PsiCore 回應生成：優先 delta 模板，降級到 psi_response 通用模板。"""
+    """PsiCore 回應生成：LLM 優先 → delta 模板 → psi_response 通用模板。"""
     try:
         use_psi = os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
         if use_psi in ("off", "0", "false"):
             return ""
+        # LLM 模式（需 NEURALIS_LLM_RESPOND=on + API key）
+        from laap.startup import get_psi_core
+        psi = get_psi_core()
+        if psi is not None:
+            from laap.llm_respond import respond as llm_respond
+            llm = llm_respond(user_msg, psi.get_state())
+            if llm:
+                return llm
+    except Exception as e:
+        logger.debug(f"[chatflow] LLM respond 跳過: {e}")
+    try:
         if fed:
             return _compose_psi_reply(*fed)
     except Exception as e:
         logger.debug(f"[chatflow] _compose_psi_reply 跳過: {e}")
     try:
         from laap.psi_response import generate_response
-        from laap.startup import get_psi_core
         psi = get_psi_core()
         if psi is not None:
             result = generate_response(user_msg, psi.get_state())
@@ -206,7 +216,7 @@ def _make_chat_handler(orig_handler):
                 psi_content = _psi_respond(fed, _extract_user_msg(body))
                 if psi_content:
                     content = psi_content
-                    engine = "psi-respond"
+                    engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
         except asyncio.TimeoutError:
             logger.warning(f"[chatflow] 認知管線逾時 {_CHAT_TIMEOUT_S}s → 降級回應")
             content = "（認知管線處理逾時，本次降級回應。狀態未受影響。）"

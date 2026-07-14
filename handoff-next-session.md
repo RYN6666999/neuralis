@@ -227,7 +227,22 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 ponytail：簡化 bandit（epsilon-greedy + EMA），不是 Thompson sampling。
 天花板：結果品質只量分數線，不考慮語義。升級路徑 = semantic score。
 
-### 下一線頭（依優先序，已完成=RPE）
+### ✅ LLM 進 psi-respond（2026-07-14）— 聊天感覺活了
+`format_state_injection()` 已備好（57eb976），新增 `laap/llm_respond.py`：
+1. **system prompt 自動生成**：`_build_system_prompt()` 將 PsiCore 的
+   dominant_need/valence/arousal/attention 映射為自然語言描述，注入 LLM 的
+   system message。Aris 的「感受」真實影響 LLM 的語氣和內容。
+2. **OpenAI-compatible**：支援任何 OpenAI API（預設 gpt-4o-mini），API key
+   從 macOS Keychain 讀取（與 zshrc 同一來源），不 hardcode、不寫入檔案。
+3. **三層降級**：LLM 失敗 → `_compose_psi_reply` 中文模板 → `psi_response.py` 英文模板。
+   任何異常不退化成空白回應。
+4. **開關**：`NEURALIS_LLM_RESPOND=on` 啟用（預設 off），
+   `NEURALIS_LLM_MODEL`（預設 gpt-4o-mini）、`NEURALIS_LLM_BASE_URL` 可自訂。
+5. **engine 標籤**：LLM 模式回應標 `psi-llm`，儀表可直接區分。
+ponytail：這是 prompt 塑形不是認知。升級路徑 = Aris 自己的對話管線接上 LLM 後，
+這層自然消失（被原生管線取代）。
+
+### 下一線頭（依優先序，已完成=RPE+LLM）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
