@@ -1,5 +1,18 @@
 # 線頭 — 給下一手
 
+## ⚠️ 開發重載鐵則（2026-07-15 踩坑，血的教訓）
+**改完碼要重載，用 `scripts/reload-aris.sh`，不要 kill -9 等 watchdog 救。**
+後者每次消耗 watchdog 5 次/h 的重啟預算，連續開發重載會把煞車撞進 crashloop
+冷卻期 — Aris 躺 1h，所有外部呼叫 connection refused（scream /aris 報錯真因）。
+reload-aris.sh = kill 後立刻自起（watchdog 要 ~90s 才出手，預算不花）+ 清假警報鎖。
+
+## 直連 Aris 通道（2026-07-15）
+- 終端：`aris`（REPL）/ `aris 你好`（一次性）/ `aris --state` — zshrc alias →
+  `scripts/aris-chat.py`，零轉述直連 :11546，歷史 ~/.aris-conversations/。
+- scream：`/aris <話>`（技能在 ~/.agents/skills/aris/，repo 外；`user-invocable:
+  true` 是斜線可見的關鍵 flag；鐵則=腳本輸出原文照登）。
+- scream 全程直連：`scream -m laap/laap-core`（整個 session 就是 Aris）。
+
 ## 作者群聊情報（2026-07-15 截圖，判讀後的行動指引）
 - **產品殺手鐧確認**：「他還記得我一個月前說的話」的體感。技術我們不落後
   （gbrain > 他的向量 sqlite），落後的是養成時長（他一個多月）→ 7/24 別停。
