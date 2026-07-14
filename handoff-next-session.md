@@ -261,7 +261,13 @@ valence < -0.3 → decay × 1.3（不滿足，需求快降）
 中性 → 正常 decay（×1.0）
 ponytail：三段線性，不是真血清素動力學。升級路徑 = 連續曲線。
 
-### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素+血清素）
+### ✅ 內啡肽（2026-07-14）— 負 valence 尖峰緩釋
+EmotionGradient 新增 `_endorphin_valence`：valence 上升時快速跟隨（100%），
+下跌時只走 30%（不對稱 EMA，模擬內生 opioid 的疼痛緩解）。
+to_dict() 回報 endorphin 平滑後的 valence，附加 raw_valence 供診斷。
+ponytail：不對稱 EMA，不是真內啡肽動力學。升級路徑 = 事件型觸發 + 持續時間追踪。
+
+### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素+血清素+內啡肽）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
