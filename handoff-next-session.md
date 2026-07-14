@@ -248,7 +248,13 @@ ponytail：這是 prompt 塑形不是認知。升級路徑 = Aris 自己的對�
 - 儀表顯示 current effective interval
 ponytail：線性映射，不是真腎上腺素動力學。升級路徑 = 非線性曲線 + 注意力窄化。
 
-### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素）
+### ✅ 催產素（2026-07-14）— per-entity trust → relatedness 增益
+每次使用者互動 trust +0.03（chatflow 自動呼叫），緩慢衰減。
+relatedness drive × (1 + trust × 0.5)，信任 1.0 時增益 50%。
+儀表顯示 current trust score。
+ponytail：單一 entity 簡化版。升級路徑 = multi-entity + 記憶 frontmatter 持久化。
+
+### 下一線頭（依優先序，已完成=RPE+LLM+腎上腺素+催產素）
 1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
    （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
    drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
