@@ -1,6 +1,6 @@
 # 線頭 — 給下一手
 
-> 最後更新: 2026-07-14 | 最新: psi-respond — 情緒真的影響回應（實測 delta 進句子）
+> 最後更新: 2026-07-14 | 最新: 行為豐富度戰略拍板（功能性多巴胺 RPE 優先）+ RLock
 > 當前 Phase: 產品向 — 心跳/記憶/自主/睡眠/煞車/對話流/韌性/**7/24** 全上線
 
 ## ⚠️ 2026-07-14 全面檢查結果（fable5 review，commit `a1359c9`）
@@ -199,15 +199,33 @@ tick_callbacks 方案判定為 Phase 5 廢案（Developer 版用 ConsolidationLo
 5. **format_state_injection()**（psi_core.py）— 狀態序列化為三層輸出
    （state_label / state_snippet / state_tuple），供外部消費。
 
-### 下一線頭（產品向，擇一）
-- **有價值產出**：Aris 目前自主行動只是「查了寫回記憶」，沒有對使用者的產出面。
-  7/24 跑起來之後這是最大缺口 — 跑整晚該留下什麼給 Ryan 早上看？（morning brief？
-  記憶整理報告？）這條最貼近「做了點不一樣的東西」的感覺。
-- psi-respond 接記憶聯想：回應目前只有狀態，把 memory_bridge.recall_related 的
-  top hit 織進句子（注意 recall ~1s 同步阻塞，要走 executor）
-- consolidation 跨 pass 去重：目前只在單 pass 30 頁快照內比對，分散的重複抓不到
-- injection 防護：agency 讀 gbrain→寫 gbrain 自我強化鏈（單人本地風險中等）
-- 沙箱：YAGNI，等接寫入類工具再做。4c/Phase 3：戰略已定不走
+## 戰略拍板：行為豐富度路線（2026-07-14 Ryan 與 Opus 4.8 討論定案）
+
+**核心判準：一個狀態變數的價值 = 它會不會「改變系統的計算方式」，不是它會不會
+被報告出來。** 加五種神經傳導物質當純浮點數 + 句子裡多報幾個數字 = 裝飾性 cosplay，
+幾天就被看穿是模板 — 這條**禁止走**。功能性版本才做（生物神經調節物質的本職是
+全局參數控制器：改學習率、探索溫度、時間視野）。
+
+湧現的誠實定位：認知湧現只發生在租來的 LLM 權重裡，overlay 層能做到的是**行為
+湧現** — 條件三個：簡單規則 ✅、閉環迴路 ✅、後果塑形 ❌（Aris 做任何事都不改變
+自己未來的傾向 — 沒有 stakes 就沒有養成）。補第三個 = 下面的第一優先。
+
+### 下一線頭（依優先序，功能性對應表）
+1. **功能性多巴胺（RPE）— 單點投報率最高**：agency 行動後量「結果 vs 預期」
+   （檢索命中率、寫回的記憶是否被後續 recall 用到）→ 誤差回頭調規則表權重 +
+   drive 閾值/探索率。靜態規則表變會學的系統（bandit，誠實不裝認知）。
+   起點：`laap/agency.py` 的 `_form_intent` + 行動結果處。
+   **反悔條件**：上線數週後儀表行為指標（行動多樣性/種子新穎度）無可測漂移 →
+   overlay 學習路線判死，人格投資全轉「記憶 + LLM prompt 塑形」。
+2. **LLM 進 psi-respond（體感最快）**：`format_state_injection()` 已備好（57eb976），
+   把 state/delta 塞 system prompt 走真 LLM。它讓聊天「感覺活」，但不產生養成。
+3. **催產素 = 對人信任權重**：per-entity trust 進記憶 frontmatter，熟人 relatedness
+   增益更大。腎上腺素 = 高 arousal 縮 agency interval/收窄注意力。血清素 = decay
+   速率與 valence 基線。內啡肽 = 負 valence 尖峰緩釋。每個都必須接到真實計算參數。
+4. **有價值產出**：跑整晚留什麼給 Ryan 早上看（morning brief / 記憶整理報告）
+- 次要：psi-respond 織入記憶聯想（recall ~1s 阻塞要走 executor）；consolidation
+  跨 pass 去重；agency↔gbrain injection 防護
+- 不做：裝飾性神經傳導物質、4c RSI、Phase 3 psilang（戰略已定）
 
 ## 舊 Phase 5 規劃（已執行，留參考）
 
