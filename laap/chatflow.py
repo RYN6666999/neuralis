@@ -18,6 +18,7 @@ import json
 import logging
 import asyncio
 import os
+import re
 import time
 import uuid
 from collections import deque
@@ -198,7 +199,8 @@ def _compose_psi_reply(st: dict, delta: dict, memories: list[str] = None) -> str
     return reply
 
 
-def _psi_respond(fed, user_msg: str, memories: list[str] = None) -> str:
+def _psi_respond(fed, user_msg: str, memories: list[str] = None,
+                 history: list = None) -> str:
     """PsiCore 回應生成：LLM 優先 → delta 模板（含記憶聯想）→ psi_response 通用模板。"""
     try:
         use_psi = os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
@@ -208,7 +210,9 @@ def _psi_respond(fed, user_msg: str, memories: list[str] = None) -> str:
         psi = get_psi_core()
         if psi is not None:
             from laap.llm_respond import respond as llm_respond
-            llm = llm_respond(user_msg, psi.get_state())
+            llm = llm_respond(user_msg, fed[0] if fed else psi.get_state(),
+                              history=history, memories=memories,
+                              delta=fed[1] if fed else None)
             if llm:
                 return llm
     except Exception as e:
@@ -303,8 +307,17 @@ def _make_chat_handler(orig_handler):
                 except (asyncio.TimeoutError, Exception):
                     mem_task.add_done_callback(_stash_late_memories)  # 下一輪「剛想起」
             # 作者管線只剩 canned fallback 時 → 用真實 psi 狀態回應（情緒真的影響回應）
-            if engine == "laap-fallback" and fed:
-                psi_content = _psi_respond(fed, user_msg, memories=memories)
+            # 安全網：RulesEngine 誤匹配（回 rules:* + 工具錯誤）也讓 psi-respond 接管
+            if fed and (
+                engine == "laap-fallback"
+                or (engine.startswith("rules:") and re.match(r'^\[.*\]', content.strip()))
+            ):
+                hist = [m for m in messages
+                        if m.get("role") in ("user", "assistant")]
+                if hist and hist[-1].get("role") == "user":
+                    hist = hist[:-1]   # 這句 user_msg 由 llm_respond 自己補
+                psi_content = _psi_respond(fed, user_msg, memories=memories,
+                                           history=hist)
                 if psi_content:
                     content = psi_content
                     engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
