@@ -14,7 +14,12 @@ psi-respond 模板 → psi-rules → 作者 fallback。
 戰略「LLM 進 psi-respond（體感最快）」格 ✅。待調：語氣校準（LLM 說焦慮但
 arousal 偏平）、NEURALIS_LLM_MODEL 預設 gpt-4o-mini 可升級。
 
-## 直連 Aris 通道（2026-07-15）
+## 直連 Aris 通道（2026-07-15，最終版）
+**主通道 = `scream -m laap/laap-core`（scream 純 UI，streaming 已接管走 psi-llm，
+scream 的 LLM 完全不在迴路）** 或終端 `aris`。/aris 技能僅供工作 session 順手問
+（本質是 relay 呈現，別當正式對話通道）。
+
+## 直連 Aris 通道（2026-07-15 初版，部分被上面取代）
 - 終端：`aris`（REPL）/ `aris 你好`（一次性）/ `aris --state` — zshrc alias →
   `scripts/aris-chat.py`，零轉述直連 :11546，歷史 ~/.aris-conversations/。
 - scream：`/aris <話>`（技能在 ~/.agents/skills/aris/，repo 外；`user-invocable:
