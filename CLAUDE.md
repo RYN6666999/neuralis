@@ -5,8 +5,8 @@
 
 1. neuralis 是獨立 overlay — 不直接修改 laap-AGI 上游 repo，透過
    PYTHONPATH 疊加。
-2. Python `laap/psi_core.py` 是目前 PSI 行為的參考實作。任何未來後端
-   （含 Rust）以它為相容基準，契約見 `docs/contracts/psi-backend.md`。
+2. Python `laap/psi_core.py` 是目前 PSI 行為的參考實作。新增非 Python
+   PSI 後端前，必須先建立版本化的 backend 契約與 characterization tests。
 3. 一個任務使用一個 branch/worktree，不直接在 main 上開發。
 4. 沒有測試不得宣稱完成。「完成」必須指向實際檔案、pytest 或
    `scripts/check-*.py` 自檢。
@@ -18,8 +18,8 @@
 8. 高風險工具預設拒絕（`laap/safety_gate.py`）。不能為了測試方便降低
    預設安全性；測試用明確的環境變數或 fixture 隔離。
 9. 修改核心狀態格式（`get_state()` / `format_state_injection()` /
-   輸入事件）時，必須同步更新 `docs/contracts/` 的契約與 schema，
-   並讓 `tests/` 的相容性測試通過。
+   輸入事件）時，必須同步在 `tests/` 中新增對應的契約測試，
+   明確標示行為變化。
 10. 完工報告必須包含：commit SHA、測試結果（通過/失敗/skip 數）、
     已知限制、未完成項目。未執行或被 skip 的測試不得寫成通過。
 11. 不提交 token、API key、密碼、本機絕對路徑或 runtime state 至版控。
