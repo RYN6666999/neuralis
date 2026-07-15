@@ -33,11 +33,45 @@ _CHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_CHAT_TIMEOUT_S", 25))
 _BOOT_TS = time.time()
 
 
+def _content_text(c) -> str:
+    """content 可能是 str / OpenAI content parts list / None（assistant tool_calls）。"""
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c
+                        if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
 def _extract_user_msg(body: dict) -> str:
     for m in reversed(body.get("messages", []) or []):
         if m.get("role") == "user":
-            return (m.get("content", "") or "")[:500]
+            return _content_text(m.get("content"))[:500]
     return ""
+
+
+def _is_user_turn(body: dict) -> bool:
+    """最後一條訊息是 user 才是真的使用者回合。工具迴圈的中間 round-trip
+    （最後是 tool）不重複餵 psi、不重複加 trust、不重查記憶 — 否則同一句話
+    在一個 agent 任務裡被灌 N 次，需求滿足與信任全失真。"""
+    msgs = body.get("messages") or []
+    return bool(msgs) and msgs[-1].get("role") == "user"
+
+
+_DUMP = os.environ.get("NEURALIS_DUMP_REQUESTS", "off").lower() in ("on", "1", "true")
+
+
+def _dump_request(body: dict) -> None:
+    """NEURALIS_DUMP_REQUESTS=on → 存請求原貌到 /tmp/laap-request-dumps/，
+    照實物設計工具協議用，平常關。"""
+    try:
+        d = Path("/tmp/laap-request-dumps")
+        d.mkdir(exist_ok=True)
+        (d / f"req-{int(time.time() * 1000)}.json").write_text(
+            json.dumps(body, ensure_ascii=False, indent=1)[:300000],
+            encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _feed(user_msg: str):
@@ -262,23 +296,48 @@ def _make_chat_handler(orig_handler):
             logger.debug(f"[chatflow] body 解析失敗，交回作者: {e}")
             return await orig_handler(request)
 
-        fed = _feed(_extract_user_msg(body))
+        if _DUMP:
+            _dump_request(body)
 
-        # 催產素：每次對話提升信任權重
-        try:
-            from laap.startup import get_agency
-            ag = get_agency()
-            if ag is not None:
-                ag.note_interaction()
-        except Exception:
-            pass
+        # 只有真使用者回合才餵 psi / 加 trust（工具迴圈 round-trip 不算）
+        user_turn = _is_user_turn(body)
+        fed = _feed(_extract_user_msg(body)) if user_turn else None
+
+        # 忙碌保護：如果 LAAP 工具正在執行中，阻止新對話打斷
+        if user_turn:
+            try:
+                import json as _json
+                with open("/tmp/laap-tool-status.json") as _f:
+                    _st = _json.load(_f)
+                if _st.get("status") in ("start", "running"):
+                    _busy_msg = f"（正在執行 {_st.get('description', '工作')}，請稍等，完成後會通知你。）"
+                    model = body.get("model", "laap-core")
+                    messages = body.get("messages", [])
+                    prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
+                    return web.json_response(_build_response(_busy_msg, "laap-busy", model, prompt_chars))
+            except Exception:
+                pass
+
+        # 催產素：每次「使用者」對話提升信任權重
+        if user_turn:
+            try:
+                from laap.startup import get_agency
+                ag = get_agency()
+                if ag is not None:
+                    ag.note_interaction()
+            except Exception:
+                pass
+
+        # 工具模式：scream agent 迴圈（作者管線不懂 tools → LLM 語言皮質直達）
+        if body.get("tools"):
+            return await _tool_chat(request, web, body, fed)
 
         # 記憶聯想：與作者管線「平行」召回（gbrain hybrid 實測 5-9s，序列等 = 延遲牆）。
         # 管線回來後只再等一小段；沒等到就 stash，下一輪用「剛想起」帶出 — 零延遲牆。
         user_msg = _extract_user_msg(body)
         memories = []
         mem_task = None
-        if user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
+        if user_turn and user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
             mem_task = asyncio.get_event_loop().run_in_executor(
                 None, _psi_memories_sync, user_msg)
 
@@ -287,7 +346,7 @@ def _make_chat_handler(orig_handler):
         # 統一：算完 content 後，stream 就用 SSE 送、否則 JSON。
         model = body.get("model", "laap-core")
         messages = body.get("messages", [])
-        prompt_chars = sum(len(m.get("content", "")) for m in messages)
+        prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
         try:
             import laap_brain_api as api   # 執行時已載入（runpy 起 API 後）
             loop = asyncio.get_event_loop()
@@ -328,14 +387,88 @@ def _make_chat_handler(orig_handler):
             return await orig_handler(request)
 
         if body.get("stream"):
-            return await _stream_sse(request, web, content, model)
+            return await _stream_sse(
+                request, web,
+                {"message": {"role": "assistant", "content": content},
+                 "finish_reason": "stop"}, model)
         return web.json_response(_build_response(content, engine, model, prompt_chars))
 
     return handler
 
 
-async def _stream_sse(request, web, content: str, model: str):
-    """把算好的 content 以 OpenAI chunk 格式 SSE 送出（與作者格式一致）。"""
+# 外層再放寬 5s：內層 llm_respond 的 urllib timeout 先到，錯誤訊息比較有料。
+_TOOLCHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_TOOL_TIMEOUT", 120)) + 5.0
+
+
+async def _tool_chat(request, web, body: dict, fed):
+    """Scream agent 迴圈：帶 tools 的請求 → llm_respond.respond_tools（executor
+    卸載 + timeout，作者管線完全不在迴路）。engine=psi-llm-tools。
+    失敗降級為說明性 content（回合不炸，TUI 不掛）。"""
+    model = body.get("model", "laap-core")
+    messages = body.get("messages", [])
+    prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
+
+    psi_state = fed[0] if fed else None
+    delta = fed[1] if fed else None
+    if psi_state is None:   # 工具 round-trip 沒餵 psi，但身份塊還是要有最新狀態
+        try:
+            from laap.startup import get_psi_core
+            psi = get_psi_core()
+            psi_state = psi.get_state() if psi is not None else None
+        except Exception:
+            psi_state = None
+
+    result = None
+    try:
+        from laap.llm_respond import respond_tools
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, respond_tools, body, psi_state, delta),
+            timeout=_TOOLCHAT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning(f"[chatflow] 工具模式逾時 {_TOOLCHAT_TIMEOUT_S}s")
+    except Exception as e:
+        logger.warning(f"[chatflow] 工具模式失敗: {e}")
+
+    if result is None:
+        result = {
+            "message": {"role": "assistant", "content":
+                        "（語言皮質呼叫失敗 — 檢查 openrouter key / "
+                        "NEURALIS_TOOL_MODEL 是否支援 tools。本回合降級純文字。）"},
+            "finish_reason": "stop", "usage": {},
+        }
+
+    if body.get("stream"):
+        return await _stream_sse(request, web, result, model)
+    return web.json_response(_build_tool_response(result, model, prompt_chars))
+
+
+def _build_tool_response(result: dict, model: str, prompt_chars: int) -> dict:
+    """OpenAI 非 streaming response，含 tool_calls。usage 優先用上游真值。"""
+    msg = result["message"]
+    out_msg = {"role": "assistant", "content": msg.get("content")}
+    if msg.get("tool_calls"):
+        out_msg["tool_calls"] = msg["tool_calls"]
+    content_len = len(msg.get("content") or "")
+    return {
+        "id": f"laap-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "message": out_msg,
+                     "finish_reason": result.get("finish_reason", "stop")}],
+        "usage": result.get("usage") or {
+            "prompt_tokens": prompt_chars // 4,
+            "completion_tokens": content_len // 4, "total_tokens": 0},
+        "engine": "psi-llm-tools",
+    }
+
+
+async def _stream_sse(request, web, result: dict, model: str):
+    """把算好的完整 message（content ± tool_calls）以 OpenAI chunk 格式 SSE 送出。
+    tool_call 先送 id/name 空殼，arguments 分段補 — 與 OpenAI delta 累加語義一致。"""
+    msg = result["message"]
+    fin = result.get("finish_reason", "stop")
     resp = web.StreamResponse(headers={
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -345,18 +478,30 @@ async def _stream_sse(request, web, content: str, model: str):
     rid = f"laap-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    def chunk(delta: dict, fin=None) -> bytes:
+    def chunk(delta: dict, fin_=None) -> bytes:
         return ("data: " + json.dumps({
             "id": rid, "object": "chat.completion.chunk", "created": created,
             "model": model,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
+            "choices": [{"index": 0, "delta": delta, "finish_reason": fin_}],
         }, ensure_ascii=False) + "\n\n").encode()
 
     await resp.write(chunk({"role": "assistant"}))
+    content = msg.get("content") or ""
     for i in range(0, len(content), 24):
         await resp.write(chunk({"content": content[i:i + 24]}))
         await asyncio.sleep(0.015)
-    await resp.write(chunk({}, "stop"))
+    for i, tc in enumerate(msg.get("tool_calls") or []):
+        fn = tc.get("function") or {}
+        await resp.write(chunk({"tool_calls": [{
+            "index": i, "id": tc.get("id"),
+            "type": tc.get("type", "function"),
+            "function": {"name": fn.get("name", ""), "arguments": ""},
+        }]}))
+        args = fn.get("arguments") or ""
+        for j in range(0, len(args), 256):
+            await resp.write(chunk({"tool_calls": [{
+                "index": i, "function": {"arguments": args[j:j + 256]}}]}))
+    await resp.write(chunk({}, fin))
     await resp.write(b"data: [DONE]\n\n")
     await resp.write_eof()
     return resp

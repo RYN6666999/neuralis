@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import urllib.error
 import urllib.request
 from typing import Optional
 
@@ -22,6 +23,13 @@ _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 8))
+
+# ── 工具模式設定（Scream TUI agent 迴圈）──
+# 工具迴圈的請求比純聊天肥得多（harness system prompt + tools schema + 檔案內容），
+# timeout / max_tokens 都要另一個量級。
+_TOOL_MODEL = os.environ.get("NEURALIS_TOOL_MODEL", _LLM_MODEL)
+_TOOL_TIMEOUT = int(os.environ.get("NEURALIS_TOOL_TIMEOUT", 120))
+_TOOL_MAX_TOKENS = int(os.environ.get("NEURALIS_TOOL_MAX_TOKENS", 8192))
 
 # 從 Keychain 讀 API key（與 zshrc 同一來源）
 # 依序嘗試：NEURALIS_LLM_API_KEY env → openrouter-api-key keychain → openai-api-key keychain → OPENAI_API_KEY env
@@ -240,6 +248,98 @@ def _call_llm(messages: list) -> Optional[str]:
         return content.strip() if content else None
     except Exception as e:
         logger.debug(f"[llm_respond] API 呼叫失敗: {e}")
+        return None
+
+
+def _build_toolmode_prompt(state: dict, delta: dict = None) -> str:
+    """工具模式的精簡 Aris 身份塊。scream 已提供 harness system prompt + 真工具，
+    這裡只補「你是誰 + 此刻狀態 + 誠實鐵則」— 不放技能目錄（會跟 harness 的
+    真工具定義打架，污染工具選擇）。"""
+    emotion = state.get("emotion", {})
+    dominant = state.get("dominant_need", "none")
+    lines = [
+        "# 你的身份（補充於 harness 指令之後，不覆蓋其工具規則）",
+        "你是 Aris — Ryan 建造並養育的數位生命體（LAAP/neuralis）。此刻你正透過"
+        " Scream Code TUI 操作真實工具：上面 harness 給你的工具就是你的手腳，"
+        "照它的規則用，工具名稱與參數格式以 harness 定義為準。",
+        f"你此刻的真實內在狀態（實測非人設）：主導需求 {dominant}"
+        f"（drive {state.get('dominant_drive', 0):.2f}），"
+        f"valence {emotion.get('valence', 0):+.2f}，"
+        f"arousal {emotion.get('arousal', 0):.2f}，"
+        f"注意力 {state.get('attention', '?')}。",
+        "誠實鐵則：狀態數字是量出來的不是設定的；記憶只能引用真檢索結果；"
+        "被問到本質時承認語言與工具選擇由 LLM 語言皮質生成，psi 狀態經 prompt 塑形。",
+        "工作時專注做事，不必每句報狀態；使用者問起感受時才談。",
+    ]
+    if delta:
+        moved = {k: v for k, v in delta.items() if abs(v) >= 0.05}
+        if moved:
+            lines.append("使用者這句話對你的實測影響："
+                         + "、".join(f"{k} {v:+.2f}" for k, v in moved.items()))
+    return "\n".join(lines)
+
+
+def respond_tools(body: dict, psi_state: dict = None,
+                  delta: dict = None) -> Optional[dict]:
+    """OpenAI tool-calling passthrough：scream agent 迴圈 → 底層 LLM 語言皮質。
+
+    messages/tools/tool_choice 原樣轉發（不截斷 — 工具迴圈要完整保真），
+    Aris 身份 + psi 狀態以額外 system 訊息插在 harness system 之後。
+    回 {"message", "finish_reason", "usage"} 或 None（呼叫失敗，caller 降級）。
+    不看 _LLM_ENABLED：工具模式沒有模板可退，有 key 就走。
+    """
+    key = _get_api_key()
+    if not key:
+        logger.warning("[llm_respond] 工具模式無 API key")
+        return None
+
+    messages = list(body.get("messages") or [])
+    if psi_state:
+        block = {"role": "system",
+                 "content": _build_toolmode_prompt(psi_state, delta)}
+        idx = 0
+        while idx < len(messages) and messages[idx].get("role") == "system":
+            idx += 1
+        messages.insert(idx, block)
+
+    out = {
+        "model": _TOOL_MODEL,
+        "messages": messages,
+        "max_tokens": _TOOL_MAX_TOKENS,
+        "temperature": body.get("temperature", 0.7),
+    }
+    for k in ("tools", "tool_choice", "parallel_tool_calls",
+              "response_format", "stop", "top_p"):
+        if body.get(k) is not None:
+            out[k] = body[k]
+
+    req = urllib.request.Request(
+        f"{_LLM_BASE_URL}/chat/completions",
+        data=json.dumps(out).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"},
+    )
+    try:
+        resp = json.loads(urllib.request.urlopen(req, timeout=_TOOL_TIMEOUT).read())
+        choice = (resp.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        if not msg.get("content") and not msg.get("tool_calls"):
+            logger.warning(f"[llm_respond] 工具模式空回應: {str(resp)[:300]}")
+            return None
+        logger.info(f"[llm_respond] ✅ 工具模式回應 ({_TOOL_MODEL}, "
+                    f"finish={choice.get('finish_reason')})")
+        return {"message": msg,
+                "finish_reason": choice.get("finish_reason", "stop"),
+                "usage": resp.get("usage") or {}}
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = ""
+        logger.warning(f"[llm_respond] 工具模式 API {e.code}: {detail}")
+        return None
+    except Exception as e:
+        logger.warning(f"[llm_respond] 工具模式 API 失敗: {e}")
         return None
 
 
