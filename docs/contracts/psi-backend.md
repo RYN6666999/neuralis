@@ -1,10 +1,14 @@
 # PSI Backend Contract v1
 
 > 狀態：M0 完成；M1 Python compatibility adapter 已實作
-> （`laap/psi_backend.py`）。PsiBackend v1 的邊界仍是 proposed
-> boundary（尤其非 Python backend、Rust 全數未寫）；M1 只提供一個
-> **零行為** 的 Python wrapper，尚未接 startup、尚未遷移任何 production
-> call site，**backend 仍不可替換**。M2–M5 未開始。
+> （`laap/psi_backend.py`）。M2 production call-site migration 已完成：
+> startup 現在對外暴露 `PythonPsiBackend`（包裝 `PsiCore`），agency、
+> consolidation、status、chatflow、memory_store 全部移轉到 v1 方法，
+> 不再需要 `needs`/`emotion`/`affective`/`last_input` B-surface
+> （僅 transitional 保留供 scripts/tests 相容）。
+> PsiBackend v1 的邊界仍是 proposed boundary（尤其非 Python backend、
+> Rust 全數未寫）；**backend 仍不可替換**（M3 factory 未實作）。
+> M3–M5 未開始。
 > 可執行驗證：`tests/test_psi_backend_adapter.py`（M1 adapter parity）+
 > `tests/test_psi_schema.py`（schema 契約）+
 > `tests/test_psi_contract.py`（characterization 快照）。
