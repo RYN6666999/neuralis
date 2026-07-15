@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:neuralis:contracts:psi-state:1",
+  "title": "PSI backend state snapshot v1",
+  "description": "PsiCore.get_state() 可觀察輸出的 v1 契約。描述目前 Python 參考實作（laap/psi_core.py）的輸出形狀；允許非破壞性 extension（root 與子物件都接受額外欄位），但五需求名稱、範圍與必填欄位固定。私有 thread 狀態（_thread/_running 等）不屬於本 schema。",
+  "type": "object",
+  "required": ["needs", "dominant_need", "dominant_drive", "emotion", "attention", "tick"],
+  "properties": {
+    "needs": {
+      "description": "五維需求。五個名稱固定且必填；額外 key 視為未來 extension，仍須符合 needEntry 形狀。",
+      "type": "object",
+      "required": ["certainty", "competence", "autonomy", "relatedness", "growth"],
+      "properties": {
+        "certainty": { "$ref": "#/$defs/needEntry" },
+        "competence": { "$ref": "#/$defs/needEntry" },
+        "autonomy": { "$ref": "#/$defs/needEntry" },
+        "relatedness": { "$ref": "#/$defs/needEntry" },
+        "growth": { "$ref": "#/$defs/needEntry" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/needEntry" }
+    },
+    "dominant_need": {
+      "description": "目前 drive 最高的需求；理論上不會是 none（drive 恆 >= 0 必有最大值），但 Python 參考實作保留 none 分支。",
+      "enum": ["certainty", "competence", "autonomy", "relatedness", "growth", "none"]
+    },
+    "dominant_drive": {
+      "description": "主導需求的 drive 值 = max(0, target - current) * importance。",
+      "type": "number",
+      "minimum": 0
+    },
+    "emotion": {
+      "description": "EmotionGradient 輸出。valence 是內啡肽緩釋後的回報值；raw_valence 是平滑原始值。get_state_label() 判斷正負用的是 raw_valence 對應的內部值，不是 valence（見契約文件 §6）。",
+      "type": "object",
+      "required": ["valence", "raw_valence", "arousal", "dominance"],
+      "properties": {
+        "valence": { "type": "number", "minimum": -1, "maximum": 1 },
+        "raw_valence": { "type": "number", "minimum": -1, "maximum": 1 },
+        "arousal": { "type": "number", "minimum": 0, "maximum": 1 },
+        "dominance": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": true
+    },
+    "attention": {
+      "description": "注意力焦點。對應：competence→TASK、growth→LEARNING、certainty→PLANNING、autonomy/none→IDLE。",
+      "$comment": "KNOWN-ISSUE-1：relatedness 主導時 _update_attention 引用不存在的 AttentionFocus.SOCIAL 而拋 AttributeError，因此 SOCIAL 從未出現在 get_state() 輸出，也「不是」v1 合法值。修復後若要新增值，屬 breaking change，須發 schema v2。",
+      "enum": ["IDLE", "TASK", "LEARNING", "PLANNING"]
+    },
+    "tick": {
+      "description": "心跳計數。未 start() 時為 0。",
+      "type": "integer",
+      "minimum": 0
+    },
+    "affective": {
+      "description": "5 維情緒引擎（laap/affective.py）的相容性輸出。屬 compatibility surface，非 v1 backend 必要能力；未來 backend 可省略。",
+      "type": "object",
+      "properties": {
+        "mood": { "type": "string" },
+        "dims": { "type": "object", "additionalProperties": { "type": "number" } },
+        "biases": { "type": "object", "additionalProperties": { "type": "number" } },
+        "events_total": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "schema_version": {
+      "description": "本契約版本。目前 Python 實作不輸出此欄位；未來 backend 應輸出。",
+      "const": "1"
+    },
+    "backend": {
+      "description": "產生此 state 的 backend 識別字，如 \"python\"、\"rust\"。目前 Python 實作不輸出。",
+      "type": "string"
+    },
+    "timestamp": {
+      "description": "快照時間，Unix seconds（UTC，可含小數）。目前 Python 實作不輸出。",
+      "type": "number",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "needEntry": {
+      "type": "object",
+      "required": ["current", "target", "drive"],
+      "properties": {
+        "current": { "type": "number", "minimum": 0, "maximum": 1 },
+        "target": { "type": "number", "minimum": 0, "maximum": 1 },
+        "drive": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": true
+    }
+  }
+}
