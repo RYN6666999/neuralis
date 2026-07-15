@@ -37,7 +37,7 @@ def snapshot() -> dict:
                 "dominant_drive": st["dominant_drive"],
                 "emotion": st["emotion"],
                 "attention": st["attention"],
-                "last_input": (getattr(psi, "last_input", "") or "")[:80],
+                "last_input": psi.get_last_input()[:80],
                 "affective": st.get("affective"),
             }
         except Exception as e:

@@ -48,11 +48,13 @@ def ensure_psi_core():
         return _psi_core
     try:
         from laap.psi_core import PsiCore
+        from laap.psi_backend import PythonPsiBackend
         from aris_brain.psi_core_bridge import get_global_bus
         _bus = get_global_bus()
-        _psi_core = PsiCore(bus=_bus, interval=1.0)
+        raw = PsiCore(bus=_bus, interval=1.0)
+        _psi_core = PythonPsiBackend(raw)
         _psi_core.start()
-        logger.info("❤️ PsiCore 啟動 — Aris 有心跳了")
+        logger.info("❤️ PsiBackend 啟動 — Aris 有心跳了")
     except Exception as e:
         logger.warning(f"PsiCore 啟動失敗: {e}")
     return _psi_core

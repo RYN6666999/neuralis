@@ -119,7 +119,8 @@ class ConsolidationLoop:
             return False
         if self.psi is not None:
             try:
-                if self.psi.emotion.to_dict()["arousal"] > self.arousal_max:
+                emo = self.psi.get_state()["emotion"]
+                if emo["arousal"] > self.arousal_max:
                     return False
             except Exception:
                 pass

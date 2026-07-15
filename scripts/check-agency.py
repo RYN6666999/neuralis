@@ -19,13 +19,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from laap.agency import AgencyLoop, AUDIT_PATH, READONLY_WHITELIST
 from laap.psi_core import PsiCore, NeedType
+from laap.psi_backend import PythonPsiBackend
 from laap.agi.cognitive_bus import CognitiveBus
 from laap.tool_executor import ToolExecutor
 
 
 def main():
     bus = CognitiveBus(agent_name="check")
-    psi = PsiCore(bus=bus, interval=0.5)   # 不 start 心跳，手動控狀態
+    raw = PsiCore(bus=bus, interval=0.5)   # 不 start 心跳，手動控狀態
+    psi = PythonPsiBackend(raw)            # M2 compat: AgencyLoop needs v1 API
     tools = ToolExecutor(bus=bus, agentos_registry=None)
     agency = AgencyLoop(psi=psi, tools=tools, bus=bus,
                         interval=0.5, max_per_hour=2, drive_threshold=0.45)
@@ -39,10 +41,10 @@ def main():
     # B. 迴路（手動壓低 certainty，其餘壓到閾值下避免搶跑）
     audit_before = AUDIT_PATH.read_text().count("\n") if AUDIT_PATH.exists() else 0
     for nt in NeedType:
-        psi.needs.values[nt] = psi.needs.targets[nt]  # drive→0
-    psi.needs.values[NeedType.CERTAINTY] = 0.2        # drive = 0.6*1.2 = 0.72
-    psi.last_input = "gbrain 記憶"
-    cert_before = psi.needs.values[NeedType.CERTAINTY]
+        raw.needs.values[nt] = raw.needs.targets[nt]  # drive→0
+    raw.needs.values[NeedType.CERTAINTY] = 0.2        # drive = 0.6*1.2 = 0.72
+    raw.last_input = "gbrain 記憶"
+    cert_before = raw.needs.values[NeedType.CERTAINTY]
     agency._evaluate()
     audit_after = AUDIT_PATH.read_text().count("\n") if AUDIT_PATH.exists() else 0
     assert audit_after == audit_before + 1, "應寫入一行審計"
@@ -51,13 +53,13 @@ def main():
     print(f"B. 迴路: OK — 行動 {last['tool']}({last['prompt'][:30]}) ok={last['ok']} "
           f"mem={last['mem_id'] or '-'}")
     if last["ok"]:
-        assert psi.needs.values[NeedType.CERTAINTY] > cert_before, "成功行動應回升需求"
+        assert raw.needs.values[NeedType.CERTAINTY] > cert_before, "成功行動應回升需求"
         assert last["mem_id"], "成功行動應有記憶 id"
-        print(f"   certainty {cert_before:.2f} → {psi.needs.values[NeedType.CERTAINTY]:.2f}, "
+        print(f"   certainty {cert_before:.2f} → {raw.needs.values[NeedType.CERTAINTY]:.2f}, "
               f"記憶已回寫")
 
     # C. rate cap（cap=2；B 已用 1 次 → 再 2 次只該成 1 次）
-    psi.needs.values[NeedType.GROWTH] = 0.1
+    raw.needs.values[NeedType.GROWTH] = 0.1
     agency._need_last_action.clear()
     n0 = agency.actions_total
     agency._evaluate()
