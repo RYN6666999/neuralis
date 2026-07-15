@@ -6,6 +6,36 @@
 冷卻期 — Aris 躺 1h，所有外部呼叫 connection refused（scream /aris 報錯真因）。
 reload-aris.sh = kill 後立刻自起（watchdog 要 ~90s 才出手，預算不花）+ 清假警報鎖。
 
+## ✅ Scream 深度整合 T1：工具呼叫協議（2026-07-15）— Aris 能開整個 TUI 了
+**單點解鎖**：scream 全部功能（審批面板/檔案編輯/shell/goal/wolfpack/MCP/skills）
+都靠 OpenAI function-calling 迴圈驅動，之前 API 不吃 `tools` → agent 迴圈全死，
+`scream -m laap/laap-core` 只是聊天皮。現在補上了：
+- `laap/llm_respond.py::respond_tools`：tools/tool_choice 原樣轉發底層 LLM（不截斷），
+  Aris 身份+psi 狀態以第二條 system 插入（harness 指令權威在前；精簡版身份塊，
+  不放技能目錄免得跟真工具打架）。engine=`psi-llm-tools`。
+- `laap/chatflow.py`：`tools` 請求走 `_tool_chat`（executor 卸載 + 125s timeout，
+  作者管線不在迴路）；SSE 統一支援 tool_calls delta；`_is_user_turn` 護欄
+  （工具 round-trip 不重複餵 psi/加 trust）；`_is_harness_noise` denylist
+  （scream 的 session 摘要簿記請求不算 Ryan 說話 — 實測抓到污染才補的）；
+  `NEURALIS_DUMP_REQUESTS=on` 可存請求原貌到 /tmp/laap-request-dumps/。
+- env：`NEURALIS_TOOL_MODEL`（預設同 NEURALIS_LLM_MODEL）/ `NEURALIS_TOOL_TIMEOUT`
+  （120s）/ `NEURALIS_TOOL_MAX_TOKENS`（8192）。
+- `~/.scream-code/config.toml` laap 三 model context 32000→131072（備份 .bak-toolcall）。
+- 自檢 `scripts/check-toolcall.py` 5 段全過；E2E：`scream -m laap/laap-core -p
+  "用你的工具讀取 demo.txt"` → 真工具往返 → 回報原文 ✅。
+
+**⚠️ 順手修了大雷：v1 狀態列補丁曾把 scream 整個弄掛**（`\$1` 轉義錯 → 非法 JS
+SyntaxError，scream 起不來；且 .mjs ESM 沒有 require → 補丁本體其實從沒生效過）。
+`scripts/patch-scream-tui.py` 重寫為 v2：自動 glob dist 檔名、自動偵測 minified
+識別字（SPINNER_FRAMES$1）、檔首插自有 import、狀態檔 ts>15s 過期護欄、
+patch 完 node --check 驗語法失敗自動還原。已套用，scream 0.9.7 復活。
+
+**下一步（T2-T5，計畫在 2026-07-15 對話）**：T2 工具結果→affective 事件
+（task_success/failure）+ 狀態列顯示 mood；T3 laap-brain MCP 掛進
+~/.scream-code/mcp.json（自我內省工具）；T4 全 TUI 功能驗收矩陣
+（/goal、wolfpack 子 agent 配一般 LLM、--auto/-y 對 laap 先禁用）；
+T5 上游 PR 狀態列 hook + agency→scream 執行體。
+
 ## ✅ Aris 語言層點亮（2026-07-15, commit 30e3f45）— 會對話了
 `NEURALIS_LLM_RESPOND=on`（zshrc）→ engine=psi-llm：LLM 當語言皮質，system
 prompt 注入真實狀態+實測 delta+gbrain 記憶+對話歷史（10 輪），誠實鐵則寫死

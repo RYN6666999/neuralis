@@ -58,6 +58,18 @@ def _is_user_turn(body: dict) -> bool:
     return bool(msgs) and msgs[-1].get("role") == "user"
 
 
+# scream 的內部簿記請求（session 摘要/標題生成）也走 /v1/chat，最後一條 role
+# 也是 user — 但那是 harness 在說話，不是 Ryan。餵進 psi 會污染 last_input、
+# 灌假 trust。ponytail: 前綴 denylist，夠擋現役已知款；新款出現再補 regex。
+_FEED_DENY = re.compile(os.environ.get(
+    "NEURALIS_FEED_DENY_REGEX",
+    r"^(以下是会话|以下是會話|请为以下|請為以下|Summarize|Generate a (short )?title)"))
+
+
+def _is_harness_noise(user_msg: str) -> bool:
+    return bool(user_msg) and bool(_FEED_DENY.match(user_msg))
+
+
 _DUMP = os.environ.get("NEURALIS_DUMP_REQUESTS", "off").lower() in ("on", "1", "true")
 
 
@@ -299,9 +311,11 @@ def _make_chat_handler(orig_handler):
         if _DUMP:
             _dump_request(body)
 
-        # 只有真使用者回合才餵 psi / 加 trust（工具迴圈 round-trip 不算）
-        user_turn = _is_user_turn(body)
-        fed = _feed(_extract_user_msg(body)) if user_turn else None
+        # 只有真使用者回合才餵 psi / 加 trust
+        # （工具迴圈 round-trip 不算；harness 簿記請求不算）
+        user_msg = _extract_user_msg(body)
+        user_turn = _is_user_turn(body) and not _is_harness_noise(user_msg)
+        fed = _feed(user_msg) if user_turn else None
 
         # 忙碌保護：如果 LAAP 工具正在執行中，阻止新對話打斷
         if user_turn:
@@ -334,7 +348,6 @@ def _make_chat_handler(orig_handler):
 
         # 記憶聯想：與作者管線「平行」召回（gbrain hybrid 實測 5-9s，序列等 = 延遲牆）。
         # 管線回來後只再等一小段；沒等到就 stash，下一輪用「剛想起」帶出 — 零延遲牆。
-        user_msg = _extract_user_msg(body)
         memories = []
         mem_task = None
         if user_turn and user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):

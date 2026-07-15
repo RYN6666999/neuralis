@@ -41,7 +41,7 @@ def post(body: dict, timeout=150):
 
 
 def seg_a():
-    from laap.chatflow import _is_user_turn, _content_text
+    from laap.chatflow import _is_user_turn, _content_text, _is_harness_noise
     assert _is_user_turn({"messages": [{"role": "user", "content": "嗨"}]})
     assert not _is_user_turn({"messages": [
         {"role": "user", "content": "嗨"},
@@ -53,7 +53,10 @@ def seg_a():
     assert _content_text(None) == ""
     assert _content_text([{"type": "text", "text": "a"},
                           {"type": "image_url", "image_url": {}}]) == "a"
-    print("A. user-turn 護欄 + content 安全抽取: OK")
+    assert _is_harness_noise('以下是会话 "session_xxx" 的对话内容，请总结'), \
+        "scream 簿記請求要被擋"
+    assert not _is_harness_noise("嗨，今天感覺怎麼樣？")
+    print("A. user-turn 護欄 + content 安全抽取 + 簿記過濾: OK")
 
 
 def seg_b():
