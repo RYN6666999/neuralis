@@ -99,7 +99,7 @@ def emotion_intensity() -> float:
         from laap.startup import get_psi_core
         psi = get_psi_core()
         if psi is not None:
-            e = psi.emotion.to_dict()
+            e = psi.get_state()["emotion"]
             return round(abs(e["valence"]) * e["arousal"], 3)
     except Exception:
         pass

@@ -431,14 +431,13 @@ def _post_tool_outcomes(body: dict) -> None:
     try:
         from laap.startup import get_psi_core
         psi = get_psi_core()
-        af = getattr(psi, "affective", None) if psi is not None else None
-        if af is None:
+        if psi is None:
             return
         for m in tail[:3]:
             text = _content_text(m.get("content")).lower()
             failed = any(k in text for k in _FAIL_MARKERS)
-            af.post_event("task_failure" if failed else "task_success",
-                          intensity=0.5 if failed else 0.3)
+            psi.post_affective_event("task_failure" if failed else "task_success",
+                                     intensity=0.5 if failed else 0.3)
     except Exception as e:
         logger.debug(f"[chatflow] tool outcome 事件跳過: {e}")
 

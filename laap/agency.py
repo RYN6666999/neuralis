@@ -141,7 +141,7 @@ class AgencyLoop:
         ponytail: 線性映射，不是真腎上腺素動力學。升級路徑 = 非線性曲線。
         """
         try:
-            arousal = getattr(self.psi.emotion, "arousal", 0.3)
+            arousal = self.psi.get_state()["emotion"]["arousal"]
         except Exception:
             arousal = 0.3
         # arousal 0.3 → factor 1.0, arousal 0.9 → factor 0.3
@@ -160,7 +160,7 @@ class AgencyLoop:
         for entity in self._trust_scores:
             self._trust_scores[entity] = max(0.0, self._trust_scores[entity] - self._trust_decay_rate)
 
-        drives = self.psi.needs.get_drives()
+        drives = self.psi.get_drives()
         # 催產素：信任權重 → relatedness 增益（最高 +50%）
         trust = self._trust_scores.get("user", 0.0)
         drives["relatedness"] = drives.get("relatedness", 0.0) * (1.0 + trust * 0.5)
@@ -315,7 +315,7 @@ class AgencyLoop:
             return None  # autonomy：由 agency loop 本身自然滿足（每次自主選擇=行使自主），
                           # 不需要獨立角度。relatedness：被動需求（process_input+trust），
                           # 2026-07-15 撤掉假角度。見 docs/specs/s-span-design-note.md
-        topic = (getattr(self.psi, "last_input", "") or "").strip()[:80]
+        topic = (self.psi.get_last_input() or "").strip()[:80]
         seed = topic or self._seed_snippet   # 真對話優先，否則從上次記憶聯想
         # 自我強化循環防護：連續多次無使用者輸入 + gbrain 查詢 → 閒置
         if self._cycle_guard and not topic and self._last_was_gbrain and self._seed_snippet:
@@ -352,7 +352,7 @@ class AgencyLoop:
         """
         eff = self._exploration_rate
         try:
-            biases = self.psi.affective.compute_cognitive_bias()
+            biases = self.psi.get_cognitive_bias()
             eff = (eff + 0.3 * biases["risk_seeking"]) * \
                   (1.0 - 0.6 * max(0.0, biases["attention_narrowing"]))
         except Exception:
@@ -417,7 +417,7 @@ class AgencyLoop:
         # ── RPE 結果 → 5 維情緒事件（行動後果塑形情緒，情緒再回頭調變探索）──
         try:
             if abs(rpe) > 0.05:
-                self.psi.affective.post_event(
+                self.psi.post_affective_event(
                     "task_success" if rpe > 0 else "task_failure",
                     intensity=min(1.0, abs(rpe) * 2))
         except Exception:
@@ -435,12 +435,12 @@ class AgencyLoop:
         if ok:
             try:
                 import memory_bridge
-                emo = self.psi.emotion.to_dict()
+                emo = self.psi.get_state()["emotion"]
                 importance = min(0.5, 0.25 + 0.25 * emo["arousal"])
                 mem_id = memory_bridge.store_important(
                     f"[自主行動:{need}] 查詢「{prompt}」→\n{result[:500]}",
                     tags=["agency", need], importance=importance)
-                self.psi.needs.satisfy_all({self._need_type(need): 0.2}, source="agency")
+                self.psi.satisfy(need, 0.2, "agency")
                 self._seed_snippet = self._extract_seed(result)
             except Exception as e:
                 logger.warning(f"[Agency] 回寫失敗: {e}")
@@ -464,9 +464,12 @@ class AgencyLoop:
                     f"exp={self._exploration_rate:.2f} → mem={mem_id or '-'}")
 
     @staticmethod
-    def _need_type(name: str):
-        from laap.psi_core import NeedType
-        return NeedType(name)
+    def _audit(entry: dict) -> None:
+        try:
+            with AUDIT_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.warning(f"[Agency] 審計寫入失敗: {e}")
 
     _SEED_PREFIX = re.compile(r"^\[[\d.]+\]\s*|^\S+/\S+\s+--\s*|^#+\s*")
 
@@ -484,11 +487,3 @@ class AgencyLoop:
             if len(s) >= 4:
                 return s[:60]
         return ""
-
-    @staticmethod
-    def _audit(entry: dict) -> None:
-        try:
-            with AUDIT_PATH.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception as e:
-            logger.warning(f"[Agency] 審計寫入失敗: {e}")
