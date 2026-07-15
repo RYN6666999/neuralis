@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:neuralis:contracts:psi-state:1",
   "title": "PSI backend state snapshot v1",
-  "description": "PsiCore.get_state() 可觀察輸出的 v1 契約。描述目前 Python 參考實作（laap/psi_core.py）的輸出形狀；允許非破壞性 extension（root 與子物件都接受額外欄位），但五需求名稱、範圍與必填欄位固定。私有 thread 狀態（_thread/_running 等）不屬於本 schema。",
+  "description": "PsiCore.get_state() 可觀察輸出的 v1 契約。描述目前 Python 參考實作（laap/psi_core.py）的輸出形狀。非破壞性 extension 點：root 新增選填欄位、needEntry/emotion 內部新增欄位。needs 的 key 集合固定為五需求（closed）——增刪改名都是 breaking change。私有 thread 狀態（_thread/_running 等）不屬於本 schema。",
   "type": "object",
   "required": ["needs", "dominant_need", "dominant_drive", "emotion", "attention", "tick"],
   "properties": {
     "needs": {
-      "description": "五維需求。五個名稱固定且必填；額外 key 視為未來 extension，仍須符合 needEntry 形狀。",
+      "description": "五維需求。五個名稱固定、必填、且「只能」是這五個——新增/刪除/重新命名 need key 是 breaking change（升 schema v2）。needEntry 內部允許新增欄位（non-breaking）。",
       "type": "object",
       "required": ["certainty", "competence", "autonomy", "relatedness", "growth"],
       "properties": {
@@ -17,7 +17,7 @@
         "relatedness": { "$ref": "#/$defs/needEntry" },
         "growth": { "$ref": "#/$defs/needEntry" }
       },
-      "additionalProperties": { "$ref": "#/$defs/needEntry" }
+      "additionalProperties": false
     },
     "dominant_need": {
       "description": "目前 drive 最高的需求；理論上不會是 none（drive 恆 >= 0 必有最大值），但 Python 參考實作保留 none 分支。",

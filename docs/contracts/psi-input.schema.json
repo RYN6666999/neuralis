@@ -15,7 +15,7 @@
       "const": "1"
     },
     "source": {
-      "description": "輸入來源。省略時語意上預設為 \"user\"。此值同時是需求憲法（constitution）的 per-source 小時預算 key，已觀察到的值：\"user\"、\"agency\"。不設 enum——新來源屬非破壞性擴充。",
+      "description": "輸入來源（provenance 標記）。省略時語意上預設為 \"user\"。注意：目前 Python PsiCore.process_input(text) 沒有 source 參數，無法接收或轉送此值——它「不是」constitution 的 per-source 預算 key。具有已觀察到 constitution 語意的 source 只存在於 NeedDriveSystem.satisfy(need, amount, source)（觀察值：\"user\"、\"agency\"）。不設 enum——新來源屬非破壞性擴充。",
       "type": "string",
       "minLength": 1,
       "default": "user"

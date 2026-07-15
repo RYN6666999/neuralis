@@ -88,6 +88,18 @@ class TestStateSchema:
         psi.process_input("我懂了，已經完成解決了這個問題")
         state_validator.validate(psi.get_state())
 
+    def test_extra_need_name_fails(
+            self, psi: PsiCore,
+            state_validator: Draft202012Validator) -> None:
+        """The five need names are a CLOSED set (needs has
+        additionalProperties: false).  Adding, removing, or renaming
+        a need key is a breaking change that requires schema v2."""
+        state = psi.get_state()
+        state["needs"]["curiosity"] = {
+            "current": 0.5, "target": 0.8, "drive": 0.3}
+        assert not state_validator.is_valid(state), \
+            "schema accepted a sixth need 'curiosity'"
+
     @pytest.mark.parametrize("need", NEED_NAMES)
     def test_missing_need_fails(
             self, psi: PsiCore, need: str,

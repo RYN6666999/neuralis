@@ -73,6 +73,19 @@ StatusWriter、memory_store、chatflow 的工具結果路徑、全部 check scri
 內部物件。把 PsiCore 換成任何不暴露這些 Python 物件的實作，上述模組立即
 壞掉。這個耦合是事實，契約如實記錄；解耦是 M2 的工作（§15）。
 
+事實澄清（避免常見誤讀）：
+
+- `process_input()` 的 production 呼叫端是 **chatflow 與
+  memory_bridge**；**AgencyLoop 不呼叫 `process_input()`**——它直接
+  使用 `needs`/`emotion`/`affective`/`last_input`，是 B 類耦合的
+  最大風險點。
+- **status.py 對 PsiCore 只用 `get_state()` + `last_input`**
+  （A + B），不碰 PsiCore 的 private thread 欄位。
+  `_thread`/`_running`/`_tick_count` 的直接存取主要在 tests
+  （已標註 private observation point）。status.py 另有對 AgencyLoop /
+  ConsolidationLoop private 成員的存取（`_effective_interval`、
+  `_action_ts` 等），但那些不屬於 PsiBackend v1 的邊界。
+
 ## 4. Observed Python API（現有公開行為）
 
 | 方法 | 簽名 | 觀察到的語意 |
@@ -94,16 +107,42 @@ backend 邊界上）。
 
 ```
 start() -> None
-stop(timeout_s: float | None = None) -> None
+stop() -> None
 process_input(text: str, source: str = "user") -> None
 get_state() -> mapping                      # 符合 psi-state.schema.json
 get_dominant_need() -> str
 get_drives() -> mapping[str, float]         # {need_name: drive}
 satisfy(need: str, amount: float, source: str) -> None
-post_affective_event(event: str, intensity: float) -> None
+post_affective_event(event: str, intensity: float = 1.0) -> bool
 get_cognitive_bias() -> mapping[str, float]
 get_last_input() -> str
 ```
+
+簽名注記（依可觀察行為最小化）：
+
+- **`start()` 不帶參數。** `interval` 是建構子配置
+  （`PsiCore(bus, interval=...)`），不是 `start()` 的參數。
+- **`stop()` 不帶 `timeout_s`。** 現有 `PsiCore.stop() -> None`，
+  沒有任何 production caller 傳 timeout；KNOWN-ISSUE-2 是「不 join」，
+  不是「缺 timeout 參數」。M5 修復可以在不改簽名下讓 `stop()` 返回前
+  完成 bounded join；若未來真有 caller-controlled timeout 的 call-site
+  需求，再升契約版本。不提前加沒有 call-site 的參數。
+- **`process_input` 的 `source` 是 provenance 標記，不是 constitution
+  key。** 四層區分：
+  1. canonical event envelope（`psi-input.schema.json`）帶 `source`；
+  2. 現有 Python method `PsiCore.process_input(text: str)` **沒有**
+     `source`/`metadata` 參數，無法接收或轉送它；
+  3. 未來 backend method 可接受 `source`，但 M1 零行為 wrapper
+     不得假裝 `source` 已影響 constitution；
+  4. 具有已觀察到 constitution per-source 預算語意的，只有
+     `satisfy(need, amount, source)`（→ `NeedDriveSystem.satisfy` →
+     `constitution.guard_need`）。
+  不得宣稱 `process_input` 的 `source` 已是 constitution budget key；
+  也不為此修改 production code。
+- **`post_affective_event` 回傳 `bool` 是可觀察契約。** 現有
+  `AffectiveState.post_event()`：已知事件成功排入 queue → `True`；
+  未知事件 → `False`。adapter 必須原樣轉回此結果，不得吞掉 `False`
+  或改成 `None`。
 
 現有 B 表面 → v1 方法對應：
 
@@ -134,17 +173,25 @@ adapter / presentation layer，不是 backend 必要能力。**
    而 `format_state_injection()` 用 state dict 的 `valence`
    （內啡肽緩釋值）。兩個方法走不同 valence 通道。Adapter 從快照重算
    label 時必須用 `emotion.raw_valence`，不是 `emotion.valence`。
-4. 已知非破壞性差異：現行 Python `get_state_label()` 會再次讀活狀態
-   （`needs.get_dominant()` 重算），並發下可能與剛拿的快照不一致；
-   adapter 改從單一快照推導後反而更一致。此差異不視為 breaking。
+4. **M1 不得動這兩個方法的行為。** M1 是零行為 compatibility adapter：
+   `get_state_label()` / `format_state_injection()` 原樣委派給
+   `PsiCore` 同名方法——保留 QUIRK-1（label 用 raw valence、injection
+   用 endorphin valence）、不從單一快照重新計算、不改文案、不修通道
+   差異。parity tests 必須驗證 adapter 與直呼 `PsiCore` 完全一致。
+   若要統一 valence 通道：另立 behavioral change 任務，先定 desired
+   behavior、更新 characterization tests——不屬於 M1。
+5. `__repr__()` 是 Python debug convenience，不進 backend contract。
 
 ## 6. State contract
 
 正式形狀見 `docs/contracts/psi-state.schema.json`。語意補充：
 
 - `needs`：五個名稱固定——`certainty`、`competence`、`autonomy`、
-  `relatedness`、`growth`。每項 `current`/`target` ∈ [0,1]、
-  `drive = max(0, target - current) × importance ≥ 0`。
+  `relatedness`、`growth`，且為 **closed set**
+  （`additionalProperties: false`，第六需求名會被 validator 拒絕；
+  增刪改名 = breaking，見 §13）。每項 `current`/`target` ∈ [0,1]、
+  `drive = max(0, target - current) × importance ≥ 0`；needEntry 內部
+  新增欄位屬 non-breaking。
 - `dominant_need`：drive 最高者；平手時依宣告序
   certainty > competence > autonomy > relatedness > growth
   （characterized 行為，記錄非強制）。
@@ -166,14 +213,18 @@ adapter / presentation layer，不是 backend 必要能力。**
 正式形狀見 `docs/contracts/psi-input.schema.json`。
 
 - 必填 `text: string`（空字串合法，characterized：不 crash）。
-- 選填 `schema_version`（const `"1"`）、`source`（預設語意 `"user"`；
-  同時是 constitution 的 per-source 預算 key）、`timestamp`
+- 選填 `schema_version`（const `"1"`）、`source`（provenance 標記，
+  預設語意 `"user"`；**不是** constitution 預算 key——見 §5 四層區分，
+  constitution 語意只存在於 `satisfy(..., source)`）、`timestamp`
   （**Unix seconds**，UTC，可含小數；v1 明確不收 RFC3339——選 Unix
   seconds 是因為整個 codebase 都用 `time.time()`）、`metadata`
-  （任意 JSON object；backend 不得依賴特定 key 才能運作）。
-- **現況誠實聲明**：目前 Python 只接受 `process_input(text: str)`。
-  canonical input object 由 adapter（M1）負責組裝與拆解；目前沒有任何
-  程式碼直接接受這個 JSON object。
+  （JSON object，值可為任意 JSON-compatible value；backend 不得依賴
+  特定 key 才能運作）。
+- **現況誠實聲明**：目前 Python 只接受 `process_input(text: str)`——
+  沒有 `source`、沒有 `metadata`，無法接收或轉送這些欄位。canonical
+  input object（event envelope）由未來 adapter 負責組裝與拆解；目前
+  沒有任何程式碼直接接受這個 JSON object，M1 零行為 wrapper 也不會
+  讓 `source` 影響 constitution。
 - 處理語意（v1 backend 必須重現）：關鍵詞需求偵測（`NEED_KEYWORDS`
   substring 比對，單需求增量 `min(0.15, 匹配數 × 0.03)`）、無條件
   relatedness +0.02、affective `user_engagement` 事件（intensity 0.5）、
@@ -186,10 +237,12 @@ adapter / presentation layer，不是 backend 必要能力。**
   needs 鬆弛（valence 調節 decay：>0.3 → ×0.7，<-0.3 → ×1.3）→
   emotion 更新 → affective 更新 → 注意力更新 → bus 同步。單次 tick
   例外吞掉並 log，心跳不得因此停止（「停跳 = 靜默腦死」）。
-- `stop(timeout_s)`：v1 提案——`timeout_s` 非 None 時 SHOULD join 心跳
-  執行緒至多 timeout_s 秒。現行 Python `stop()` 只設 flag 不 join
-  （KNOWN-ISSUE-2）；執行緒在下一次 `sleep(interval)` 醒來後退出。
-  `stop()` 先於 `start()` 呼叫 = no-op，不得拋錯。
+- `stop()`：v1 只要求「發出停止訊號」。現行 Python `stop()` 只設 flag
+  不 join（KNOWN-ISSUE-2）——**不保證返回時 worker 已終止**；執行緒在
+  下一次 `sleep(interval)` 醒來後退出。M5 修復後，`stop()` 可在不改
+  簽名下於返回前完成 bounded join；caller-controlled timeout 若未來
+  真有 call-site 需求，屬契約升版。`stop()` 先於 `start()` 呼叫 =
+  no-op，不得拋錯。
 - stop → start 快速重啟：現行 Python 可能短暫雙心跳（KNOWN-ISSUE-2 的
   後果）。v1 backend 在 M5 後不得雙心跳。
 
@@ -202,9 +255,14 @@ adapter / presentation layer，不是 backend 必要能力。**
      測試靠 monkeypatch 歸零）。
   2. affective 1/f 粉紅噪聲：未播種的 numpy `default_rng`。
 - **跨 backend 不要求 bit-identical 隨機流。** 等價性驗證一律在
-  零噪聲配置下進行：needs 雜訊歸零 + affective `noise_amplitude=0`
-  （AGENTS.md 已知限制、conftest 同款做法）。v1 backend MUST 提供
-  零噪聲模式供 conformance 測試。
+  零噪聲配置下進行。但零噪聲的取得方式兩處不對稱（誠實記錄）：
+  - affective 有正式配置旋鈕：`PersonalityProfile(noise_amplitude=0.0)`。
+  - needs 的 `random.gauss` **沒有**配置旋鈕——現行測試靠 monkeypatch
+    Python 全域 `random.gauss` 歸零（conftest 做法）。這在跨語言
+    backend 上不可行；v1 backend MUST 提供正式的零噪聲/RNG 注入點，
+    Python 參考實作的注入點是未來工作（不在 M0/M1 動 production）。
+  - clock 同樣沒有正式注入點（心跳直接 `time.sleep(interval)`）；
+    backend 的 conformance 測試需以固定 `dt` 腳本驅動，而非實時心跳。
 
 ## 10. Thread-safety expectations
 
@@ -225,7 +283,8 @@ adapter / presentation layer，不是 backend 必要能力。**
   `AttributeError`（KNOWN-ISSUE-1）；production 呼叫端（chatflow）
   以 try/except 吞掉 → psi feed 靜默失效。M5 修復後不得對任意文字拋錯。
 - `post_affective_event()`：未知事件名——現行 Python 回 `False` 不拋錯；
-  v1 沿用「未知事件靜默忽略（可觀察回報）」語意。
+  v1 沿用：回傳 `bool`（已知事件排入 queue → `True`、未知 → `False`）
+  是可觀察契約，不得吞掉 `False` 或改回 `None`（§5）。
 - `satisfy()`：未知需求名是呼叫端錯誤，backend 應拋明確錯誤
   （Python `NeedType(name)` 拋 `ValueError`），不得靜默寫錯需求。
 - 心跳內部錯誤：吞掉 + log（§8），不得讓心跳死掉，也不得污染狀態範圍
@@ -253,11 +312,14 @@ M2 逐一把呼叫端遷到 §5 的 v1 方法。過渡期間**不得新增**對 
 
 - 本契約與兩份 schema 同步版號：目前 `1`（schema `$id`
   `urn:neuralis:contracts:psi-{state,input}:1`，`schema_version` const `"1"`）。
-- **非破壞性（不升版）**：state root/子物件新增選填欄位（root
-  `additionalProperties: true` 已預留）；input 新增 `metadata` 內容。
-- **破壞性（升 v2，新 schema 檔）**：改需求名稱/數量、改數值範圍、
-  改必填集合、`attention` enum 增減值（含未來把 SOCIAL/相容值加入）、
-  input top-level 新增欄位（input 是 closed schema，top-level 加欄位
+- **非破壞性（不升版）**：state root 新增選填欄位（root
+  `additionalProperties: true` 已預留）；needEntry / emotion 內部新增
+  欄位；input 新增 `metadata` 內容。
+- **破壞性（升 v2，新 schema 檔）**：**新增、刪除、重新命名 need key**
+  （`needs` 是 closed schema，`additionalProperties: false`，第六需求
+  會被 v1 validator 拒絕——這是刻意的）、改數值範圍、改必填集合、
+  `attention` enum 增減值（含未來把 SOCIAL/相容值加入）、
+  input top-level 新增欄位（input 也是 closed schema，top-level 加欄位
   = 舊 validator 拒絕新輸入）。
 - 版本歷史記在本檔；schema 檔一版一檔，不原地改語意。
 
@@ -268,7 +330,7 @@ M2 逐一把呼叫端遷到 §5 的 v1 方法。過渡期間**不得新增**對 
 | KNOWN-ISSUE-1 | relatedness 主導時 `_update_attention` 引用不存在的 `AttentionFocus.SOCIAL` → `process_input` 拋 AttributeError；production 被 chatflow try/except 吞掉 = psi feed 靜默失效 | `test_relatedness_does_not_crash`（strict xfail） | M5 |
 | KNOWN-ISSUE-2 | `PsiCore.stop()` 不 join 心跳執行緒；快速 stop→start 可能短暫雙心跳 | `test_stop_joins_thread`（strict xfail） | M5 |
 | Gate 0（已修） | `test_concurrent_read_write` 收集 errors 但從不斷言 → 併發錯誤靜默通過 | 本 branch Commit A 已補斷言 | 已修 |
-| QUIRK-1（記錄） | `get_state_label()` 用 raw valence、`format_state_injection()` 用內啡肽 valence——兩方法 valence 通道不同（§5 理由 3） | 無（行為記錄） | 不修，寫進契約 |
+| QUIRK-1（記錄） | `get_state_label()` 用 raw valence、`format_state_injection()` 用內啡肽 valence——兩方法 valence 通道不同（§5 理由 3） | 無（行為記錄） | 不修；M1 必須原樣保留（§5 理由 4）；統一通道屬另立 behavioral change 任務 |
 | QUIRK-2（記錄） | `get_state()` 非原子快照（§10） | 無 | v1 接受此弱保證 |
 
 ## 15. Migration sequence
@@ -276,7 +338,11 @@ M2 逐一把呼叫端遷到 §5 的 v1 方法。過渡期間**不得新增**對 
 - **M0（本任務，已完成）**：本契約 + 兩份 JSON Schema +
   `tests/test_psi_schema.py` 可執行契約測試 + call-site inventory。
 - **M1**：新增 Python `PsiBackend` adapter（包住現有 `PsiCore`），
-  行為零改變；B 表面原樣代理。
+  **零行為改變**：十個 v1 方法全委派；B 表面原樣代理；
+  `get_state_label()` / `format_state_injection()` 原樣委派、保留
+  QUIRK-1、不從快照重算、不改文案；`source` 只做 provenance 記錄，
+  不接 constitution；parity tests 驗證 adapter 與直呼 `PsiCore`
+  完全一致。
 - **M2**：Agency / Consolidation / Status / memory_store /
   chatflow `_post_tool_outcomes` 改走 §5 v1 方法，不再直接存取
   `needs` / `emotion` / `affective` 內部物件。
@@ -298,8 +364,9 @@ Rust（或任何非 Python）backend 合格條件，全部可機器驗證：
   （固定 `dt`、固定 satisfy/事件序列），needs/drive/emotion 軌跡與
   Python 參考實作逐步一致（建議容差 |Δ| ≤ 1e-6；公式相同、IEEE-754
   double 下通常可到 1e-9，容差最終在 M4 定案並寫進 conformance 測試）。
-- **G3 — Lifecycle**：`start()` 冪等；`stop(timeout_s)` 真正 join；
-  stop→start 無雙心跳；stop-before-start 不拋錯。
+- **G3 — Lifecycle**：`start()` 冪等（`interval` 是建構配置，不是
+  `start()` 參數）；`stop()` 發出停止訊號且不拋錯（M5 後：返回前完成
+  bounded join、stop→start 無雙心跳）；stop-before-start 不拋錯。
 - **G4 — 併發**：`test_concurrent_read_write` 的移植版在 Rust backend
   上跑，零錯誤（reader 全程讀到五需求齊全、範圍合法的 state）。
 - **G5 — Characterization 套件**：`tests/test_psi_contract.py` 經
