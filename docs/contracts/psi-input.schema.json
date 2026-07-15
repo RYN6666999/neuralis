@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:neuralis:contracts:psi-input:1",
+  "title": "PSI backend canonical input event v1",
+  "description": "process_input 的 canonical input object。目前 Python 參考實作只接受 process_input(text: str)——不直接接受本 JSON object；由 adapter 層把呼叫端輸入包成此 object（M1 之後）。top-level 採 closed schema（additionalProperties: false）防欄位打錯字；擴充一律放 metadata。",
+  "type": "object",
+  "required": ["text"],
+  "properties": {
+    "text": {
+      "description": "使用者（或來源系統）輸入的原始文字。空字串合法（characterized：不 crash）。",
+      "type": "string"
+    },
+    "schema_version": {
+      "description": "本契約版本。",
+      "const": "1"
+    },
+    "source": {
+      "description": "輸入來源（provenance 標記）。省略時語意上預設為 \"user\"。注意：目前 Python PsiCore.process_input(text) 沒有 source 參數，無法接收或轉送此值——它「不是」constitution 的 per-source 預算 key。具有已觀察到 constitution 語意的 source 只存在於 NeedDriveSystem.satisfy(need, amount, source)（觀察值：\"user\"、\"agency\"）。不設 enum——新來源屬非破壞性擴充。",
+      "type": "string",
+      "minLength": 1,
+      "default": "user"
+    },
+    "timestamp": {
+      "description": "事件時間，Unix seconds（UTC，可含小數，同 Python time.time()）。v1 明確「不」接受 RFC3339 字串——選 Unix seconds 是因為整個 codebase（chatflow/status/agency）都用 time.time()。",
+      "type": "number",
+      "minimum": 0
+    },
+    "metadata": {
+      "description": "額外脈絡，任意 JSON-compatible value 的 object。backend 不得依賴特定 metadata key 才能運作。",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false
+}
