@@ -25,10 +25,13 @@ logger = logging.getLogger("laap.tool_executor")
 class ToolExecutor:
     """工具執行層 — 把 CognitiveBus 事件轉成真實動作。"""
 
+    TOOL_STATUS_FILE = "/tmp/laap-tool-status.json"
+
     def __init__(self, bus: CognitiveBus, agentos_registry=None):
         self.bus = bus
         self._registry = agentos_registry  # AgentOS executor_registry 模組
         self._tools: Dict[str, dict] = {}  # 本機註冊的 tools
+        self._tool_start_time: float = 0.0
 
         bus.register_module("tool_executor", "1.0",
                             ["web_search", "file_search", "gbrain", "qmd", "shell", "http"])
@@ -47,31 +50,87 @@ class ToolExecutor:
         self._tools[name] = {"fn": exec_fn, "description": description}
         logger.info(f"[ToolExecutor] 工具註冊: {name}")
 
+    def _emit_tool_status(self, icon: str, status: str, desc: str,
+                          tool: str = "", elapsed: float = 0):
+        """寫 LAAP 工具狀態到檔案，供 Scream TUI 消費。"""
+        import time
+        payload = {
+            "icon": icon, "status": status, "description": desc,
+            "tool": tool, "elapsed": round(elapsed, 1),
+            "ts": time.time(),
+        }
+        try:
+            with open(self.TOOL_STATUS_FILE, "w") as f:
+                json.dump(payload, f)
+            # 也輸出 stdout 標記（給直接 tail 的使用者）
+            print(f"\n[LAAP-TOOL] {icon} {status} | {desc}", flush=True)
+        except Exception:
+            pass
+
+    def _clear_tool_status(self):
+        """清除狀態檔案（工具完成後）。"""
+        import os, time
+        payload = {
+            "icon": "✔️", "status": "idle", "description": "",
+            "tool": "", "elapsed": 0, "ts": time.time(),
+        }
+        try:
+            with open(self.TOOL_STATUS_FILE, "w") as f:
+                json.dump(payload, f)
+        except Exception:
+            pass
+
+    TOOL_ICONS = {
+        "gbrain": "🧠", "qmd": "📚", "file-search": "🔍",
+        "http-get": "🌐", "http": "🌐", "web-search": "🌐",
+        "shell": "⚙️", "bash": "⚙️",
+    }
+
     def execute(self, tool: str, prompt: str, timeout: int = 30) -> str:
         """執行工具，回傳結果文字。所有呼叫先過安全閘（Phase 4a）。"""
+        import time
         from laap.safety_gate import check as safety_check
         allowed, reason = safety_check(tool, prompt)
         if not allowed:
             return f"[安全閘] 拒絕: {reason}"
+
+        icon = self.TOOL_ICONS.get(tool, "⚙️")
+        short_desc = prompt.strip()[:40]
+        self._tool_start_time = time.time()
+        self._emit_tool_status(icon, "start", f"{tool}: {short_desc}", tool=tool)
+
         logger.info(f"[ToolExecutor] 執行: {tool}({prompt[:60]})")
 
-        # 1. 本機工具
-        if tool in self._tools:
-            try:
-                return self._tools[tool]["fn"](prompt)
-            except Exception as e:
-                return f"[錯誤] {tool}: {e}"
+        result = ""
+        try:
+            # 1. 本機工具
+            if tool in self._tools:
+                self._emit_tool_status(icon, "running", f"{tool}: {short_desc}", tool=tool)
+                result = self._tools[tool]["fn"](prompt)
 
-        # 2. AgentOS executor
-        if self._registry:
-            try:
-                return self._registry.run(tool, prompt, timeout=timeout)
-            except KeyError:
-                pass
-            except Exception as e:
-                return f"[AgentOS 錯誤] {tool}: {e}"
+            # 2. AgentOS executor
+            elif self._registry:
+                self._emit_tool_status(icon, "running", f"{tool}: {short_desc}", tool=tool)
+                try:
+                    result = self._registry.run(tool, prompt, timeout=timeout)
+                except KeyError:
+                    result = f"[未知工具] {tool} — 未註冊"
+                except Exception as e:
+                    result = f"[AgentOS 錯誤] {tool}: {e}"
+            else:
+                result = f"[未知工具] {tool} — 未註冊"
 
-        return f"[未知工具] {tool} — 未註冊"
+            elapsed = time.time() - self._tool_start_time
+            self._emit_tool_status(icon, "done", f"{tool}: 完成 ({elapsed:.1f}s)",
+                                   tool=tool, elapsed=elapsed)
+            self._clear_tool_status()
+            return result
+
+        except Exception as e:
+            elapsed = time.time() - self._tool_start_time
+            self._emit_tool_status("❌", "fail", f"{tool}: {e}", tool=tool, elapsed=elapsed)
+            self._clear_tool_status()
+            return f"[錯誤] {tool}: {e}"
 
     def list_tools(self) -> List[Dict[str, str]]:
         """列出所有可用工具。"""
