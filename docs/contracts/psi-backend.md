@@ -24,7 +24,8 @@
 
 **Non-goals（本版不做）**
 
-- 不寫 Rust、不寫 adapter、不寫 backend factory（M1–M4 的事）。
+- 本階段不實作 Rust backend、backend factory，也不進行 production
+  call-site migration；M1 僅交付尚未接線的 Python compatibility adapter。
 - 不修 KNOWN-ISSUE-1（`AttentionFocus.SOCIAL`）與 KNOWN-ISSUE-2（`stop()` 不 join）。
 - 不宣稱任何效能數字（無 benchmark 不談效能，CLAUDE.md 規則 5）。
 - 不宣稱 Rust 與 Python 相容——沒有 Rust backend，無從相容。

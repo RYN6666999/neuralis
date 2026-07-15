@@ -139,6 +139,12 @@ class TestMethodParity:
         a.process_input(SAFE_INPUT, source="user")
         b.process_input(SAFE_INPUT, source="agency")
         assert core_a.get_state() == core_b.get_state()
+        # source is accepted but discarded by the adapter — it must
+        # not leak into state or introduce a last_source field.
+        state = core_a.get_state()
+        assert "source" not in state
+        assert "last_source" not in state
+        assert not hasattr(core_a, "last_source")
 
     def test_get_state_label_parity(
             self, psi: PsiCore, adapter: PythonPsiBackend) -> None:
@@ -215,6 +221,7 @@ class TestLifecycle:
             # NOT join (KNOWN-ISSUE-2 preserved) — no thread assertion.
             assert not core._running
         finally:
+            adapter.stop()  # idempotent — safe even if start failed
             if core._thread is not None:
                 core._thread.join(timeout=1.0)
 
