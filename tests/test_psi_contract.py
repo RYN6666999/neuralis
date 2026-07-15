@@ -772,6 +772,16 @@ class TestThreadSafety:
             if core._thread is not None:
                 core._thread.join(timeout=1.0)
 
+        # Assertions run AFTER cleanup so a failure cannot leak threads.
+        # Without them the test silently passed even when the reader
+        # collected concurrent read/write errors.
+        assert thread is not None and not thread.is_alive(), \
+            "reader thread still alive after join(timeout=2.0)"
+        assert not errors, (
+            f"{len(errors)} concurrent access error(s); first 3: "
+            + " | ".join(repr(e) for e in errors[:3])
+        )
+
 
 # ── Module-level: all imports valid ─────────────────────────────
 
