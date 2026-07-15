@@ -21,7 +21,7 @@ logger = logging.getLogger("laap.llm_respond")
 _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true")
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
-_LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
+_LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 8))
 
 # 從 Keychain 讀 API key（與 zshrc 同一來源）
 # 依序嘗試：NEURALIS_LLM_API_KEY env → openrouter-api-key keychain → openai-api-key keychain → OPENAI_API_KEY env
@@ -175,7 +175,6 @@ def _call_llm(messages: list) -> Optional[str]:
         "messages": messages,
         "max_tokens": 500,
         "temperature": 0.8,
-        "thinking": {"type": "disabled"},
     }).encode()
 
     req = urllib.request.Request(
