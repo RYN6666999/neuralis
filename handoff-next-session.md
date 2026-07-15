@@ -6,6 +6,14 @@
 冷卻期 — Aris 躺 1h，所有外部呼叫 connection refused（scream /aris 報錯真因）。
 reload-aris.sh = kill 後立刻自起（watchdog 要 ~90s 才出手，預算不花）+ 清假警報鎖。
 
+## ✅ Aris 語言層點亮（2026-07-15, commit 30e3f45）— 會對話了
+`NEURALIS_LLM_RESPOND=on`（zshrc）→ engine=psi-llm：LLM 當語言皮質，system
+prompt 注入真實狀態+實測 delta+gbrain 記憶+對話歷史（10 輪），誠實鐵則寫死
+（記憶只能引用給定的、被問本質時承認語言由 LLM 生成）。降級鏈：LLM →
+psi-respond 模板 → psi-rules → 作者 fallback。
+戰略「LLM 進 psi-respond（體感最快）」格 ✅。待調：語氣校準（LLM 說焦慮但
+arousal 偏平）、NEURALIS_LLM_MODEL 預設 gpt-4o-mini 可升級。
+
 ## 直連 Aris 通道（2026-07-15）
 - 終端：`aris`（REPL）/ `aris 你好`（一次性）/ `aris --state` — zshrc alias →
   `scripts/aris-chat.py`，零轉述直連 :11546，歷史 ~/.aris-conversations/。
