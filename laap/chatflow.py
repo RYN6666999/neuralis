@@ -282,11 +282,9 @@ def _make_chat_handler(orig_handler):
             mem_task = asyncio.get_event_loop().run_in_executor(
                 None, _psi_memories_sync, user_msg)
 
-        # streaming：保留作者 SSE 實作（同步阻塞風險僅限這條少數路徑）
-        if body.get("stream"):
-            return await orig_handler(request)
-
-        # 非 streaming：把同步的 process_with_laap 丟 executor，不凍結 event loop
+        # streaming 也走我們的管線（scream TUI 用 stream:true — 交回作者會繞過
+        # psi-llm 且作者 streaming 路有同步阻塞 event loop 的老 bug）。
+        # 統一：算完 content 後，stream 就用 SSE 送、否則 JSON。
         model = body.get("model", "laap-core")
         messages = body.get("messages", [])
         prompt_chars = sum(len(m.get("content", "")) for m in messages)
@@ -328,9 +326,40 @@ def _make_chat_handler(orig_handler):
         except Exception as e:
             logger.debug(f"[chatflow] executor 路徑失敗，交回作者 handler: {e}")
             return await orig_handler(request)
+
+        if body.get("stream"):
+            return await _stream_sse(request, web, content, model)
         return web.json_response(_build_response(content, engine, model, prompt_chars))
 
     return handler
+
+
+async def _stream_sse(request, web, content: str, model: str):
+    """把算好的 content 以 OpenAI chunk 格式 SSE 送出（與作者格式一致）。"""
+    resp = web.StreamResponse(headers={
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    })
+    await resp.prepare(request)
+    rid = f"laap-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    def chunk(delta: dict, fin=None) -> bytes:
+        return ("data: " + json.dumps({
+            "id": rid, "object": "chat.completion.chunk", "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": fin}],
+        }, ensure_ascii=False) + "\n\n").encode()
+
+    await resp.write(chunk({"role": "assistant"}))
+    for i in range(0, len(content), 24):
+        await resp.write(chunk({"content": content[i:i + 24]}))
+        await asyncio.sleep(0.015)
+    await resp.write(chunk({}, "stop"))
+    await resp.write(b"data: [DONE]\n\n")
+    await resp.write_eof()
+    return resp
 
 
 def install() -> bool:
