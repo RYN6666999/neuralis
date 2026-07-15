@@ -59,6 +59,38 @@ def seg_a():
     print("A. user-turn 護欄 + content 安全抽取 + 簿記過濾: OK")
 
 
+def seg_f():
+    """T2：工具結果 → affective 事件（離線，假 psi 收事件）。"""
+    import laap.startup as st
+    from laap import chatflow
+    events = []
+
+    class FakeAff:
+        def post_event(self, name, intensity=1.0):
+            events.append((name, round(intensity, 2)))
+            return True
+
+    class FakePsi:
+        affective = FakeAff()
+
+    orig = st.get_psi_core
+    st.get_psi_core = lambda: FakePsi()
+    try:
+        chatflow._post_tool_outcomes({"messages": [
+            {"role": "user", "content": "做事"},
+            {"role": "assistant", "content": None, "tool_calls": [{}]},
+            {"role": "tool", "content": "Error: permission denied"},
+            {"role": "tool", "content": "done, 3 files listed"},
+        ]})
+        chatflow._post_tool_outcomes({"messages": [
+            {"role": "user", "content": "純聊天不該有事件"}]})
+    finally:
+        st.get_psi_core = orig
+    assert ("task_failure", 0.5) in events and ("task_success", 0.3) in events, events
+    assert len(events) == 2, f"純聊天不該產生事件: {events}"
+    print(f"F. 工具結果→情緒事件: OK ({events})")
+
+
 def seg_b():
     resp = json.loads(post({
         "model": "laap-core",
@@ -138,6 +170,7 @@ def seg_e():
 
 def main():
     seg_a()
+    seg_f()
     try:
         urllib.request.urlopen(f"{BASE}/health", timeout=5)
     except Exception as e:

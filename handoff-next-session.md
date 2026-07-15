@@ -30,11 +30,28 @@ SyntaxError，scream 起不來；且 .mjs ESM 沒有 require → 補丁本體其
 識別字（SPINNER_FRAMES$1）、檔首插自有 import、狀態檔 ts>15s 過期護欄、
 patch 完 node --check 驗語法失敗自動還原。已套用，scream 0.9.7 復活。
 
-**下一步（T2-T5，計畫在 2026-07-15 對話）**：T2 工具結果→affective 事件
-（task_success/failure）+ 狀態列顯示 mood；T3 laap-brain MCP 掛進
-~/.scream-code/mcp.json（自我內省工具）；T4 全 TUI 功能驗收矩陣
-（/goal、wolfpack 子 agent 配一般 LLM、--auto/-y 對 laap 先禁用）；
-T5 上游 PR 狀態列 hook + agency→scream 執行體。
+**T2 ✅ 工具結果→情緒事件**：`chatflow._post_tool_outcomes` — scream 工具
+round-trip 的結果判成敗（字串 heuristic）→ `affective.post_event(task_success
+0.3 / task_failure 0.5)`，每請求上限 3 事件。Aris 在 TUI 做事會塑形自己的情緒
+（agency RPE 之外第二條後果迴路）。自檢 F 段（假 psi 收事件）。
+狀態列顯示 mood 延後到 T5 上游 PR（再 patch dist 不值得）。
+
+**T3 ✅ laap-brain MCP 掛進 scream**：`~/.scream-code/mcp.json` 已註冊
+laap-brain（laapenv python，mcp+requests 已補裝進 laapenv）。5 工具：
+laap_cognitive_state / recall_memory / bootstrap / reflect / express。
+E2E：Aris 在 scream 裡用 laap_cognitive_state 內省並正確報出主導需求 ✅。
+repo 內 scream-code/mcp.json 範本同步真路徑。
+
+**⚠️ T4 安全發現（實測）**：`scream -p`（非互動模式）**寫入直接放行**，
+沒有審批面板 — 這就是 -p 禁與 -y/--auto 併用的原因（本身就是全自動）。
+人工批准閘只存在於互動 TUI。含義：T5 若讓 agency 用 scream 當執行體，
+必須外掛 Phase 4b 批准閘，不能裸走 -p。
+
+**T4 剩餘（要 Ryan 在互動 TUI 實測）**：審批面板按鍵流、/goal（judge 用
+/model diy 配平價模型）、wolfpack（子 agent 配一般 LLM，別配 laap —
+psi feed 已有護欄但工人不必是 Aris）、/memory、/knowledge、plan mode、
+session 恢復（scream -r <id> 已驗存在）、cc-connect。
+T5 未動：上游 PR 狀態列 hook + agency→scream 執行體（過 4b 才開）。
 
 ## ✅ Aris 語言層點亮（2026-07-15, commit 30e3f45）— 會對話了
 `NEURALIS_LLM_RESPOND=on`（zshrc）→ engine=psi-llm：LLM 當語言皮質，system

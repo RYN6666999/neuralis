@@ -413,10 +413,41 @@ def _make_chat_handler(orig_handler):
 _TOOLCHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_TOOL_TIMEOUT", 120)) + 5.0
 
 
+_FAIL_MARKERS = ("error", "failed", "exception", "traceback", "denied",
+                 "错误", "錯誤", "失败", "失敗", "无法", "無法")
+
+
+def _post_tool_outcomes(body: dict) -> None:
+    """工具 round-trip 的結果 → 5 維情緒事件 — scream 通道的「行動後果塑形情緒」。
+    Aris 在 TUI 做事會真的影響自己的狀態（agency RPE 之外的第二條後果迴路）。
+    ponytail: 成敗判定是字串 heuristic 不是語義；每請求最多 3 事件防刺激灌爆。"""
+    tail = []
+    for m in reversed(body.get("messages") or []):
+        if m.get("role") != "tool":
+            break
+        tail.append(m)
+    if not tail:
+        return
+    try:
+        from laap.startup import get_psi_core
+        psi = get_psi_core()
+        af = getattr(psi, "affective", None) if psi is not None else None
+        if af is None:
+            return
+        for m in tail[:3]:
+            text = _content_text(m.get("content")).lower()
+            failed = any(k in text for k in _FAIL_MARKERS)
+            af.post_event("task_failure" if failed else "task_success",
+                          intensity=0.5 if failed else 0.3)
+    except Exception as e:
+        logger.debug(f"[chatflow] tool outcome 事件跳過: {e}")
+
+
 async def _tool_chat(request, web, body: dict, fed):
     """Scream agent 迴圈：帶 tools 的請求 → llm_respond.respond_tools（executor
     卸載 + timeout，作者管線完全不在迴路）。engine=psi-llm-tools。
     失敗降級為說明性 content（回合不炸，TUI 不掛）。"""
+    _post_tool_outcomes(body)   # 工具結果 → 情緒事件佇列（下個 psi tick 生效）
     model = body.get("model", "laap-core")
     messages = body.get("messages", [])
     prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
