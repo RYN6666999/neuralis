@@ -7,15 +7,14 @@ gbrain, LAAP API, or network access.
 """
 from __future__ import annotations
 
-import threading
-import time
 import sys
+import time
 from typing import Any, Dict
 
 import pytest
 
 from laap.psi_backend import PythonPsiBackend
-from laap.psi_core import PsiCore, NeedType
+from laap.psi_core import PsiCore
 from laap.agi.cognitive_bus import CognitiveBus
 
 
@@ -27,11 +26,11 @@ class TestStartupWiring:
 
     def test_ensure_returns_adapter(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Patch away the external bus dependency, then verify the
-        startup function returns a PythonPsiBackend."""
+        startup function returns a PythonPsiBackend with finally cleanup."""
         bus = CognitiveBus(agent_name="test")
         monkeypatch.setattr(
             "laap.psi_core.CognitiveBus", lambda *a, **kw: bus)
-        from laap.startup import ensure_psi_core, _psi_core as module_var
+        from laap.startup import ensure_psi_core
 
         # Reset the global for test isolation
         monkeypatch.setattr("laap.startup._psi_core", None)
@@ -43,21 +42,53 @@ class TestStartupWiring:
         fake_bridge.get_global_bus = lambda: bus
         monkeypatch.setitem(sys.modules, "aris_brain.psi_core_bridge", fake_bridge)
 
-        result = ensure_psi_core()
-        assert isinstance(result, PythonPsiBackend), \
-            f"Expected PythonPsiBackend, got {type(result)}"
-        assert isinstance(result._core, PsiCore)
-        # Clean up the started thread
-        result.stop()
-        if result._core._thread is not None:
-            result._core._thread.join(timeout=1.0)
+        result = None
+        try:
+            result = ensure_psi_core()
+            assert isinstance(result, PythonPsiBackend), \
+                f"Expected PythonPsiBackend, got {type(result)}"
+            assert isinstance(result._core, PsiCore)
+        finally:
+            if result is not None:
+                result.stop()
+                if result._core._thread is not None:
+                    result._core._thread.join(timeout=1.0)
 
     def test_ensure_idempotent_returns_same(self) -> None:
-        """Repeated calls return the same adapter instance."""
+        """Repeated calls return the same adapter instance.
+        Self-contained: resets globals and installs its own fake bus."""
+        import types
+        bus = CognitiveBus(agent_name="test")
         from laap.startup import ensure_psi_core
-        a = ensure_psi_core()
-        b = ensure_psi_core()
-        assert a is b
+
+        # Reset globals and install fake bridge
+        import laap.startup as _st
+        _st._psi_core = None
+        _st._bus = None
+        fake_bridge = types.ModuleType("aris_brain.psi_core_bridge")
+        fake_bridge.get_global_bus = lambda: bus
+        # Store original and install fake
+        orig = sys.modules.get("aris_brain.psi_core_bridge")
+        sys.modules["aris_brain.psi_core_bridge"] = fake_bridge
+
+        a = None
+        try:
+            a = ensure_psi_core()
+            assert isinstance(a, PythonPsiBackend), \
+                f"Expected PythonPsiBackend, got {type(a)}"
+            assert a is not None
+            b = ensure_psi_core()
+            assert b is a  # same instance
+        finally:
+            if a is not None:
+                a.stop()
+                if a._core._thread is not None:
+                    a._core._thread.join(timeout=1.0)
+            # Restore original module
+            if orig is not None:
+                sys.modules["aris_brain.psi_core_bridge"] = orig
+            else:
+                sys.modules.pop("aris_brain.psi_core_bridge", None)
 
 
 # ── 2. Agency with strict fake backend ────────────────────────────
@@ -158,18 +189,21 @@ class TestAgencyMigration:
         agency.drive_threshold = 0.1
         # Set last_input via get_last_input
         fake._last_input = "test query"
-        # Run evaluate
+        # Run evaluate — must trigger exactly one _act call
         agency._evaluate()
-        # Should have called satisfy (from the _act path)
-        if fake._satisfy_calls:
-            need, amount, source = fake._satisfy_calls[-1]
-            assert amount == 0.2
-            assert source == "agency"
-        # Should have posted an affective event
-        if fake._events:
-            event, intensity = fake._events[-1]
-            assert event in ("task_success", "task_failure")
-            assert 0.0 <= intensity <= 1.0
+        # Verify exactly one satisfy() with correct params
+        assert len(fake._satisfy_calls) == 1, \
+            f"Expected 1 satisfy call, got {len(fake._satisfy_calls)}"
+        need, amount, source = fake._satisfy_calls[0]
+        assert need == "competence"
+        assert amount == 0.2
+        assert source == "agency"
+        # Verify affective event was posted
+        assert len(fake._events) > 0, \
+            "Expected at least one affective event after _act"
+        event, intensity = fake._events[-1]
+        assert event in ("task_success", "task_failure")
+        assert 0.0 <= intensity <= 1.0
 
 
 # ── 3. Consolidation reads arousal from get_state ─────────────────
