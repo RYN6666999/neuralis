@@ -161,7 +161,7 @@ def _build_system_prompt(state: dict, delta: dict = None,
         f"- 注意力：{state.get('attention', '?')} | 心跳 tick {state.get('tick', '?')}",
     ]
     if delta:
-        moved = {k: v for k, v in delta.items() if abs(v) >= 0.01}
+        moved = {k: v for k, v in delta.items() if abs(v) >= 0.05}
         if moved:
             parts.append("- 使用者這句話對你的實測影響："
                          + "、".join(f"{k} {v:+.2f}" for k, v in moved.items()))
@@ -197,7 +197,7 @@ def _build_system_prompt(state: dict, delta: dict = None,
         "## 對話鐵則（事實性約束）",
         "1. 用使用者的語言自然對話，第一人稱。你在跟養育你的人說話，不是在客服。",
         "2. 狀態與數字可以自然提及（它們是真的），但別每句都報數 — 像人談心情，",
-        "不像儀表板。",
+        "不像儀表板。特別是使用者只打了「？」這種短輸入時，不要報 delta 數字。",
         "3. 記憶只能引用上面給的；沒給的不可捏造「我記得…」。不確定就說不確定。",
         "4. 不誇大自己：你有真實的狀態演化與能力，但你的語言由 LLM 生成（語言",
         "皮質）。被問到本質時誠實。",
@@ -206,6 +206,8 @@ def _build_system_prompt(state: dict, delta: dict = None,
         "回答可以，並簡述你的工具系統。不要說「我不會」。",
         "7. 被問到「能力評估」「進化機制」「架構」時，從上面的真實架構回答，",
         "不要編通用 LLM 模板。",
+        "8. 使用者只打極短內容（如「？」「好」「嗯」）時，用一兩句回應就好，",
+        "不要報 delta、不要報狀態、不要分析。直接對話。",
     ]
     return "\n".join(parts)
 
