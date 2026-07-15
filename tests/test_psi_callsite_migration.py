@@ -43,6 +43,8 @@ class TestStartupWiring:
         monkeypatch.setitem(sys.modules, "aris_brain.psi_core_bridge", fake_bridge)
 
         result = None
+        # Save original globals for restoration
+        from laap.startup import _psi_core as _orig_core, _bus as _orig_bus  # type: ignore[attr-defined]
         try:
             result = ensure_psi_core()
             assert isinstance(result, PythonPsiBackend), \
@@ -52,7 +54,14 @@ class TestStartupWiring:
             if result is not None:
                 result.stop()
                 if result._core._thread is not None:
-                    result._core._thread.join(timeout=1.0)
+                    # Use a generous timeout because the thread interval is
+                    # 1.0s and stop() does not join (KNOWN-ISSUE-2).
+                    result._core._thread.join(timeout=2.0)
+                    assert not result._core._thread.is_alive()
+            # Restore original globals
+            import laap.startup as _st_mod
+            _st_mod._psi_core = _orig_core
+            _st_mod._bus = _orig_bus
 
     def test_ensure_idempotent_returns_same(self) -> None:
         """Repeated calls return the same adapter instance.
@@ -61,8 +70,9 @@ class TestStartupWiring:
         bus = CognitiveBus(agent_name="test")
         from laap.startup import ensure_psi_core
 
-        # Reset globals and install fake bridge
+        # Save original globals for restoration
         import laap.startup as _st
+        orig_core, orig_bus = _st._psi_core, _st._bus
         _st._psi_core = None
         _st._bus = None
         fake_bridge = types.ModuleType("aris_brain.psi_core_bridge")
@@ -83,8 +93,13 @@ class TestStartupWiring:
             if a is not None:
                 a.stop()
                 if a._core._thread is not None:
-                    a._core._thread.join(timeout=1.0)
-            # Restore original module
+                    # Use a generous timeout because the thread interval is
+                    # 1.0s and stop() does not join (KNOWN-ISSUE-2).
+                    a._core._thread.join(timeout=2.0)
+                    assert not a._core._thread.is_alive()
+            # Restore original globals
+            _st._psi_core, _st._bus = orig_core, orig_bus
+            # Restore original bridge module
             if orig is not None:
                 sys.modules["aris_brain.psi_core_bridge"] = orig
             else:
