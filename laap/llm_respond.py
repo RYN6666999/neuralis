@@ -19,14 +19,26 @@ logger = logging.getLogger("laap.llm_respond")
 
 # ── 設定 ──
 _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true")
-_LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "gpt-4o")
-_LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://api.openai.com/v1")
+_LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
+_LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
 
 # 從 Keychain 讀 API key（與 zshrc 同一來源）
+# 依序嘗試：NEURALIS_LLM_API_KEY env → openrouter-api-key keychain → openai-api-key keychain → OPENAI_API_KEY env
 def _get_api_key() -> Optional[str]:
+    env_key = os.environ.get("NEURALIS_LLM_API_KEY")
+    if env_key:
+        return env_key
     try:
         import subprocess
+        # 先試 OpenRouter
+        key = subprocess.run(
+            ["security", "find-generic-password", "-s", "openrouter-api-key", "-w"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if key:
+            return key
+        # 再試 OpenAI
         key = subprocess.run(
             ["security", "find-generic-password", "-s", "openai-api-key", "-w"],
             capture_output=True, text=True, timeout=5,
