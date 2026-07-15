@@ -175,6 +175,7 @@ def _call_llm(messages: list) -> Optional[str]:
         "messages": messages,
         "max_tokens": 500,
         "temperature": 0.8,
+        "thinking": {"type": "disabled"},
     }).encode()
 
     req = urllib.request.Request(
