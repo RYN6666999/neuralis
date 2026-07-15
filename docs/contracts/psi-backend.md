@@ -1,9 +1,12 @@
 # PSI Backend Contract v1
 
-> 狀態：M0（契約定義）。本文件記錄的是「可驗證的邊界提案」——
-> PsiBackend v1 是 proposed boundary，**不是已完成的程式碼**。
-> 目前沒有任何非 Python backend 存在，也沒有 adapter。
-> 可執行驗證：`tests/test_psi_schema.py`（schema 契約）+
+> 狀態：M0 完成；M1 Python compatibility adapter 已實作
+> （`laap/psi_backend.py`）。PsiBackend v1 的邊界仍是 proposed
+> boundary（尤其非 Python backend、Rust 全數未寫）；M1 只提供一個
+> **零行為** 的 Python wrapper，尚未接 startup、尚未遷移任何 production
+> call site，**backend 仍不可替換**。M2–M5 未開始。
+> 可執行驗證：`tests/test_psi_backend_adapter.py`（M1 adapter parity）+
+> `tests/test_psi_schema.py`（schema 契約）+
 > `tests/test_psi_contract.py`（characterization 快照）。
 
 ---
@@ -337,22 +340,29 @@ M2 逐一把呼叫端遷到 §5 的 v1 方法。過渡期間**不得新增**對 
 
 - **M0（本任務，已完成）**：本契約 + 兩份 JSON Schema +
   `tests/test_psi_schema.py` 可執行契約測試 + call-site inventory。
-- **M1**：新增 Python `PsiBackend` adapter（包住現有 `PsiCore`），
-  **零行為改變**：十個 v1 方法全委派；B 表面原樣代理；
+- **M1（已實作）**：`class PythonPsiBackend`（`laap/psi_backend.py`），
+  包住現有 `PsiCore`，**零行為改變**：十個 v1 方法全委派；B 表面
+  （`needs`/`emotion`/`affective` 回傳同一底層物件、`last_input` /
+  `attention_focus` getter+setter 直通）以明確 property 代理，無
+  `__getattr__`、不代理 `_thread`/`_running`/`_tick_count`；
   `get_state_label()` / `format_state_injection()` 原樣委派、保留
-  QUIRK-1、不從快照重算、不改文案；`source` 只做 provenance 記錄，
-  不接 constitution；parity tests 驗證 adapter 與直呼 `PsiCore`
-  完全一致。
-- **M2**：Agency / Consolidation / Status / memory_store /
+  QUIRK-1、不從快照重算、不改文案；`process_input` 的 `source` **被
+  接受但不儲存、不寫 audit、不傳 constitution、不改行為**（M1 相容
+  限制）。parity 驗證：`tests/test_psi_backend_adapter.py`（adapter
+  與直呼 `PsiCore` 逐項相等 + adapter 輸出過 state schema）。
+  **尚未接 startup、未遷移任何 production call site，backend 仍不可
+  替換。**
+- **M2（未開始）**：Agency / Consolidation / Status / memory_store /
   chatflow `_post_tool_outcomes` 改走 §5 v1 方法，不再直接存取
   `needs` / `emotion` / `affective` 內部物件。
-- **M3**：backend factory——`NEURALIS_PSI_BACKEND=python|rust`。
-- **M4**：Rust backend。先過語意相容（§16 gates），再談效能
+- **M3（未開始）**：backend factory——`NEURALIS_PSI_BACKEND=python|rust`。
+- **M4（未開始）**：Rust backend。先過語意相容（§16 gates），再談效能
   （沒 benchmark 不宣稱數字）。
-- **M5**：修 KNOWN-ISSUE-1、KNOWN-ISSUE-2；把對應 strict xfail 轉正式
-  passing tests；重新檢視 `attention` enum 的版本策略（§13）。
+- **M5（未開始）**：修 KNOWN-ISSUE-1、KNOWN-ISSUE-2；把對應 strict
+  xfail 轉正式 passing tests；重新檢視 `attention` enum 的版本策略
+  （§13）。
 
-M1–M5 全部尚未開始。
+M1 已交付零行為 adapter；M2–M5 尚未開始。
 
 ## 16. Rust backend acceptance gates
 
