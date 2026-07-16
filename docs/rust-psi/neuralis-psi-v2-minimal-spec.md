@@ -145,11 +145,13 @@ E0 (both branches incl. the 0.3 weight) — [laap/psi_core.py L64-L71](https://g
 
 ```
 ΔP  =                                w_PS·S                    # P←S  +0.15
-ΔA  =                w_ASt·St      + w_AS·S                    # A←St +0.5,  A←S +0.25
+ΔA  =                w_ASt·St                                  # A←St +0.2
 ΔD  =  w_DP·P      + w_DA·A                                    # D←P  +0.2,  D←A −0.15  (v1 D is DYNAMIC)
-ΔS  =  w_SP·P                                                  # S←P  +0.3
-ΔSt =  w_StP·P     + w_StA·A                                   # St←P −0.4,  St←A +0.2
+ΔS  =  w_SP·P      + w_SA·A                                    # S←P  +0.3,  S←A +0.25
+ΔSt =  w_StP·P     + w_StA·A                                   # St←P −0.4,  St←A +0.5
 ```
+
+(Direction is matrix row ← column: `effect = C · state`, so `c[STRESS, AROUSAL] = 0.5` means St←A.)
 
 E0 — [laap/affective.py L79-L87](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/affective.py#L79-L87).
 
