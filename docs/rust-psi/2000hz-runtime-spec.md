@@ -71,7 +71,9 @@ loop {
 }
 ```
 
-**Source**: spin-sleep crate (Apache-2.0, `38b0799`). E1 evidence for accuracy.
+Compile-verified against `spin_sleep = "=1.3.3"` (rustc 1.97.0, 2026-07-16): `SpinSleeper::default()`, `sleep_until(Instant)` and the `mut target` pattern build clean (the unused `elapsed` is consumed by metrics in real code).
+
+**Source**: spin-sleep crate (Apache-2.0, `38b0799c09df30b5f034f440546a59bd7a3b028b`). E1 evidence for accuracy.
 
 ## 3. Architecture
 
@@ -243,9 +245,28 @@ When `rate_reduction_active`:
 ## 6. Deadline Miss Detection Pattern
 
 ```rust
-fn tick(compute: impl FnOnce() -> Duration, tick_index: u64, epoch: Instant) -> TickResult {
-    // Scheduled start: epoch + tick_index × period
-    let scheduled_start = epoch + Duration::from_micros(500) * tick_index;
+use std::time::{Duration, Instant};
+
+struct TickResult {
+    compute_duration: Duration,
+    wake_lateness: Duration,
+    completion_lateness: Duration,
+    deadline_miss: bool,
+    /// Signed phase error in µs: positive = late, negative = early.
+    /// Signed (not clamped to zero) so max |phase error| in §4 is honest.
+    phase_error_signed_us: i64,
+    tick_index: u64,
+    scheduled_start: Instant,
+    actual_start: Instant,
+    actual_end: Instant,
+}
+
+fn tick(compute: impl FnOnce(), tick_index: u64, epoch: Instant) -> TickResult {
+    // Scheduled start: epoch + tick_index × period.
+    // NOTE: multiply in integer µs — std::time::Duration implements
+    // Mul<u32> only, so `Duration::from_micros(500) * tick_index` (u64)
+    // does NOT compile.
+    let scheduled_start = epoch + Duration::from_micros(500 * tick_index);
     let actual_start = Instant::now();
 
     // Indicator 1: compute duration (actual work time)
@@ -253,33 +274,23 @@ fn tick(compute: impl FnOnce() -> Duration, tick_index: u64, epoch: Instant) -> 
     let actual_end = Instant::now();
     let compute_duration = actual_end - actual_start;
 
-    // Indicator 2: wake-up lateness (scheduling delay)
-    // wake_lateness = max(0, actual_start - scheduled_start)
-    let wake_lateness = if actual_start > scheduled_start {
-        actual_start - scheduled_start
-    } else {
-        Duration::ZERO
-    };
+    // Indicator 2: wake-up lateness (scheduling delay; positive = late).
+    // saturating_duration_since avoids the Instant-subtraction panic when early.
+    let wake_lateness = actual_start.saturating_duration_since(scheduled_start);
 
-    // Indicator 3: completion deadline miss
-    // completion_deadline = scheduled_start + period
-    // deadline_miss = actual_end > completion_deadline
+    // Indicator 3: completion deadline miss (end-to-end)
     let completion_deadline = scheduled_start + Duration::from_micros(500);
     let deadline_miss = actual_end > completion_deadline;
-    let completion_lateness = if actual_end > completion_deadline {
-        actual_end - completion_deadline
-    } else {
-        Duration::ZERO
-    };
+    let completion_lateness = actual_end.saturating_duration_since(completion_deadline);
 
     // Indicator 4: end-to-end tick interval
     // (computed externally from consecutive actual_start values)
 
-    // Phase tracking
-    let phase_error = if actual_start >= scheduled_start {
-        actual_start - scheduled_start
+    // Phase tracking — signed, so early ticks are not silently zeroed.
+    let phase_error_signed_us = if actual_start >= scheduled_start {
+        actual_start.duration_since(scheduled_start).as_micros() as i64
     } else {
-        Duration::ZERO
+        -(scheduled_start.duration_since(actual_start).as_micros() as i64)
     };
 
     TickResult {
@@ -287,7 +298,7 @@ fn tick(compute: impl FnOnce() -> Duration, tick_index: u64, epoch: Instant) -> 
         wake_lateness,
         completion_lateness,
         deadline_miss,
-        phase_error,
+        phase_error_signed_us,
         tick_index,
         scheduled_start,
         actual_start,
@@ -295,6 +306,8 @@ fn tick(compute: impl FnOnce() -> Duration, tick_index: u64, epoch: Instant) -> 
     }
 }
 ```
+
+Compile-verified and executed (rustc 1.97.0, 2026-07-16; smoke output: early tick → negative phase error, `deadline_miss=false`).
 
 ## 7. Catch-Up Policy
 

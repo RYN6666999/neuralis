@@ -59,46 +59,61 @@ Tiers:
 
 **ENERGY** (physiological) is a separate subsystem. It is NOT merged with GROWTH.
 
-**Ornstein-Uhlenbeck (OU) process** (per need):
+**Ornstein-Uhlenbeck (OU) process** (per need). Two distinct anchors — do not conflate them:
 
 ```
-Δn = θ · (n_◇ − n) + σ · ε
+drift = θ · (baseline − current) · dt        # mean reversion — toward BASELINE
+noise = σ · ε · √dt                          # OU diffusion term
+current ← clamp(current + drift + noise, 0, 1)
+
+drive = max(0, target − current) · importance  # deficit — measured against TARGET
 ```
 
 Where:
-- `n` = current need value, domain [0, 1], clamped post-update
-- `n_◇` = target need value, domain [0, 1], constant per need
-- `θ` = decay rate, domain (0, 0.1], configurable per need
+- `current` = need value, domain [0, 1], clamped post-update
+- `baseline` = mean-reversion center of `current` (v1: the initial values — [laap/psi_core.py L129](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/psi_core.py#L129))
+- `target` = drive anchor, used **only** in the drive/deficit computation, never as the reversion center
+- `θ` = decay rate, per second, domain (0, 0.1], configurable per need
 - `σ` = noise amplitude, domain [0, 0.01], configurable
-- `ε` = standard normal sample, ~N(0, 1), seeded RNG
+- `ε` = standard normal sample, ~N(0, 1), single seeded RNG
 
-> **Decision (M01)**: The OU process currently pulls toward target `n_◇` (n_◇ − n term). This is a **v2 design change**, NOT adopted from v1. v1 baseline semantics uses a fixed D=0.5 (psi_core.py L46) with no target-pulling OU. Target-seeking causes resting drive to approach zero when need is near target — v1 baseline semantics preserves resting drive by keeping the need-decay fixed. For Compatibility Mode, pre-compute `drive = max(0, target − current) · importance` without the OU target-pull. The target-seeking OU is marked **D** (Enhanced Mode).
+Forbidden formulations: `target − baseline` (appears in no dynamics), and `current` reverting toward `target`.
 
-**Update order**: 1. OU process → 2. Serotonin modulation → 3. Clamp [0, 1] → 4. NaN guard
+> **Decision (M01, resolved)**: v1 relaxes `current` toward **baseline** with Gaussian noise — E0: [laap/psi_core.py L164-L168](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/psi_core.py#L164-L168) (`relax = (baselines[nt] − values[nt]) · ar · dt`). Because baseline < target for every need, resting drive stays positive — the agent keeps standing motivation at equilibrium. A target-seeking OU (reverting toward `target`) would drive resting drive to zero; it is NOT v1 behavior and is not part of this spec. The OU **formalization** (single seeded RNG, √dt noise scaling) is Neuralis v2 design (D) — it does NOT come from MicroPsi2, which contains no OU process at the pinned SHA. Deterministic mode: σ = 0, or fixed seed + fixed update order.
 
-**Serotonin modulation**:
+**Update order**: 1. Serotonin-modulated rate → 2. OU drift + noise → 3. Clamp [0, 1] → 4. NaN guard
 
-```
-θ' = θ · (1 − 0.3 · serotonin_level)
-```
+**Serotonin modulation — two layers, kept separate**:
 
-Where `serotonin_level ∈ [0, 1]`. Higher serotonin → slower decay (need satisfaction lasts longer).
+1. **v1 compatibility semantics (E0, ADOPT)** — step function on valence applied to the **decay rate** (not to a "serotonin level"):
+   ```
+   valence >  0.3 → rate × 0.7
+   valence < −0.3 → rate × 1.3
+   otherwise      → rate × 1.0
+   ```
+   E0 — [laap/psi_core.py L157-L165](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/psi_core.py#L157-L165). This is the Compatibility Mode default.
 
-**Serotonin source**: v1 step function — valence > 0.3 → level × 0.7, valence < −0.3 → level × 1.3 (psi_core.py L158–163).
+2. **v2 proposed continuous regulation (D / UNKNOWN — NOT ADOPT, NOT E0)**:
+   ```
+   θ' = θ · (1 − 0.3 · serotonin_level),  serotonin_level ∈ [0, 1]
+   ```
+   Neuralis design proposal with no external source; the 0.3 factor is uncalibrated. Must not enter the minimal core before calibration.
 
 **Drive formula**:
 
 ```
-drive = max(0, n_◇ − n) · importance
+drive = max(0, target − current) · importance
 ```
 
 Where:
 - `drive` = urgency/intensity of the need, domain [0, ∞)
 - `importance` = scaling factor, domain [0.5, 2.0]
 
+E0 — [laap/psi_core.py L198-L201](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/psi_core.py#L198-L201).
+
 **Determinism**: Single seeded RNG (NOT `random.gauss` + `numpy` dual source). Seed must be configurable. Floating-point policy: f64, round-trip deterministic, same seed → same sequence.
 
-**Source**: Neuralis v1 (BASE_SHA, `psi_backend.py`), with OU process adapted from MicroPsi2 (MIT, `74a2642d`, `need.py`).
+**Source**: Neuralis v1 (`laap/psi_core.py` at BASE_SHA — permalinks above). OU formalization: Neuralis v2 design (D).
 
 ---
 
@@ -107,14 +122,14 @@ Where:
 **Two-channel valence**:
 
 ```
-valence_raw ∈ [-1, 1]          # immediate emotional response
-# v1 non-asymmetric (Compatibility Mode):
-Δendorphin = valence_raw > endorphin
-             ? 0.3 · (valence_raw − endorphin)    # ascent
-             : 0.09 · (valence_raw − endorphin)   # descent at 0.3× ascent rate
-# Symmetric EMA is D (Enhanced Mode).
-# Source: Neuralis v1 (BASE_SHA, psi_core.py L64-71).
+valence_raw ∈ [-1, 1]              # immediate emotional response
+# v1 ASYMMETRIC update (Compatibility Mode), Δ = valence_raw − endorphin:
+#   Δ > 0  →  endorphin = valence_raw        # rise: full follow (weight 1.0)
+#   Δ ≤ 0  →  endorphin += 0.3 · Δ           # fall: slow release (weight 0.3)
+# Symmetric EMA is D (Future/Enhanced Mode) only — not v1 behavior.
 ```
+
+E0 (both branches incl. the 0.3 weight) — [laap/psi_core.py L64-L71](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/psi_core.py#L64-L71).
 
 **Five-dimensional affect state**:
 
@@ -126,17 +141,21 @@ valence_raw ∈ [-1, 1]          # immediate emotional response
 | Social | S | [0, 1] | Social warmth |
 | Stress | St | [0, 1] | Pressure/cortisol analogue |
 
-**Coupling matrix** (5×5, 8 non-zero terms including St←P −0.4):
+**Coupling matrix — v1 ground truth (E0)**. v1 has exactly 8 non-zero terms, direction `to ← from`, **no diagonal (self) terms**:
 
 ```
-ΔP =  w_PP·P  + 0      + 0      + w_PS·S  + 0
-ΔA =  0      + w_AA·A  + 0      + 0       + w_ASt·St
-ΔD =  0      + 0      + 0      + 0       + 0          (D fixed)
-ΔS =  w_SP·P + 0      + 0      + w_SS·S  + 0
-ΔSt = w_StP·P + 0      + 0      + 0       + w_StSt·St   # St←P −0.4
+ΔP  =                                w_PS·S                    # P←S  +0.15
+ΔA  =                w_ASt·St      + w_AS·S                    # A←St +0.5,  A←S +0.25
+ΔD  =  w_DP·P      + w_DA·A                                    # D←P  +0.2,  D←A −0.15  (v1 D is DYNAMIC)
+ΔS  =  w_SP·P                                                  # S←P  +0.3
+ΔSt =  w_StP·P     + w_StA·A                                   # St←P −0.4,  St←A +0.2
 ```
 
-**8 non-zero terms**: w_PP, w_PS, w_AA, w_ASt, w_SP, w_SS, w_StP, w_StSt
+E0 — [laap/affective.py L79-L87](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/affective.py#L79-L87).
+
+**v2 deviations from v1 (both D-level decisions, NOT v1):**
+1. v2 fixes D = 0.5 → the two v1 dominance terms (D←P, D←A) are dropped in v2, leaving 6 active cross terms.
+2. Any diagonal damping terms (w_PP, w_AA, w_SS, w_StSt) a v2 implementation adds for stability are v2 additions (D) with values TBD; they do not exist in v1. Stability of the chosen topology must be shown (trace < 0, det > 0 per 2×2 subsystem).
 
 **1/f noise**: Pink noise generator added to affect state. Amplitude configurable.
 
@@ -152,30 +171,32 @@ Where `λ = 0.01` (inertia factor, numerically borrowed from MicroPsi2 JOY_DECAY
 
 NOTE: MicroPsi2 joy decay uses sign-hold + copysign decay, NOT EMA. The EMA formula is a Neuralis design decision.
 
-**Affective events** (18 v1 canonical events):
+**Affective events — the 18 v1 canonical events** (verbatim from `EVENT_EMOTION_MAP`; stimulus vector = [P, A, D, S, St]):
 
-| # | Event | Effect |
-|---|-------|--------|
-| 1 | user_engagement | P+, A+ |
-| 2 | task_success | P+, COMPETENCE+ |
-| 3 | task_failure | P-, COMPETENCE- |
-| 4 | surprise | A+ |
-| 5 | threat | St+, A+ |
-| 6 | praise | S+, P+ |
-| 7 | criticism | S-, P- |
-| 8 | comfort | S+ |
-| 9 | discomfort | S- |
-| 10 | novelty | A+ |
-| 11 | competence_success | COMPETENCE+, P+ |
-| 12 | competence_failure | COMPETENCE-, P- |
-| 13 | autonomy_granted | AUTONOMY+ |
-| 14 | autonomy_denied | AUTONOMY- |
-| 15 | relatedness_renewed | RELATEDNESS+, S+ |
-| 16 | relatedness_loss | RELATEDNESS-, S- |
-| 17 | growth_milestone | GROWTH+, P+ |
-| 18 | growth_stagnation | GROWTH-, P- |
+| # | v1 Event (exact string) | Stimulus [P, A, D, S, St] |
+|---|------------------------|---------------------------|
+| 1 | `user_positive_feedback` | [1.0, 0.5, 0.3, 0.5, −0.4] |
+| 2 | `user_negative_feedback` | [−1.0, 0.5, −0.4, −0.4, 0.6] |
+| 3 | `task_success` | [0.6, 0.2, 0.4, 0.3, −0.2] |
+| 4 | `task_failure` | [−0.6, 0.35, −0.35, −0.25, 0.5] |
+| 5 | `user_engagement` | [0.4, 0.3, 0.2, 0.5, −0.15] |
+| 6 | `user_disengagement` | [−0.3, −0.15, −0.15, −0.4, 0.25] |
+| 7 | `system_error` | [−0.4, 0.5, −0.2, −0.15, 0.6] |
+| 8 | `system_recovery` | [0.35, −0.2, 0.25, 0.2, −0.4] |
+| 9 | `learning_progress` | [0.5, 0.15, 0.3, 0.35, −0.15] |
+| 10 | `idle_period` | [0.0, −0.3, 0.0, −0.15, −0.15] |
+| 11 | `surprise_positive` | [0.6, 0.5, 0.1, 0.3, −0.1] |
+| 12 | `surprise_negative` | [−0.5, 0.6, −0.2, −0.2, 0.5] |
+| 13 | `frustration` | [−0.4, 0.5, −0.3, −0.1, 0.6] |
+| 14 | `curiosity_aroused` | [0.2, 0.4, 0.1, 0.2, −0.1] |
+| 15 | `achievement` | [0.7, 0.3, 0.5, 0.3, −0.25] |
+| 16 | `anxiety` | [−0.1, 0.7, −0.2, −0.1, 0.6] |
+| 17 | `relief` | [0.4, −0.3, 0.2, 0.2, −0.5] |
+| 18 | `gratitude` | [0.6, 0.15, 0.2, 0.5, −0.2] |
 
-**Source**: Neuralis v1 (BASE_SHA, `laap/affective.py` L43–62). Unknown events return False per PsiBackend v1 contract.
+**Source (E0, one dict, all 18 entries)**: [laap/affective.py L43-L62](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/affective.py#L43-L62). Production call sites use these exact strings (e.g. `task_success`/`task_failure` at [laap/agency.py L439](https://github.com/RYN6666999/neuralis/blob/ab14499ec1d5f30e84b85c56e6c780c7eb4d6913/laap/agency.py#L439); `user_engagement` per contract). Unknown events return `False` per PsiBackend v1 contract (`docs/contracts/psi-backend.md` §5).
+
+**Rust adapter rule**: the Rust enum/adapter MUST map these 18 strings one-to-one (exact strings, no synonyms, no renames). Any additional v2 events (e.g. semantic names like `GOAL_ACHIEVED`) live in a separate **extension namespace** marked D, must not shadow or replace the v1 vocabulary, and must round-trip `post_affective_event(name) -> bool` exactly as v1 does. The task-008 engine's current 18 invented names do NOT satisfy this rule and require an adapter before M4/M5.
 
 **Cognitive biases** (8 v1 bias keys):
 
@@ -205,7 +226,7 @@ NOTE: MicroPsi2 joy decay uses sign-hold + copysign decay, NOT EMA. The EMA form
 | LEARNING | Exploring, information-seeking | Uncertainty > threshold | Variable |
 | PLANNING | Deliberation, action selection | Multiple competing drives | Short |
 
-**Transitions**: Hysteresis gating (from autonomic, MIT, `a7684e1a`, `gate.rs`). Separate enter/exit thresholds + minimum hold time to prevent oscillation.
+**Transitions**: Hysteresis gating — E0: [autonomic-core/src/hysteresis.rs L16-L45](https://github.com/broomva/autonomic/blob/a7684e1aae1a5d09cb3475c733ec64bfc83ba7b9/autonomic-core/src/hysteresis.rs#L16-L45) (MIT). Separate enter/exit thresholds + minimum hold time to prevent oscillation.
 
 **Source**: Neuralis v1 + autonomic HysteresisGate (MIT, `a7684e1a`).
 
@@ -213,7 +234,7 @@ NOTE: MicroPsi2 joy decay uses sign-hold + copysign decay, NOT EMA. The EMA form
 
 ### 2.4 EventReducer
 
-**Pattern**: Event sourcing from autonomic (MIT, `a7684e1a`, `event.rs`).
+**Pattern**: Event sourcing from autonomic — E0: [autonomic-core/src/events.rs L19](https://github.com/broomva/autonomic/blob/a7684e1aae1a5d09cb3475c733ec64bfc83ba7b9/autonomic-core/src/events.rs#L19) (`enum AutonomicEvent`; MIT).
 
 ```
 PsiEvent → EventReducer → StateProjection → Hysteresis → Gating → Snapshot
@@ -228,7 +249,7 @@ PsiEvent → EventReducer → StateProjection → Hysteresis → Gating → Snap
 
 The reducer is a pure fold + evaluate — no I/O, deterministic, testable.
 
-**Source**: autonomic (MIT, `a7684e1a`). life (MIT, `7f121216`, `homeostatic.rs`).
+**Source**: autonomic (MIT) — fold reducer: [autonomic-controller/src/projection.rs L1-L23](https://github.com/broomva/autonomic/blob/a7684e1aae1a5d09cb3475c733ec64bfc83ba7b9/autonomic-controller/src/projection.rs#L1-L23); HomeostaticState: [autonomic-core/src/gating.rs L271-L283](https://github.com/broomva/autonomic/blob/a7684e1aae1a5d09cb3475c733ec64bfc83ba7b9/autonomic-core/src/gating.rs#L271-L283). (`broomva/life` is NOT a source — no direct-borrowing evidence exists.)
 
 ---
 
@@ -299,7 +320,7 @@ State (ArcSwap<PsiState>) → atomic_read → Snapshot → Publish (via channel)
 
 **Lock-free caveat**: No formal memory model analysis. No ABA or multi-producer contention analysis. Overwrite-oldest on event ring buffer breaks determinism (must accept this exception for overflow).
 
-**Source**: Neuralis design (D). Spin-sleep (MIT, `38b0799`, E1). See `2000hz-runtime-spec.md`.
+**Source**: Neuralis design (D). Spin-sleep (Apache-2.0, `38b0799c09df30b5f034f440546a59bd7a3b028b`, E1 for accuracy claim). See `2000hz-runtime-spec.md`.
 
 ---
 
