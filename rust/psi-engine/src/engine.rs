@@ -150,7 +150,7 @@ impl PsiEngine {
         self.tick_count += 1;
 
         // 5. Snapshot (Tier B cadence).
-        if self.tick_count % self.cfg.runtime.snapshot_divisor == 0 {
+        if self.tick_count.is_multiple_of(self.cfg.runtime.snapshot_divisor) {
             self.publish();
         }
     }

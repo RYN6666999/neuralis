@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn drive_formula_matches_spec_table() {
-        let (cfg, nd, st, _) = setup();
+        let (_cfg, nd, st, _) = setup();
         let d = nd.drives(&st);
         // COMPETENCE: (0.9 − 0.4) · 1.5 = 0.75 — the dominant initial drive.
         assert!((d[NeedKind::Competence as usize] - 0.75).abs() < 1e-12);

@@ -26,8 +26,7 @@ fn script() -> Vec<(u64, PsiEvent)> {
 /// Run TICKS ticks, injecting the script, recording the full state
 /// sequence (sampled every tick).
 fn run_scripted(seed: u64) -> Vec<PsiState> {
-    let mut cfg = PsiConfig::default();
-    cfg.seed = seed;
+    let cfg = PsiConfig { seed, ..PsiConfig::default() };
     let mut engine = PsiEngine::new(cfg);
     let handle = engine.handle();
     let script = script();
@@ -87,8 +86,7 @@ fn different_seed_diverges() {
 
 #[test]
 fn event_presence_changes_trajectory() {
-    let mut cfg = PsiConfig::default();
-    cfg.seed = 99;
+    let cfg = PsiConfig { seed: 99, ..PsiConfig::default() };
     let mut plain = PsiEngine::new(cfg);
     let mut evented = PsiEngine::new(cfg);
     let handle = evented.handle();
@@ -110,8 +108,7 @@ fn event_presence_changes_trajectory() {
 /// (epoch 0, timestamp = tick_count · period).
 #[test]
 fn replay_snapshots_are_deterministic() {
-    let mut cfg = PsiConfig::default();
-    cfg.seed = 7;
+    let cfg = PsiConfig { seed: 7, ..PsiConfig::default() };
     let mut a = PsiEngine::new(cfg);
     let mut b = PsiEngine::new(cfg);
     for _ in 0..200 {

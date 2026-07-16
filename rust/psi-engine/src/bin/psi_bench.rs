@@ -75,8 +75,7 @@ fn parse_args() -> (u64, u64, u64, u64, u64) {
 
 fn main() {
     let (seconds, seed, events_hz, warmup_s, spin_us) = parse_args();
-    let mut cfg = PsiConfig::default();
-    cfg.seed = seed;
+    let mut cfg = PsiConfig { seed, ..PsiConfig::default() };
     if spin_us > 0 {
         cfg.runtime.spin_window_us = spin_us as u32;
     }
