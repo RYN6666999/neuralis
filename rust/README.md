@@ -28,16 +28,20 @@ cargo build --release
 psi-bench exits 0 only if every acceptance threshold passes
 (rate ≥ 2000/s, miss < 1%, peak < 500µs, p99 < 200µs, |drift| < 10ms/60s).
 
-## Measured on Apple Silicon (macOS 26.3, M-series) — 60s smoke
+## Measured on Apple Silicon (macOS 26.3, M-series)
 
-| Metric | Threshold | Measured |
-|---|---|---|
-| Sustained tick rate | ≥ 2000/s | 2000.0/s (120,012 ticks) |
-| Deadline miss ratio | < 1% | 0.0000% |
-| Peak compute | < 500µs | 35µs |
-| p99 compute | < 200µs | 11µs |
-| Accumulated drift | < 10ms/60s | 0µs |
-| CPU (informational) | ~25% of one core | 24.8% |
+| Metric | Threshold | 60s smoke | 9m50s sustained* |
+|---|---|---|---|
+| Sustained tick rate | ≥ 2000/s | 2000.0/s (120,012 ticks) | 2000.0/s (1,180,010 ticks) |
+| Deadline miss ratio | < 1% | 0.0000% | 0.0000% |
+| Peak compute | < 500µs | 35µs | 66µs |
+| p99 compute | < 200µs | 11µs | 3µs |
+| Accumulated drift | < 10ms/60s | 0µs | 0µs |
+| Snapshot reads stale | (info) | 0% | 0% of 46,609 |
+| CPU (informational) | ~25% of one core | 24.8% | — |
+
+*590s, not the spec's full 600s (tooling cap during the run); 60min soak
+not yet run.
 
 ## Field notes (E1 → E0)
 
