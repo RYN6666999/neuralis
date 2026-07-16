@@ -72,15 +72,19 @@ Where:
 - `σ` = noise amplitude, domain [0, 0.01], configurable
 - `ε` = standard normal sample, ~N(0, 1), seeded RNG
 
-**Update order**: 1. OU process → 2. Serumtonin modulation → 3. Clamp [0, 1] → 4. NaN guard
+> **Decision (M01)**: The OU process currently pulls toward target `n_◇` (n_◇ − n term). This is a **v2 design change**, NOT adopted from v1. v1 baseline semantics uses a fixed D=0.5 (psi_core.py L46) with no target-pulling OU. Target-seeking causes resting drive to approach zero when need is near target — v1 baseline semantics preserves resting drive by keeping the need-decay fixed. For Compatibility Mode, pre-compute `drive = max(0, target − current) · importance` without the OU target-pull. The target-seeking OU is marked **D** (Enhanced Mode).
 
-**Serumtonin modulation**:
+**Update order**: 1. OU process → 2. Serotonin modulation → 3. Clamp [0, 1] → 4. NaN guard
+
+**Serotonin modulation**:
 
 ```
-θ' = θ · (1 − 0.3 · serumtonin_level)
+θ' = θ · (1 − 0.3 · serotonin_level)
 ```
 
-Where `serumtonin_level ∈ [0, 1]`. Higher serumtonin → slower decay (need satisfaction lasts longer).
+Where `serotonin_level ∈ [0, 1]`. Higher serotonin → slower decay (need satisfaction lasts longer).
+
+**Serotonin source**: v1 step function — valence > 0.3 → level × 0.7, valence < −0.3 → level × 1.3 (psi_core.py L158–163).
 
 **Drive formula**:
 
@@ -104,7 +108,12 @@ Where:
 
 ```
 valence_raw ∈ [-1, 1]          # immediate emotional response
-endorphin = 0.7·endorphin + 0.3·valence_raw   # slow-release smoothing
+# v1 non-asymmetric (Compatibility Mode):
+Δendorphin = valence_raw > endorphin
+             ? 0.3 · (valence_raw − endorphin)    # ascent
+             : 0.09 · (valence_raw − endorphin)   # descent at 0.3× ascent rate
+# Symmetric EMA is D (Enhanced Mode).
+# Source: Neuralis v1 (BASE_SHA, psi_core.py L64-71).
 ```
 
 **Five-dimensional affect state**:
@@ -117,73 +126,77 @@ endorphin = 0.7·endorphin + 0.3·valence_raw   # slow-release smoothing
 | Social | S | [0, 1] | Social warmth |
 | Stress | St | [0, 1] | Pressure/cortisol analogue |
 
-**Coupling matrix** (5×5, 7 non-zero terms):
+**Coupling matrix** (5×5, 8 non-zero terms including St←P −0.4):
 
 ```
 ΔP =  w_PP·P  + 0      + 0      + w_PS·S  + 0
 ΔA =  0      + w_AA·A  + 0      + 0       + w_ASt·St
 ΔD =  0      + 0      + 0      + 0       + 0          (D fixed)
 ΔS =  w_SP·P + 0      + 0      + w_SS·S  + 0
-ΔSt = 0      + w_StA·A + 0      + 0       + w_StSt·St
+ΔSt = w_StP·P + 0      + 0      + 0       + w_StSt·St   # St←P −0.4
 ```
 
-**7 non-zero terms**: w_PP, w_PS, w_AA, w_ASt, w_SP, w_SS, w_StA, w_StSt
+**8 non-zero terms**: w_PP, w_PS, w_AA, w_ASt, w_SP, w_SS, w_StP, w_StSt
 
 **1/f noise**: Pink noise generator added to affect state. Amplitude configurable.
 
 **Update order**: 1. Coupling matrix multiplication → 2. 1/f noise addition → 3. Clamp per-dimension domain → 4. NaN guard → 5. Endorphin update
 
-**Emotional inertia** (adapted from MicroPsi2 sustaining joy, MIT):
+**Emotional inertia** (Neuralis D — not from MicroPsi2):
 
 ```
 e(t+1) = e(t) + λ · (e_target − e(t))
 ```
 
-Where `λ = 0.01` (inertia factor). Applied to all 5 dimensions.
+Where `λ = 0.01` (inertia factor, numerically borrowed from MicroPsi2 JOY_DECAY_FACTOR). Applied to all 5 dimensions.
 
-**Affective events** (18 events):
+NOTE: MicroPsi2 joy decay uses sign-hold + copysign decay, NOT EMA. The EMA formula is a Neuralis design decision.
+
+**Affective events** (18 v1 canonical events):
 
 | # | Event | Effect |
 |---|-------|--------|
-| 1 | GOAL_ACHIEVED | P+ |
-| 2 | GOAL_FAILED | P- |
-| 3 | SURPRISE_POSITIVE | A+, P+ |
-| 4 | SURPRISE_NEGATIVE | A+, P- |
-| 5 | SOCIAL_PRAISE | S+, P+ |
-| 6 | SOCIAL_CRITICISM | S-, P- |
-| 7 | THREAT_DETECTED | St+, A+ |
-| 8 | THREAT_RESOLVED | St- |
-| 9 | NOVELTY_HIGH | A+ |
-| 10 | NOVELTY_LOW | A- |
-| 11 | COMPETENCE_SUCCESS | COMPETENCE+, P+ |
-| 12 | COMPETENCE_FAILURE | COMPETENCE-, P- |
-| 13 | AUTONOMY_GRANTED | AUTONOMY+ |
-| 14 | AUTONOMY_DENIED | AUTONOMY- |
-| 15 | RELATEDNESS_RENEWED | RELATEDNESS+, S+ |
-| 16 | RELATEDNESS_LOSS | RELATEDNESS-, S- |
-| 17 | GROWTH_MILESTONE | GROWTH+, P+ |
-| 18 | GROWTH_STAGNATION | GROWTH-, P- |
+| 1 | user_engagement | P+, A+ |
+| 2 | task_success | P+, COMPETENCE+ |
+| 3 | task_failure | P-, COMPETENCE- |
+| 4 | surprise | A+ |
+| 5 | threat | St+, A+ |
+| 6 | praise | S+, P+ |
+| 7 | criticism | S-, P- |
+| 8 | comfort | S+ |
+| 9 | discomfort | S- |
+| 10 | novelty | A+ |
+| 11 | competence_success | COMPETENCE+, P+ |
+| 12 | competence_failure | COMPETENCE-, P- |
+| 13 | autonomy_granted | AUTONOMY+ |
+| 14 | autonomy_denied | AUTONOMY- |
+| 15 | relatedness_renewed | RELATEDNESS+, S+ |
+| 16 | relatedness_loss | RELATEDNESS-, S- |
+| 17 | growth_milestone | GROWTH+, P+ |
+| 18 | growth_stagnation | GROWTH-, P- |
 
-**Cognitive biases** (8 biases):
+**Source**: Neuralis v1 (BASE_SHA, `laap/affective.py` L43–62). Unknown events return False per PsiBackend v1 contract.
+
+**Cognitive biases** (8 v1 bias keys):
 
 | # | Bias | Mechanism |
 |---|------|-----------|
-| 1 | Optimism | Valence shift +0.1 |
-| 2 | Pessimism | Valence shift -0.1 |
-| 3 | Confirmation | Prediction error discount |
-| 4 | Recency | Higher weight on recent events |
-| 5 | Availability | Higher weight on vivid events |
-| 6 | Anchoring | Slow adjustment from initial value |
-| 7 | Egocentric | Social weight discount |
-| 8 | Projection | Self-state attributed to others |
+| 1 | optimism | Valence shift +0.1 |
+| 2 | risk_seeking | Higher risk tolerance |
+| 3 | attention_narrowing | Focus on salient stimuli |
+| 4 | confirmation_bias | Prediction error discount |
+| 5 | overconfidence | Self-assessment bias |
+| 6 | temporal_discounting | Present > future reward weighting |
+| 7 | social_proximity | Social distance modulation |
+| 8 | creativity | Novelty-seeking boost |
 
-**Source**: Neuralis v1 (BASE_SHA, `psi_backend.py`). MicroPsi2 joy decay (MIT, `74a2642d`, `emotional_modulators.py`).
+**Source**: Neuralis v1 (BASE_SHA, `laap/affective.py` L167–186).
 
 ---
 
 ### 2.3 AttentionGate
 
-**Four states** (no SOCIAL state — removed from Neuralis v1 design):
+**Four states** (v1 schema is 4 values: IDLE/TASK/LEARNING/PLANNING. v1 SOCIAL was caused by KNOWN-ISSUE-1 AttributeError, not a design removal.):
 
 | State | Description | Typical Triggers | Typical Duration |
 |-------|-------------|------------------|-----------------|
@@ -221,16 +234,18 @@ The reducer is a pure fold + evaluate — no I/O, deterministic, testable.
 
 ### 2.5 SnapshotPublisher
 
-**Pattern**: Atomic snapshot from bounded ring buffer.
+**Pattern**: State → atomic cell → snapshot (ring buffer is for events only).
 
 ```
-RingBuffer → AtomicRead → Snapshot → Publish (via channel)
+State (ArcSwap<PsiState>) → atomic_read → Snapshot → Publish (via channel)
 ```
 
-- RingBuffer: fixed-size, pre-allocated, lock-free (atomic head/tail indices)
-- Snapshot: immutable struct copy of current PsiState
-- Publish: sent to snapshot channel (consumed by 100Hz loop)
-- Schema compliance: Snapshot struct must match B-surface contract
+- **State cell**: `ArcSwap<PsiState>`, updated by tick loop after each complete tick
+- **Snapshot**: immutable struct copy of current PsiState, taken from atomic read of state cell — NOT from event ring buffer
+- **Event ring buffer**: fixed-size, pre-allocated, lock-free (atomic head/tail indices). Stores incoming `PsiEvent`s only, not state.
+- **Publish**: snapshot sent to snapshot channel (consumed by 100Hz loop)
+- **Schema compliance**: Snapshot is a v2 Rust internal structure. Must provide mapping to v1 PsiBackend state schema. B-surface is the Python attribute transition surface, NOT the snapshot schema.
+- **Lock-free caveat**: No formal memory model analysis, no ABA or multi-producer contention analysis. Overwrite-oldest coalesce on the event ring buffer breaks determinism (Pillar 2). Overflow behavior must be documented as a determinism exception.
 
 **Source**: Neuralis design (D). autonomic snapshot pattern (MIT, `a7684e1a`).
 
@@ -257,7 +272,7 @@ RingBuffer → AtomicRead → Snapshot → Publish (via channel)
 
 ### Tier A: 2000Hz Fast Loop (500µs Budget)
 
-**Purpose**: Physiological regulation — need decay, affect inertia, prediction error smoothing, timing metrics.
+**Purpose**: Homeostatic/psychological need regulation — need decay, affect inertia, prediction error smoothing, timing metrics.
 
 **Allowed operations**:
 - Need decay/integration (OU process)
@@ -280,7 +295,9 @@ RingBuffer → AtomicRead → Snapshot → Publish (via channel)
 - ❌ Full pymdp inference (VFE, EFE, policy posterior)
 - ❌ Logging (beyond atomic counter increments)
 
-**Implementation**: Spin-sleep + `std::time::Instant` + bounded ring buffer + atomic snapshot.
+**Implementation**: Spin-sleep + `std::time::Instant` + bounded ring buffer (events) + atomic snapshot.
+
+**Lock-free caveat**: No formal memory model analysis. No ABA or multi-producer contention analysis. Overwrite-oldest on event ring buffer breaks determinism (must accept this exception for overflow).
 
 **Source**: Neuralis design (D). Spin-sleep (MIT, `38b0799`, E1). See `2000hz-runtime-spec.md`.
 
@@ -354,7 +371,7 @@ RingBuffer → AtomicRead → Snapshot → Publish (via channel)
 | Seed | Single, configurable u64 | `PsiConfig { seed: u64 }` |
 | Event ordering | Events processed in received order | RingBuffer preserves insertion order |
 | Update ordering | Fixed order per tick | 1. NeedDynamics → 2. AffectDynamics → 3. AttentionGate → 4. EventReducer → 5. Snapshot |
-| Floating-point policy | Same binary result on same input | f64, non-SIMD, round-trip deterministic. No `-ffast-math`. |
+| Floating-point policy | Same binary, same platform | f64, non-SIMD, round-trip deterministic. No `-ffast-math`. Cross-platform (libm differences, FMA contraction) not guaranteed. |
 
 **RNG**: Single `rand::rngs::StdRng` seeded from config. One RNG per PsiEngine instance. NOT two RNGs (Neuralis v1 uses `random.gauss` + `numpy` — non-symmetric).
 
@@ -364,22 +381,39 @@ RingBuffer → AtomicRead → Snapshot → Publish (via channel)
 
 ## 6. Schema Contract Compliance
 
-**B-surface compatibility**: Snapshot struct must match the same schema as `PsiState` in Python.
+**B-surface compatibility**: B-surface is the Python attribute transition surface (PsiBackend v1 contract §12). It is NOT the snapshot schema.
+
+The Rust internal `PsiSnapshot` is a **v2 new structure**. It does NOT directly match the v1 `PsiState` schema. A mapping layer is required.
 
 ```rust
-// B-surface contract (pseudocode, not final)
+// Rust internal snapshot — v2 structure (NOT v1 PsiState)
 struct PsiSnapshot {
     needs: [Need; 5],          // same order as Python
     drives: [f64; 5],
     affect: Affect5D,          // P, A, D, S, St
     attention_state: GateState, // IDLE/TASK/LEARNING/PLANNING
-    timestamp: u64,             // microseconds since epoch
+    logical_time: u64,          // epoch + tick_index × period
+    wall_clock: u64,            // separate observation field, MUST NOT affect replay
     tick_count: u64,
     metrics: TickMetrics,
+    event_queue: Vec<PsiEvent>, // NOT part of state snapshot — separate queue
 }
 ```
 
-Serialization format: MessagePack or CBOR (binary, not JSON, for 100Hz loop).
+**Mapping: v2 Snapshot → v1 PsiState** (required 6 fields per `psi-state.schema.json`):
+
+| v2 field | v1 schema field | Notes |
+|----------|----------------|-------|
+| `needs` → `needs` | `[Need { name, current, target, ... }]` | Same 5 needs, identical order |
+| `drives` → `drives` | `[f64; 5]` | Computed from needs at mapping time |
+| `affect` → `affect` | `{ P, A, D, S, St }` | D is always 0.5 in v1 |
+| `attention_state` → `attention` | `enum { IDLE, TASK, LEARNING, PLANNING }` | 4 values only |
+| `logical_time` → `timestamp` | u64 — must be epoch-relative | `epoch + tick_index × period` |
+| `tick_count` → `tick_count` | u64 | Direct pass-through |
+
+**⚠️ Wall clock (`wall_clock`) is for observability only. It MUST NOT affect replay state. Replay uses `logical_time` exclusively.**
+
+Serialization format: MessagePack or CBOR is a **D decision**. A JSON migration path is required for v1 contract compliance (§4 of PsiBackend contract: `get_state()` must be JSON-serializable).
 
 ---
 
@@ -388,9 +422,9 @@ Serialization format: MessagePack or CBOR (binary, not JSON, for 100Hz loop).
 | Item | Reason |
 |------|--------|
 | Optimal OU process θ per need | Requires empirical calibration |
-| Serumtonin modulation factor (0.3) | Theoretical value. Needs calibration. |
+| Serotonin modulation factor (0.3) | Theoretical value. Needs calibration. |
 | 1/f noise amplitude | Unknown. Requires tuning. |
-| Coupling matrix coefficients | Known structure (7 terms), values TBD. |
+| Coupling matrix coefficients | Known structure (8 terms), values TBD. |
 | Hysteresis thresholds for attention gates | Must be tuned on real usage. |
 | Acceptable deadline miss ratio | Depends on application requirements. |
 | Spin-sleep accuracy on Apple Silicon | E1 claim only. Must benchmark. |
