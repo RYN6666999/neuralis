@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["psi-engine"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+# Determinism pillar 4 (neuralis-psi-v2-minimal-spec.md §5): f64, non-SIMD,
+# no fast-math. Rust never enables fast-math; we additionally pin
+# codegen-units=1 so float expression ordering is stable across builds.
+[profile.release]
+codegen-units = 1
+lto = "thin"

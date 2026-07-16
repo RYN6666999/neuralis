@@ -1,0 +1,23 @@
+[package]
+name = "psi-engine"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Neuralis PsiEngine v2 — 2000Hz PSI fast loop (docs/rust-psi specs)"
+
+[dependencies]
+# Single seeded RNG (spec §5): StdRng + StandardNormal for OU noise.
+rand = "0.9"
+rand_distr = "0.5"
+# Tick latency percentiles (2000hz-runtime-spec.md §4). Alloc-free after init.
+hdrhistogram = "7"
+# Hybrid sleep, 125µs spin-last window (2000hz-runtime-spec.md §2, E1 evidence).
+spin_sleep = "1"
+# Bounded lock-free MPMC ring; force_push = overwrite-oldest (spec §3).
+crossbeam-queue = "0.3"
+# AtomicCell<PsiSnapshot> = maintained seqlock for the atomic snapshot cell.
+crossbeam-utils = "0.8"
+
+[[bin]]
+name = "psi-bench"
+path = "src/bin/psi_bench.rs"
