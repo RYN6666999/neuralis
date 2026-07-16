@@ -244,7 +244,7 @@ PsiEvent → EventReducer → StateProjection → Hysteresis → Gating → Snap
 - `EventReducer`: `fold(events, |state, event| match event { ... })` — pure function, no I/O
 - `StateProjection`: derives current state from event sequence
 - `Hysteresis`: applies hysteresis thresholds to state transitions
-- `Gating`: produces GatingDecision (Enter/Exit/Stay/Block)
+- `Gating`: produces GatingDecision — the `Enter/Exit/Stay/Block` enum is a **v2 design (D)**; autonomic's real `GatingDecision` is a struct (see borrowing-matrix S4 row)
 - `Snapshot`: atomic copy of current state
 
 The reducer is a pure fold + evaluate — no I/O, deterministic, testable.
@@ -329,7 +329,7 @@ State (ArcSwap<PsiState>) → atomic_read → Snapshot → Publish (via channel)
 **Purpose**: State publishing, metric aggregation.
 
 **Operations**:
-- Atomic read of RingBuffer → immutable Snapshot
+- Atomic read of the PsiState cell → immutable Snapshot (the event ring buffer is NOT the snapshot source)
 - Publish snapshot via channel to consumers
 - Aggregate tick metrics (compute percentiles from hdrhistogram)
 - No I/O, no LLM, no blocking
@@ -417,20 +417,24 @@ struct PsiSnapshot {
     wall_clock: u64,            // separate observation field, MUST NOT affect replay
     tick_count: u64,
     metrics: TickMetrics,
-    event_queue: Vec<PsiEvent>, // NOT part of state snapshot — separate queue
+    // NOTE: the event queue is deliberately NOT a snapshot field — events
+    // live in the separate ring buffer; a Vec here would also violate the
+    // fast-loop no-allocation rule.
 }
 ```
 
-**Mapping: v2 Snapshot → v1 PsiState** (required 6 fields per `psi-state.schema.json`):
+**Mapping: v2 Snapshot → v1 `get_state()` dict** — the v1 schema (`psi-state.schema.json`) requires exactly these six fields: `needs`, `dominant_need`, `dominant_drive`, `emotion`, `attention`, `tick`. The mapping layer must produce all six:
 
-| v2 field | v1 schema field | Notes |
-|----------|----------------|-------|
-| `needs` → `needs` | `[Need { name, current, target, ... }]` | Same 5 needs, identical order |
-| `drives` → `drives` | `[f64; 5]` | Computed from needs at mapping time |
-| `affect` → `affect` | `{ P, A, D, S, St }` | D is always 0.5 in v1 |
-| `attention_state` → `attention` | `enum { IDLE, TASK, LEARNING, PLANNING }` | 4 values only |
-| `logical_time` → `timestamp` | u64 — must be epoch-relative | `epoch + tick_index × period` |
-| `tick_count` → `tick_count` | u64 | Direct pass-through |
+| v1 schema field (required) | Built from v2 | Notes |
+|----------------------------|---------------|-------|
+| `needs` | `needs` + per-need `target` + computed drive | v1 shape: `{name: {current, target, drive}}`, same 5 needs, identical order |
+| `dominant_need` | argmax over `drives` | v1: need name string, `"none"` when all drives ≤ 0 |
+| `dominant_drive` | max of `drives` | rounded per v1 conventions |
+| `emotion` | `affect` P/A + `endorphin` channel | v1 shape: `{valence (endorphin channel), raw_valence, arousal, dominance}`; EmotionGradient dominance = 0.5 |
+| `attention` | `attention_state` | enum `{IDLE, TASK, LEARNING, PLANNING}`, 4 values only |
+| `tick` | `tick_count` | direct pass-through |
+
+Optional v1 fields (`affective`, `schema_version`, `backend`, `timestamp`): `affective.dims` maps from `affect`, `affective.biases` from the v1 bias computation, `timestamp` from `logical_time` (epoch-relative). v2-only fields (`metrics`, `drives` array, `wall_clock`) do NOT appear in the v1 surface.
 
 **⚠️ Wall clock (`wall_clock`) is for observability only. It MUST NOT affect replay state. Replay uses `logical_time` exclusively.**
 
@@ -445,7 +449,7 @@ Serialization format: MessagePack or CBOR is a **D decision**. A JSON migration 
 | Optimal OU process θ per need | Requires empirical calibration |
 | Serotonin modulation factor (0.3) | Theoretical value. Needs calibration. |
 | 1/f noise amplitude | Unknown. Requires tuning. |
-| Coupling matrix coefficients | Known structure (8 terms), values TBD. |
+| Coupling matrix coefficients | v1's 8 values are known (E0, §2.2); only v2's added diagonal damping terms are TBD. |
 | Hysteresis thresholds for attention gates | Must be tuned on real usage. |
 | Acceptable deadline miss ratio | Depends on application requirements. |
 | Spin-sleep accuracy on Apple Silicon | E1 claim only. Must benchmark. |
