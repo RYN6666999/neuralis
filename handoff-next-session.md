@@ -1,5 +1,30 @@
 # 線頭 — 給下一手
 
+## ✅ P0-P3 依序執行完（2026-07-17 晚）— commit wave + 凍結修復 + daemon 自動化
+- **Commit wave**：7/16-7/17 兩天散工全數入庫（交錯串流 / 對話迴路+任務佇列 /
+  docs / 凍結修復 / daemon），樹乾淨。rust/target 入 gitignore（只有建置產物無源碼）。
+- **⚠️ 第三次同型坑 — event loop 凍結（已修）**：_tool_chat 串流段曾用
+  threading.Event.wait 直接擋主線程，每個 scream 串流工具請求凍 loop ≤125s
+  → /health 逾時 → watchdog 殺行程、其他回應 IncompleteRead、還一度把
+  _sse_chunk 插進 _stream_sse 中間造成 SyntaxError（chatflow hook 整層靜默失效，
+  watchdog 用壞版重啟過）。修法 = _queue_pump（call_soon_threadsafe →主 loop
+  Queue）+ await wait_for。**鐵則：loop 線程上不准任何同步等待。**
+  實測：串流中 /health 200、reasoning 逐字流、四套自檢全綠。
+- **busy 閘校準**：只擋 scream-ask/scream-task（互斥通道）+ 120s 殘留保護。
+  agency 背景查詢不再把真使用者頂回 laap-busy。
+- **daemon 自動化**：phase-logger / task-executor / scream-monitor 進 launchd
+  （install-support-daemons.sh 冪等安裝；check-daemons.py 三段自檢）。
+  scream-monitor.sh 收編進 repo。啟動協定六步手動作廢。
+- **深化**：qmd/file-search 掛 stream_fn 逐行；respond_stream 轉發 reasoning；
+  SSE 斷線 cancel 傳播（GeneratorExit 殺工具子行程）；system prompt 工具數
+  動態注入；scream-task 描述加防呆；check-chatflow E 段校準 RACE 語義。
+- **文件**：SCREAM-ARIS-ARCHITECTURE.md 全面對齊現實（45+ 工具、純聊天串流節點、
+  launchd 啟動協定、PSI backend 段、已知缺口清單）；新 docs/specs/psi-backend-m3-plan.md
+  （Rust M3 步驟 + 完成條件 — 注意 rust 源碼不在 repo，M3 第一步是找回）。
+- **遺留**：scream-task-executor 仍是 v0 stub（模擬執行）；_popen_lines 逾時
+  只在行間檢查；paralell AI 同檔平行編輯風險真實存在（本日兩次撞上）—
+  改 chatflow/llm_respond 前先 git status + compile 確認基線。
+
 ## ✅ ToolExecutor 交錯串流（2026-07-17）— 工具過程即時可見 + chat 真的能調工具了
 之前純聊天路徑（psi-llm）**根本沒接工具** — system prompt 開技能菜單但 respond()
 無 tool loop，「我來查」是空頭支票；SSE 也是假串流（整塊算完切 24 字慢吐）。現在：
