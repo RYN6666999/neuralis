@@ -48,6 +48,35 @@ def _tool_cache_key(messages: list, tools: list = None) -> str:
             h.update(str(fn.get("name", "")).encode())
     return h.hexdigest()
 
+
+def _is_retryable(err: Exception) -> bool:
+    """True for transient errors worth retrying."""
+    msg = str(err).lower()
+    if isinstance(err, urllib.error.HTTPError):
+        return err.code in (429, 500, 502, 503, 504)
+    if isinstance(err, (urllib.error.URLError, ConnectionError, TimeoutError)):
+        return True
+    if "timeout" in msg or "connection" in msg or "reset" in msg:
+        return True
+    return False
+
+
+def _retry_call(fn, *args, max_retries: int = None, **kwargs):
+    """Retry wrapper with exponential backoff for transient errors."""
+    retries = max_retries if max_retries is not None else _RETRY_MAX
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_err = e
+            if not _is_retryable(e) or attempt >= retries:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.info(f"[llm_respond] 重試 {attempt+1}/{retries} ({delay:.0f}s): {e}")
+            time.sleep(delay)
+    raise last_err  # 不應到達這裡
+
 # ── 設定 ──
 _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true")
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
@@ -58,6 +87,10 @@ _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
 _API_KEY_CACHE: Optional[str] = None
 _API_KEY_CACHE_TS: float = 0.0
 _API_KEY_TTL = 300  # 5 分鐘
+
+# ── 重試設定 ──
+_RETRY_MAX = int(os.environ.get("NEURALIS_RETRY_MAX", 2))
+_RETRY_BASE_DELAY = 1.0  # 秒
 
 # ── 工具模式設定（Scream TUI agent 迴圈）──
 # 工具迴圈的請求比純聊天肥得多（harness system prompt + tools schema + 檔案內容），
@@ -331,46 +364,67 @@ def respond_tools(body: dict, psi_state: dict = None,
         if body.get(k) is not None:
             out[k] = body[k]
 
-    req = urllib.request.Request(
-        f"{_LLM_BASE_URL}/chat/completions",
-        data=json.dumps(out).encode(),
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {key}"},
-    )
+    # 重試非 streaming 呼叫（網路抖動時自動重試）
     try:
-        resp = json.loads(urllib.request.urlopen(req, timeout=_TOOL_TIMEOUT).read())
+        resp = None
+        last_err = None
+        for attempt in range(_RETRY_MAX + 1):
+            try:
+                req = urllib.request.Request(
+                    f"{_LLM_BASE_URL}/chat/completions",
+                    data=json.dumps(out).encode(),
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {key}"},
+                )
+                resp = json.loads(
+                    urllib.request.urlopen(req, timeout=_TOOL_TIMEOUT).read())
+                break
+            except Exception as e:
+                last_err = e
+                if not _is_retryable(e) or attempt >= _RETRY_MAX:
+                    raise
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.info(f"[llm_respond] 工具呼叫重試 {attempt+1}/{_RETRY_MAX} "
+                            f"({delay:.0f}s): {e}")
+                time.sleep(delay)
+        if resp is None:
+            raise last_err or RuntimeError("API 呼叫全部失敗")
+
         choice = (resp.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         if not msg.get("content") and not msg.get("tool_calls"):
             logger.warning(f"[llm_respond] 工具模式空回應: {str(resp)[:300]}")
             # 不回 None（會讓 TUI 卡 working），改回降級訊息
-            result = {"message": {"role": "assistant",
-                                   "content": "（上游 LLM 回傳了空回應，請重試）"},
-                      "finish_reason": "stop", "usage": {}}
-            return result
+            return {"message": {"role": "assistant",
+                                "content": "（上游 LLM 回傳了空回應，請重試）"},
+                    "finish_reason": "stop", "usage": {}}
         logger.info(f"[llm_respond] ✅ 工具模式回應 ({_TOOL_MODEL}, "
                     f"finish={choice.get('finish_reason')})")
         result = {"message": msg,
                   "finish_reason": choice.get("finish_reason", "stop"),
                   "usage": resp.get("usage") or {}}
         # 寫入快取（僅短回應）
-        content_len = len(msg.get("content") or "")
-        if content_len < 500:
+        if len(msg.get("content") or "") < 500:
             _TOOL_CACHE[_tc_key] = (time.time(), result)
             if len(_TOOL_CACHE) > _CACHE_MAX:
                 oldest = min(_TOOL_CACHE, key=lambda k: _TOOL_CACHE[k][0])
                 del _TOOL_CACHE[oldest]
         return result
     except urllib.error.HTTPError as e:
+        detail = ""
         try:
-            detail = e.read().decode("utf-8", "replace")[:300]
+            detail = e.read().decode("utf-8", "replace")[:200]
         except Exception:
-            detail = ""
+            pass
         logger.warning(f"[llm_respond] 工具模式 API {e.code}: {detail}")
-        return None
+        return {"message": {"role": "assistant",
+                            "content": f"（上游 API 錯誤: HTTP {e.code}）"},
+                "finish_reason": "stop", "usage": {}}
     except Exception as e:
         logger.warning(f"[llm_respond] 工具模式 API 失敗: {e}")
-        return None
+        return {"message": {"role": "assistant",
+                            "content": f"（上游 API 呼叫失敗: {e}）"},
+                "finish_reason": "stop", "usage": {}}
 
 
 def respond_tools_stream(body: dict, psi_state: dict = None,
@@ -449,11 +503,21 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
         headers={"Content-Type": "application/json",
                  "Authorization": f"Bearer {key}"},
     )
-    try:
-        resp = urllib.request.urlopen(req, timeout=timeout or max(_LLM_TIMEOUT, 30))
-    except Exception as e:
-        yield {"type": "error", "text": f"API 連線失敗: {e}"}
-        return
+    # 重試連線（網路抖動時自動重試）
+    resp = None
+    last_err = None
+    for attempt in range(_RETRY_MAX + 1):
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout or max(_LLM_TIMEOUT, 30))
+            break
+        except Exception as e:
+            last_err = e
+            if not _is_retryable(e) or attempt >= _RETRY_MAX:
+                yield {"type": "error", "text": f"API 連線失敗: {e}"}
+                return
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.info(f"[llm_respond] 串流重試 {attempt+1}/{_RETRY_MAX} ({delay:.0f}s): {e}")
+            time.sleep(delay)
 
     calls: dict = {}   # index → {"id","name","arguments"}（OpenAI delta 累加語義）
     saw_token = False

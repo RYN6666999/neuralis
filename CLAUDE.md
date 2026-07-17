@@ -28,3 +28,13 @@
     發現週邊問題時記錄在 handoff/已知限制，不順手修。
 13. 不要把整份 ROADMAP 複製進 CLAUDE.md — 藍圖是 roadmap 的事，
     CLAUDE.md 只放不隨進度變動的長期規則。
+14. **event loop 線程上不准任何同步等待。** 同步函式一律
+    `run_in_executor` + `await wait_for`；thread → loop 的事件投遞用
+    `loop.call_soon_threadsafe`，不在 thread 裡開新 event loop 對主 loop
+    的 Queue 跑 `run_until_complete`（跨 loop put 會 RuntimeError）。
+    阻塞在單請求測試下看不出來 — 改串流/工具管線後必須驗「串流進行中
+    打 /health 回 200」。此坑已踩三次（`9b904a3`、gbrain recall、`4e7e952`），
+    每次都讓 watchdog 誤殺行程。
+15. 下「repo 裡沒有 X / 沒人做過 X」的結論前，先 `git branch -a` +
+    `git log --all -- <path>`。單一分支的工作樹不是 repo 全貌；這類誤判的
+    代價是叫下一手重做已完成的工作。

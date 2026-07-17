@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections import deque
 from typing import Any, Dict
 
 import pytest
@@ -188,6 +189,15 @@ class TestAgencyMigration:
         agency.drive_threshold = 0.45
         agency.actions_total = 0
         agency.skipped_stale = 0
+        # 任務佇列模式（goal-driven execution）— _evaluate 首行就讀 _task_queue，
+        # 空佇列 = 走原本的 drive 評估路徑。
+        # ⚠️ 這個 fixture 用 __new__ 繞過 __init__，AgencyLoop 每次新增 instance
+        # 屬性都要同步補在這裡，否則 _evaluate/_act 撞 AttributeError（本行的由來）。
+        agency._task_queue = []
+        agency._task_index = 0
+        agency._goal_spec = ""
+        agency._goal_completed = False
+        agency._recent_tools = deque(maxlen=5)
 
         # Test _effective_interval reads arousal from get_state()
         eff = agency._effective_interval()
