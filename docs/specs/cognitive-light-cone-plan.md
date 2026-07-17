@@ -141,6 +141,10 @@ agency 維持規則表 + RPE。S_span 走我的 S1→S2→S3（學工具選擇 �
 
 ### Phase S1 — RPE 學工具選擇（三條路都先做，最小最穩）
 
+> ⚠️ **前提：先過 `rpe-evaluation-integrity.md` 的 E1（下游效用信號）。**
+> 現在的 `_score_result` 有 len/500 刷分漏洞（讀碼確認）。在 gameable 的分數上讓
+> RPE 學工具選擇，只會更快、更持久地學會刷分。評分完整性先於學習擴張。
+
 把 RPE 從「per-angle」擴到「per-(need,tool)」。工具選擇不再 `random()<0.5`，
 而是按學來的權重 epsilon-greedy 抽樣。
 
