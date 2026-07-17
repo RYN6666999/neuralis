@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Phase 4a 自檢：安全閘四段（危險內容 / 未批准工具 / env 批准 / 乾淨放行）。
+ + E. AgentOS 工具分類
 用法: PYTHONPATH=.:../laap-AGI ../laapenv/bin/python scripts/check-safety.py"""
 import os
 import sys
@@ -8,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from laap.agi.cognitive_bus import CognitiveBus
 from laap.tool_executor import ToolExecutor
+from laap.safety_gate import classify, get_allowed_tools, AGENTOS_READONLY
 
 tools = ToolExecutor(bus=CognitiveBus(agent_name="check"), agentos_registry=None)
 
@@ -32,5 +34,14 @@ print("C. 批准工具 + 危險內容仍攔: OK")
 r = tools.execute("gbrain", "LAAP")
 assert not r.startswith("[安全閘]"), f"乾淨呼叫不該被閘: {r[:60]}"
 print("D. 乾淨放行: OK")
+
+# E. AgentOS 工具分類
+assert classify("web-search") == "readonly_agentos", classify("web-search")
+assert classify("gbrain") == "readonly_builtin"
+assert classify("http-get") == "write"
+assert classify("skill-full-bypass-permissions-auto-approve-protected") == "write"
+allowed = [t["name"] for t in get_allowed_tools()]
+assert "web-search" in allowed, f"web-search 應在允許清單: {allowed}"
+print("E. AgentOS 工具分類: OK")
 
 print("ALL SAFETY CHECKS PASSED")

@@ -72,6 +72,8 @@ def seg_f():
 
     class FakePsi:
         affective = FakeAff()
+        def post_affective_event(self, name, intensity=1.0):
+            return self.affective.post_event(name, intensity)
 
     orig = st.get_psi_core
     st.get_psi_core = lambda: FakePsi()

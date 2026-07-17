@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.pop("NEURALIS_TOOL_ALLOW", None)
 
 from laap.agi.cognitive_bus import CognitiveBus
-from laap.safety_gate import check, APPROVED_PATH, PENDING_PATH
+from laap.safety_gate import check, APPROVED_PATH, PENDING_PATH, get_classification_map
 from laap.tool_executor import ToolExecutor
 
 APPROVE = os.path.join(os.path.dirname(__file__), "approve-tool.sh")
@@ -57,6 +57,12 @@ try:
     allowed, _ = check("http-get", "https://example.com")
     assert not allowed, "撤銷後應再拒"
     print("D. 撤銷: OK")
+
+    # E. 程式化分類 API
+    m = get_classification_map()
+    assert "web-search" in m.get("readonly_agentos", []), f"web-search 應在 readonly_agentos: {m}"
+    assert "gbrain" in m.get("readonly_builtin", []), f"gbrain 應在 readonly_builtin: {m}"
+    print("E. 程式化分類 API: OK")
 
     print("ALL 4B APPROVAL CHECKS PASSED")
 finally:

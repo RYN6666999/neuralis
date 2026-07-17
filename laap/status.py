@@ -61,6 +61,8 @@ def snapshot() -> dict:
                 for n, s in getattr(agency, "_need_stats", {}).items()
             },
             "trust": dict(getattr(agency, "_trust_scores", {})),
+            "agentos_tools_used": list(getattr(agency, "_recent_tools", [])),
+            "pending_approvals": _count_pending(),
         }
 
     cons = get_consolidation()
@@ -95,6 +97,17 @@ def _memory_breakdown() -> dict:
         return {"gbrain_total": stats.get("page_count", 0), "laap_layers": layers}
     except Exception as e:
         return {"error": str(e)}
+
+
+def _count_pending() -> int:
+    """approvals-pending.jsonl 的行數（待批工具數）。"""
+    try:
+        from laap.safety_gate import PENDING_PATH
+        if PENDING_PATH.exists():
+            return len(PENDING_PATH.read_text(encoding="utf-8").splitlines())
+    except Exception:
+        pass
+    return 0
 
 
 class StatusWriter:

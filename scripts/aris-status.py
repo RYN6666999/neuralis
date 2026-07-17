@@ -68,6 +68,12 @@ def main():
               f" | interval={eff}s"
               + (f" | {trust_str}" if trust_str else "")
               + (f" | {rpe}" if rpe else ""))
+        agentos_tools = ag.get('agentos_tools_used', [])
+        if agentos_tools:
+            print(f"    AgentOS 工具: {', '.join(agentos_tools)}")
+        pending = ag.get('pending_approvals', 0)
+        if pending:
+            print(f"    待批工具: {pending}")
 
     co = data.get("consolidation")
     if co:

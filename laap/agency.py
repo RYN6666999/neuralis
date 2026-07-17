@@ -28,9 +28,11 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from laap.safety_gate import AGENTOS_READONLY, classify
+
 logger = logging.getLogger("laap.agency")
 
-READONLY_WHITELIST = frozenset({"gbrain", "qmd", "file-search"})
+READONLY_WHITELIST = frozenset({"gbrain", "qmd", "file-search", "scream-ask"}) | AGENTOS_READONLY
 NEED_COOLDOWN_S = 1800.0
 AUDIT_PATH = Path(__file__).resolve().parents[1] / "agency-audit.jsonl"
 
@@ -92,7 +94,7 @@ class AgencyLoop:
         self._trust_scores: dict = {"user": 0.3}   # entity → trust 0-1
         self._trust_decay_rate = 0.0005             # 每次評估衰減量
         # ── 自我強化循環防護 ──
-        self._last_was_gbrain: bool = False
+        self._last_was_self_initiated: bool = False
         self._self_cycle_count: int = 0
         self._cycle_max: int = int(os.environ.get("NEURALIS_AGENCY_CYCLE_MAX", "3"))
         self._cycle_guard: bool = os.environ.get("NEURALIS_AGENCY_CYCLE_GUARD", "on").lower() not in ("off", "0", "false")
@@ -100,6 +102,13 @@ class AgencyLoop:
         self._checkpoint_counter: int = 0
         self._state_loaded: bool = False   # True=成功讀回 or 全新首存；False=禁存
         self._loaded_once: bool = False     # loop 層只載入一次
+        # ── T5: AgentOS 工具追蹤 ──
+        self._recent_tools: deque = deque(maxlen=5)  # 最近 5 次工具名
+        # ── 任務佇列模式（goal-driven execution） ──
+        self._task_queue: list = []          # [{idx, description}, ...]
+        self._task_index: int = 0
+        self._goal_spec: str = ""
+        self._goal_completed: bool = False
 
     # ── 生命週期 ──
 
@@ -150,6 +159,27 @@ class AgencyLoop:
         return effective
 
     def _evaluate(self) -> None:
+        # 任務佇列模式：當有活躍目標時，繞過隨機驅動評估
+        if self._task_queue and self._task_index < len(self._task_queue):
+            self._execute_next_task()
+            return
+        # 檢查外部任務狀態檔（API 注入路徑）
+        if not self._task_queue:
+            state_path = "/tmp/aris-scream-task-state.json"
+            try:
+                if __import__('os').path.exists(state_path):
+                    with open(state_path) as _f:
+                        _s = __import__('json').load(_f)
+                    if _s.get("task_queue") and not _s.get("goal_completed", False):
+                        self._goal_spec = _s.get("goal_spec", "")
+                        self._task_queue = _s["task_queue"]
+                        self._task_index = _s.get("task_index", 0)
+                        self._goal_completed = False
+                        logger.info(f"[Agency] 從狀態檔載入目標: {self._goal_spec[:40]}")
+                        self._execute_next_task()
+                        return
+            except Exception as _e:
+                logger.debug(f"[Agency] 狀態檔讀取失敗: {_e}")
         now = time.time()
         while self._action_ts and now - self._action_ts[0] > 3600:
             self._action_ts.popleft()
@@ -201,6 +231,7 @@ class AgencyLoop:
             "need_stats": self._need_stats,
             "trust_scores": self._trust_scores,
             "exploration_rate": self._exploration_rate,
+            "task_queue": self._task_queue, "task_index": self._task_index, "goal_spec": self._goal_spec,
         }
         try:
             from gbrain_client import get_client
@@ -251,6 +282,9 @@ class AgencyLoop:
                 self._need_stats = state.get("need_stats", self._need_stats)
                 self._trust_scores = state.get("trust_scores", self._trust_scores)
                 self._exploration_rate = state.get("exploration_rate", self._exploration_rate)
+                self._task_queue = state.get("task_queue", [])
+                self._task_index = state.get("task_index", 0)
+                self._goal_spec = state.get("goal_spec", "")
                 self._state_loaded = True
                 for need, s in self._need_stats.items():
                     aw = s.get("angle_weights", {})
@@ -266,17 +300,97 @@ class AgencyLoop:
                 if attempt == 2:
                     logger.debug(f"[Agency] 狀態讀回失敗 (3次): {e}")
 
+    # ── 任務佇列模式（goal-driven execution） ──
+
+    def set_goal(self, task_spec: dict) -> None:
+        self._goal_spec = task_spec.get("why", "")
+        tasks = task_spec.get("task_list", [task_spec])
+        self._task_queue = [
+            {"idx": i, "description": t.get("description", str(t))}
+            for i, t in enumerate(tasks)
+        ]
+        self._task_index = 0
+        self._goal_completed = False
+        self._write_progress("decomposing", 0)
+        state = {"goal_spec": self._goal_spec, "task_queue": self._task_queue,
+                 "task_index": self._task_index, "goal_completed": self._goal_completed}
+        with open("/tmp/aris-scream-task-state.json", "w") as f:
+            json.dump(state, f)
+
+    def cancel_goal(self) -> None:
+        self._task_queue = []; self._task_index = 0
+        self._goal_spec = ""; self._goal_completed = False
+
+    def _write_progress(self, phase: str, task_idx: int) -> None:
+        entry = {"ts": __import__('time').time(), "direction": "aris→scream",
+                 "type": "progress", "content": f"{phase} task {task_idx}",
+                 "context": {"phase": phase, "task_index": task_idx}}
+        try:
+            with open("/tmp/aris-scream-channel.jsonl", "a") as f:
+                f.write(__import__('json').dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _execute_next_task(self) -> None:
+        task = self._task_queue[self._task_index]
+        self._write_progress("executing", self._task_index)
+        self._write_task_state()  # 寫入最新進度
+        result = self.tools.execute("scream-task",
+            f"Task {self._task_index+1}/{len(self._task_queue)}: {task['description']}")
+        self._task_index += 1
+        if self._task_index >= len(self._task_queue):
+            self._goal_completed = True
+            self._write_progress("completed", self._task_index)
+            self._save_goal_memory(result)
+            self.cancel_goal()
+            # 清除外部狀態檔（防止 reload）
+            try:
+                __import__('os').remove("/tmp/aris-scream-task-state.json")
+            except Exception:
+                pass
+        else:
+            self._write_task_state()
+
+    def _save_goal_memory(self, result: str) -> None:
+        try:
+            import memory_bridge
+            emo = self.psi.get_state()["emotion"]
+            importance = min(0.5, 0.25 + 0.25 * emo.get("arousal", 0.3))
+            memory_bridge.store_important(
+                f"[目標完成] {self._goal_spec}\n最終結果:\n{result[:500]}",
+                tags=["agency", "goal", "scream-task"],
+                importance=importance)
+            logger.info(f"[Agency] 目標記憶已存: {self._goal_spec[:40]}")
+        except Exception as e:
+            logger.warning(f"[Agency] 目標記憶儲存失敗: {e}")
+
+    def _write_task_state(self) -> None:
+        state = {"goal_spec": self._goal_spec, "task_queue": self._task_queue,
+                 "task_index": self._task_index, "goal_completed": self._goal_completed}
+        try:
+            with open("/tmp/aris-scream-task-state.json", "w") as f:
+                __import__('json').dump(state, f)
+        except Exception:
+            pass
+
     # ── 意圖形成（v1 = 規則表 + 種子優先序 + 去重，仍不是認知） ──
     # 種子優先序：真對話 > 上次記憶延伸（聯想鏈）> 無 → 不硬查（減空轉垃圾）。
     # 舊版沒種子時退回固定模板反覆刷同一查詢，是重複垃圾記憶的根源。
 
-    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗"}
+    _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗 問Scream"}
 
-    def _score_result(self, result: str) -> float:
-        """量產 gbrain 結果的品質分數 0-1。
+    # T5: AgentOS 工具路由 — 當 exploration 觸發時，agency 可用 web-search 取代 gbrain
+    _AGENTOS_TOOL_MAP = {
+        "growth":     ("web-search", "最新發展 新技術 趨勢"),  # (tool, angle_suffix)
+        "competence": ("web-search", "作法 教學 最佳實踐"),
+        # certainty 保持 gbrain（需要個人記憶，不是網頁搜尋）
+    }
 
-        拆成分數線的 hit 數 + 平均分數 + 內容長度三個訊號。
-        ponytail: 簡化版，不考慮語義相關性。升級路徑 = semantic score 取代線性組合。
+    def _score_result(self, result: str, tool: str = "") -> float:
+        """量產工具結果的品質分數 0-1。
+
+        gbrain 結果拆 [score] 前綴行；AgentOS/web-search 結果是結構化 JSON，
+        無 [score] 前綴，給較高基礎分（有意義的搜尋結果比空記憶有價值）。
         """
         if not result or result == "無結果":
             return 0.0
@@ -286,8 +400,9 @@ class AgencyLoop:
             if m:
                 scores.append(float(m.group(1)))
         if not scores:
-            # 有結果但無解析分數：給基礎分（有內容就是一種結果）
-            return min(0.4, len(result) / 500)
+            # AgentOS 工具結果無 [score] 前綴，給較高基礎分
+            base = 0.6 if classify(tool) in ("readonly_agentos",) else 0.4
+            return min(base, len(result) / 500)
         hit_count = len(scores)
         avg_score = sum(scores) / len(scores)
         # 組合：平均分為主 + hit 數加成（遞減），鼓勵多樣化但不鼓勵垃圾多
@@ -312,13 +427,11 @@ class AgencyLoop:
 
     def _form_intent(self, need: str):
         if need not in self._ANGLE:
-            return None  # autonomy：由 agency loop 本身自然滿足（每次自主選擇=行使自主），
-                          # 不需要獨立角度。relatedness：被動需求（process_input+trust），
-                          # 2026-07-15 撤掉假角度。見 docs/specs/s-span-design-note.md
+            return None
         topic = (self.psi.get_last_input() or "").strip()[:80]
-        seed = topic or self._seed_snippet   # 真對話優先，否則從上次記憶聯想
-        # 自我強化循環防護：連續多次無使用者輸入 + gbrain 查詢 → 閒置
-        if self._cycle_guard and not topic and self._last_was_gbrain and self._seed_snippet:
+        seed = topic or self._seed_snippet
+        # 自我強化循環防護：連續多次無使用者輸入 + 自主查詢 → 閒置
+        if self._cycle_guard and not topic and self._last_was_self_initiated and self._seed_snippet:
             self._self_cycle_count += 1
             if self._self_cycle_count >= self._cycle_max:
                 self._seed_snippet = ""
@@ -327,7 +440,7 @@ class AgencyLoop:
         else:
             self._self_cycle_count = 0
         if not seed:
-            self.skipped_stale += 1          # 無新鮮種子 → 閒著，不刷模板
+            self.skipped_stale += 1
             return None
         # RPE 角度選擇：依權重抽樣（epsilon-greedy，探索率被情緒偏差調變）
         weights = self._get_angle_weights(need)
@@ -338,10 +451,27 @@ class AgencyLoop:
         else:
             angle = max(weights, key=weights.get)       # 利用
         query = f"{seed} {angle}".strip()
-        if self._too_similar(query):
+        # T5: 工具路由 — exploration 觸發時選擇使用哪個工具
+        if random.random() < self._effective_exploration():
+            # competence: web-search 與 scream-ask 公平競爭
+            if need == "competence" and "問Scream" in self._ANGLE.get("competence", ""):
+                if random.random() < 0.5:
+                    scream_query = f"問Scream {seed}".strip()
+                    if not self._too_similar(scream_query, tool="scream-ask"):
+                        self._recent_queries.append(self._norm(f"scream-ask: {scream_query}"))
+                        return ("scream-ask", scream_query)
+            # AgentOS 工具路由（web-search 等）
+            if need in self._AGENTOS_TOOL_MAP:
+                agentos_tool, agentos_angle = self._AGENTOS_TOOL_MAP[need]
+                agentos_query = f"{seed} {agentos_angle}".strip()
+                if not self._too_similar(agentos_query, tool=agentos_tool):
+                    self._recent_queries.append(self._norm(f"{agentos_tool}: {agentos_query}"))
+                    return (agentos_tool, agentos_query)
+        # 預設 gbrain 路徑
+        if self._too_similar(query, tool="gbrain"):
             self.skipped_stale += 1
             return None
-        self._recent_queries.append(self._norm(query))
+        self._recent_queries.append(self._norm(f"gbrain: {query}"))
         return ("gbrain", query)
 
     def _effective_exploration(self) -> float:
@@ -363,9 +493,9 @@ class AgencyLoop:
     def _norm(text: str) -> str:
         return " ".join(text.lower().split())
 
-    def _too_similar(self, query: str) -> bool:
-        """跟近期查詢 token Jaccard ≥ 0.7 視為太像（抓模板變體，不只完全相同）。"""
-        q = set(self._norm(query).split())
+    def _too_similar(self, query: str, tool: str = "") -> bool:
+        """跟近期查詢 token Jaccard ≥ 0.7 視為太像（包含 tool name 避免跨工具撞車）。"""
+        q = set(self._norm(f"{tool}: {query}").split())
         if not q:
             return True
         for prev in self._recent_queries:
@@ -377,19 +507,29 @@ class AgencyLoop:
     # ── 行動 + RPE + 回寫 + 審計 ──
 
     def _act(self, need: str, drive: float, tool: str, prompt: str) -> None:
-        if tool not in READONLY_WHITELIST:
-            logger.warning(f"[Agency] 拒絕非白名單工具: {tool}")
-            return
-        # 自我強化循環防護：記錄上次工具類型
+        # T5: 不再 hard-block 非白名單工具 — 交給 safety_gate Phase 4b 決定
+        # (tools.execute() 內部已呼叫 safety_gate.check())
+        # 自我強化循環防護：記錄是否為自主工具（非使用者觸發）
         if self._cycle_guard:
-            self._last_was_gbrain = (tool == "gbrain")
+            self._last_was_self_initiated = (tool in READONLY_WHITELIST)
         now = time.time()
         result = self.tools.execute(tool, prompt, timeout=30)
-        ok = bool(result) and not result.startswith(("[錯誤]", "[未知工具]", "[AgentOS 錯誤]")) \
+
+        # SafetyGate 阻擋
+        if result and result.startswith("[安全閘]"):
+            # T5: 已排入待批清單 = 不 hard-block，仍計行動（Phase 4b 批准閘）
+            if "已排入待批清單" in result:
+                logger.info(f"[Agency] [安全閘]排隊待批 {tool}({prompt[:40]}) — 仍計行動")
+            else:
+                # 危險內容阻擋：不計行動、不佔 rate cap
+                logger.info(f"[Agency] [安全閘]阻擋 {tool}({prompt[:40]}) — 不計行動")
+                return
+
+        ok = bool(result) and not result.startswith(("[錯誤]", "[未知工具]", "[AgentOS 錯誤]", "[安全閘]")) \
             and result != "無結果"
 
         # ── RPE 計算 ──
-        outcome = self._score_result(result) if ok else 0.0
+        outcome = self._score_result(result, tool=tool) if ok else 0.0
         stats = self._need_stats.setdefault(need, {
             "expected": 0.3, "rpes": [], "angle_weights": {}})
         expected = stats["expected"]
@@ -445,9 +585,18 @@ class AgencyLoop:
             except Exception as e:
                 logger.warning(f"[Agency] 回寫失敗: {e}")
 
+            if ok and tool == "scream-ask":
+                mem_id = memory_bridge.store_important(
+                    f"[scream-ask] 問「{prompt}」→\n{result[:500]}",
+                    tags=["agency", "scream", "tui-learning"],
+                    importance=importance)
+                if mem_id:
+                    logger.info(f"[Agency] scream-ask 記憶已存: {mem_id}")
+
         self._action_ts.append(now)
         self._need_last_action[need] = now
         self.actions_total += 1
+        self._recent_tools.append(tool)  # T5: 記錄最近工具名供 status.py 使用
         entry = {"ts": now, "need": need, "drive": round(drive, 3),
                  "tool": tool, "prompt": prompt, "ok": ok,
                  "result_len": len(result or ""), "mem_id": mem_id,

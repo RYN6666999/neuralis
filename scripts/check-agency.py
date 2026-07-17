@@ -32,13 +32,15 @@ def main():
     agency = AgencyLoop(psi=psi, tools=tools, bus=bus,
                         interval=0.5, max_per_hour=2, drive_threshold=0.45)
 
-    # A. 白名單
+    # A. 白名單 — 內容危險阻擋（T5 Phase 4b：已排待批會計行動，危險內容才不計）
     before = agency.actions_total
-    agency._act("certainty", 0.9, "http-get", "https://example.com")
-    assert agency.actions_total == before, "非白名單工具不應記入行動"
+    agency._act("certainty", 0.9, "qmd", "rm -rf /重要資料")
+    assert agency.actions_total == before, "危險內容應不計行動"
     print("A. 白名單拒絕: OK")
 
     # B. 迴路（手動壓低 certainty，其餘壓到閾值下避免搶跑）
+    # 注意：線上 agency loop 也寫入同一個 agency-audit.jsonl，
+    # 所以用 ≥ 而非 == 來容許並發寫入，然後向後搜尋本次行動的審計條目。
     audit_before = AUDIT_PATH.read_text().count("\n") if AUDIT_PATH.exists() else 0
     for nt in NeedType:
         raw.needs.values[nt] = raw.needs.targets[nt]  # drive→0
@@ -47,17 +49,24 @@ def main():
     cert_before = raw.needs.values[NeedType.CERTAINTY]
     agency._evaluate()
     audit_after = AUDIT_PATH.read_text().count("\n") if AUDIT_PATH.exists() else 0
-    assert audit_after == audit_before + 1, "應寫入一行審計"
-    last = json.loads(AUDIT_PATH.read_text().splitlines()[-1])
-    assert last["need"] == "certainty" and last["tool"] in READONLY_WHITELIST
-    print(f"B. 迴路: OK — 行動 {last['tool']}({last['prompt'][:30]}) ok={last['ok']} "
-          f"mem={last['mem_id'] or '-'}")
-    if last["ok"]:
+    assert audit_after >= audit_before + 1, "應寫入至少一行審計"
+    # 向後搜尋本次行動的條目（容許線上 loop 並發寫入的額外行）
+    new_lines = AUDIT_PATH.read_text().splitlines()[audit_before:]
+    entry = None
+    for _line in reversed(new_lines):
+        e = json.loads(_line)
+        if e["need"] == "certainty" and e["tool"] in READONLY_WHITELIST:
+            entry = e
+            break
+    assert entry is not None, "未找到本次 certainty 行動的審計條目"
+
+    print(f"B. 迴路: OK — 行动 {entry['tool']}({entry['prompt'][:30]}) ok={entry['ok']} "
+          f"mem={entry['mem_id'] or '-'}")
+    if entry["ok"]:
         assert raw.needs.values[NeedType.CERTAINTY] > cert_before, "成功行動應回升需求"
-        assert last["mem_id"], "成功行動應有記憶 id"
+        assert entry["mem_id"], "成功行動應有記憶 id"
         print(f"   certainty {cert_before:.2f} → {raw.needs.values[NeedType.CERTAINTY]:.2f}, "
               f"記憶已回寫")
-
     # C. rate cap（cap=2；B 已用 1 次 → 再 2 次只該成 1 次）
     raw.needs.values[NeedType.GROWTH] = 0.1
     agency._need_last_action.clear()

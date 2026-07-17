@@ -113,7 +113,7 @@ def ensure_agency():
         from laap.agency import AgencyLoop
         _agency = AgencyLoop(psi=_psi_core, tools=_tool_executor, bus=_bus)
         _agency.start()
-        logger.info("🔄 AgencyLoop 啟動 — Aris 會自主行動了（唯讀白名單 + rate cap）")
+        logger.info("🔄 AgencyLoop 啟動 — Aris 會自主行動了（唯讀白名單 + AgentOS web-search + rate cap）")
     except Exception as e:
         logger.warning(f"AgencyLoop 啟動失敗: {e}")
     return _agency
