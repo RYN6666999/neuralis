@@ -37,4 +37,6 @@ watchdog-crashloop-*.lock
 approved-tools.txt
 approvals-pending.jsonl
 status.json
+
+# Rust build artifacts
 rust/target/
