@@ -343,7 +343,11 @@ def respond_tools(body: dict, psi_state: dict = None,
         msg = choice.get("message") or {}
         if not msg.get("content") and not msg.get("tool_calls"):
             logger.warning(f"[llm_respond] 工具模式空回應: {str(resp)[:300]}")
-            return None
+            # 不回 None（會讓 TUI 卡 working），改回降級訊息
+            result = {"message": {"role": "assistant",
+                                   "content": "（上游 LLM 回傳了空回應，請重試）"},
+                      "finish_reason": "stop", "usage": {}}
+            return result
         logger.info(f"[llm_respond] ✅ 工具模式回應 ({_TOOL_MODEL}, "
                     f"finish={choice.get('finish_reason')})")
         result = {"message": msg,

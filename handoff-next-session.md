@@ -19,11 +19,22 @@
   SSE 斷線 cancel 傳播（GeneratorExit 殺工具子行程）；system prompt 工具數
   動態注入；scream-task 描述加防呆；check-chatflow E 段校準 RACE 語義。
 - **文件**：SCREAM-ARIS-ARCHITECTURE.md 全面對齊現實（45+ 工具、純聊天串流節點、
-  launchd 啟動協定、PSI backend 段、已知缺口清單）；新 docs/specs/psi-backend-m3-plan.md
-  （Rust M3 步驟 + 完成條件 — 注意 rust 源碼不在 repo，M3 第一步是找回）。
+  launchd 啟動協定、PSI backend/Rust 段、已知缺口清單）；新
+  docs/specs/psi-backend-m3-plan.md。
+- **⚠️ 我犯的錯（留給下一手當鏡子）**：整天工作誤落 `task-007b-psi-borrowing-analysis`
+  分支（主分支是 `main` 不是 master）；且看到 `rust/` 只有 target/ 就宣稱
+  「rust 源碼不在 repo，M3 第一步是找回」——**源碼一直好好在 `task-008-rust-psi-engine`
+  分支上**，Rust PsiEngine v2 早已實作完成。教訓：**單一分支的 ls 不是 repo 的全貌，
+  下結論前先 `git branch -a` + `git ls-tree <branch>`。** 已全部修正並 merge。
+- **merge 完成**：task-007b（11 commits）ff → main；task-008（Rust 引擎 3 commits）
+  → main（衝突僅 .gitignore，我加的 rust/target/ 與 task-008 帶註解版重複，取後者）。
+  合併後親自實測：cargo test 45 passed、psi-bench exit=0（2000.0/s、0% miss、
+  p99 4µs、drift 0µs）。README 宣稱屬實。
 - **遺留**：scream-task-executor 仍是 v0 stub（模擬執行）；_popen_lines 逾時
-  只在行間檢查；paralell AI 同檔平行編輯風險真實存在（本日兩次撞上）—
+  只在行間檢查；平行 AI 同檔編輯風險真實（本日兩次撞上）—
   改 chatflow/llm_respond 前先 git status + compile 確認基線。
+- **下一步（M3）**：Rust 引擎跑得很好但沒接上 Python。缺 `RustPsiBackend`
+  （PyO3 傾向）+ 100ms 寫 state/latest.json + 對拍 + 60min soak。
 
 ## ✅ ToolExecutor 交錯串流（2026-07-17）— 工具過程即時可見 + chat 真的能調工具了
 之前純聊天路徑（psi-llm）**根本沒接工具** — system prompt 開技能菜單但 respond()

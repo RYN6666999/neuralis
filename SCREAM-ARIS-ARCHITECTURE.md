@@ -299,15 +299,20 @@ _queue_pump → _sse_from_queue → 客戶端
 
 ---
 
-## PSI backend 抽象與 Rust 路線（2026-07-16 起）
+## PSI backend 抽象與 Rust 引擎（2026-07-16 起）
 
 - `laap/psi_backend.py` — `PythonPsiBackend` 包住 PsiCore，M1/M2 完成
-  （行為不變的介面抽象 + 生產呼叫點遷移）。
-- `rust/` — psi_engine 建置產物（`libpsi_engine` + `psi-bench`，源碼位置待補），
-  目標 2000Hz runtime；規格見 `docs/` 最近的 PSI specification commits。
-- M3 計劃：`docs/specs/psi-backend-m3-plan.md` — Rust core 實作 backend 介面 +
-  每 100ms 寫 `state/latest.json`（圓作者契約後，chatflow `_write_author_state`
-  workaround 退役）。
+  （行為不變的介面抽象 + 生產呼叫點遷移）。**目前生產跑的是這條。**
+- `rust/psi-engine/` — **Rust PsiEngine v2 已實作完成**（2000Hz fast loop、
+  5-need OU、5D affect、attention gate、18 事件 reducer、snapshot publisher、
+  circuit breaker）。本機實測 2000.0/s、0% deadline miss、p99 4µs、drift 0µs、
+  45 tests 綠、`psi-bench` exit=0。
+  ```bash
+  cd rust && cargo test --release && ./target/release/psi-bench
+  ```
+- **缺的是橋**：Rust 端 snapshot 以 100Hz 發佈，但 Python 側還沒有 `RustPsiBackend`
+  消費者。M3 = 接橋 + 100ms 寫 `state/latest.json`（之後 chatflow
+  `_write_author_state` workaround 退役）。步驟見 `docs/specs/psi-backend-m3-plan.md`。
 
 相關：三層生態定位見 `docs/specs/ecosystem-architecture.md`（本文件講「怎麼接」，
 那份講「為什麼這樣分層」）。
@@ -329,7 +334,9 @@ _queue_pump → _sse_from_queue → 客戶端
 | 串流輸出 | ✅ | `_tool_chat` streaming + thinking token 支援 |
 | 純聊天串流 | ✅ | `_stream_live` 交錯串流 + use_tool 迴圈（2026-07-17） |
 | daemon 自動化 | ✅ | 三隻支援 daemon 進 launchd（2026-07-17） |
-| PSI Rust M3 | ⬜ | Rust core 接 backend 介面（見 docs/specs/psi-backend-m3-plan.md） |
+| PSI backend M1/M2 | ✅ | 介面抽象 + 生產呼叫點遷移 |
+| Rust PsiEngine v2 | ✅ | 2000Hz 實測達標、45 tests（main `19a12fe`） |
+| PSI backend M3 | ⬜ | Rust↔Python 接橋（見 docs/specs/psi-backend-m3-plan.md） |
 
 ## 已知缺口（誠實清單，2026-07-17 盤點）
 
@@ -337,4 +344,8 @@ _queue_pump → _sse_from_queue → 客戶端
 - system prompt 的「95+ 技能」是 scream 端的；ToolExecutor 實際名單以
   `list_tools()` 為準（45+，工具數已動態注入 prompt）
 - `_popen_lines` 逾時只在行間檢查（沉默長行程要等下一行才被殺）
-- rust/ 只有建置產物，源碼位置待考（M3 前要找回或重建）
+- Rust 引擎跑得很好但還沒接上 Python（M3）；psi-bench 閾值仍是 spec 起始估計，
+  60min soak 未跑
+- **分支紀律**：功能分支多（task-00X-*），開工前先 `git branch` 確認落點 —
+  2026-07-17 整天的串流工作誤落 `task-007b-psi-borrowing-analysis`，
+  且因只掃當前分支而誤判「rust 源碼不存在」（實際在 task-008）
