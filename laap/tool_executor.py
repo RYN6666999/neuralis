@@ -305,7 +305,10 @@ class ToolExecutor:
             )
             return (result.stdout or result.stderr or "").strip()[:2000]
 
-        # qmd 本地知識搜尋
+        # qmd 本地知識搜尋（stream_fn 逐行 — 串流路徑即時可見）
+        def qmd_stream(query: str):
+            yield from ToolExecutor._popen_lines(["qmd", "query", query], timeout=15)
+
         def qmd_search(query: str) -> str:
             result = subprocess.run(
                 ["qmd", "query", query],
@@ -313,7 +316,11 @@ class ToolExecutor:
             )
             return (result.stdout or result.stderr or "").strip()[:2000]
 
-        # ripgrep 檔案全文搜尋
+        # ripgrep 檔案全文搜尋（stream_fn 逐行）
+        def file_search_stream(query: str):
+            yield from ToolExecutor._popen_lines(
+                ["rg", "-n", "--max-count", "20", query, "."], timeout=10)
+
         def file_search(query: str) -> str:
             result = subprocess.run(
                 ["rg", "-n", "--max-count", "20", query, "."],
@@ -338,14 +345,19 @@ class ToolExecutor:
             return "\n".join(stream_test_stream(prompt))
 
         self.register_tool("gbrain", gbrain_search, "gbrain 長期記憶搜尋 (hybrid search)")
-        self.register_tool("qmd", qmd_search, "qmd 本地知識庫搜尋 (hybrid + rerank)")
-        self.register_tool("file-search", file_search, "ripgrep 檔案全文搜尋")
+        self.register_tool("qmd", qmd_search, "qmd 本地知識庫搜尋 (hybrid + rerank)",
+                           stream_fn=qmd_stream)
+        self.register_tool("file-search", file_search, "ripgrep 檔案全文搜尋",
+                           stream_fn=file_search_stream)
         self.register_tool("http-get", http_get, "HTTP GET 請求")
         self.register_tool("scream-ask", scream_ask, "向 Scream Code 提問，學習 TUI 操作與工具使用")
         self.register_tool("stream-test", stream_test_exec,
                            "串流管線自測（固定慢指令，逐行輸出）",
                            stream_fn=stream_test_stream)
-        self.register_tool("scream-task", scream_task, "向 Scream Code 委派任務（type=task→result, 120s timeout）")
+        self.register_tool("scream-task", scream_task,
+                           "向 Scream Code 委派任務（type=task→result, 120s timeout）。"
+                           "僅在 Scream TUI session 在線時可用，離線會空等 120s。"
+                           "網路搜尋用 web-search，不要用這個。")
 
     def _on_action_request(self, source: str, data: dict) -> None:
         """CognitiveBus ACTION_REQUEST 事件回呼。"""

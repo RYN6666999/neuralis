@@ -90,7 +90,8 @@ def main():
         del sys.modules["laap_brain_api"]
     print(f"C. executor 卸載不阻塞 event loop: OK — 2 個 1.5s 慢 chat 併發僅 {elapsed:.2f}s（非 3s 序列化）")
 
-    # E. timeout 降級：超時回降級 response，不 hang
+    # E. timeout 降級：作者管線超時不 hang。RACE 架構下（2026-07-17 重寫）
+    # 逾時優先落 psi 路（psi-respond/psi-llm 有真回應），psi 也不在才回 laap-timeout。
     fake_api2 = types.ModuleType("laap_brain_api")
     fake_api2.process_with_laap = lambda m, model="x": (time.sleep(3), {"content": "太慢"})[1]
     sys.modules["laap_brain_api"] = fake_api2
@@ -98,12 +99,18 @@ def main():
     try:
         handler = cf._make_chat_handler(author_handler)
         req = FakeReq({"messages": [{"role": "user", "content": "會逾時"}]})
+        body = None
         resp = asyncio.run(handler(req))
-        eng = _json.loads(resp.body.decode())["engine"]
-        assert eng == "laap-timeout", f"應降級 engine=laap-timeout: {eng}"
+        body = _json.loads(resp.body.decode())
+        eng = body["engine"]
+        content = body["choices"][0]["message"]["content"]
+        assert eng in ("psi-respond", "psi-llm", "laap-timeout"), \
+            f"逾時應落 psi 路或 laap-timeout: {eng}"
+        assert content, "逾時降級不可回空 content"
+        assert content != "太慢", "作者逾時結果不該被採用"
     finally:
         del sys.modules["laap_brain_api"]
-    print("E. 逾時降級（不 hang）: OK")
+    print(f"E. 逾時降級（不 hang, RACE 語義）: OK — engine={eng}")
 
     print("ALL CHATFLOW CHECKS PASSED")
 

@@ -329,13 +329,19 @@ def _make_chat_handler(orig_handler):
         user_turn = _is_user_turn(body) and not _is_harness_noise(user_msg)
         fed = _feed(user_msg) if user_turn else None
 
-        # 忙碌保護：如果 LAAP 工具正在執行中，阻止新對話打斷
+        # 忙碌保護：只擋「互斥通道」工具（scream-ask/scream-task — 新對話會真的
+        # 打斷 Q&A/任務往返）。一般工具（gbrain/web-search/agency 背景查詢）不擋 —
+        # 有串流後併發聊天無害，agency 跑 5-9s 查詢時把真使用者擋掉才是傷害
+        # （實測撞過：check 全被 laap-busy 頂回）。ts>120s 視為殘留不擋。
+        _EXCLUSIVE_TOOLS = ("scream-ask", "scream-task")
         if user_turn:
             try:
                 import json as _json
                 with open("/tmp/laap-tool-status.json") as _f:
                     _st = _json.load(_f)
-                if _st.get("status") in ("start", "running"):
+                if _st.get("status") in ("start", "running") \
+                   and _st.get("tool") in _EXCLUSIVE_TOOLS \
+                   and time.time() - _st.get("ts", 0) < 120:
                     _busy_msg = f"（正在執行 {_st.get('description', '工作')}，請稍等，完成後會通知你。）"
                     model = body.get("model", "laap-core")
                     messages = body.get("messages", [])
@@ -528,15 +534,16 @@ async def _tool_chat(request, web, body: dict, fed):
     卸載 + timeout，作者管線完全不在迴路）。engine=psi-llm-tools。
     stream=True 時使用 respond_tools_stream 做真串流（含 thinking token）。
     失敗降級為說明性 content（回合不炸，TUI 不掛）。"""
-    _post_tool_outcomes(body)   # 工具結果 → 情緒事件佇列（下個 psi tick 生效）
     model = body.get("model", "laap-core")
     messages = body.get("messages", [])
     prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
     is_stream = body.get("stream", False)
 
+    # 延遲 psi_state：工具回圈（fed=None, 非使用者回合）跳過 psi 注入
     psi_state = fed[0] if fed else None
     delta = fed[1] if fed else None
-    if psi_state is None:   # 工具 round-trip 沒餵 psi，但身份塊還是要有最新狀態
+    _is_user = _is_user_turn(body)
+    if psi_state is None and _is_user:
         try:
             from laap.startup import get_psi_core
             psi = get_psi_core()
@@ -556,44 +563,31 @@ async def _tool_chat(request, web, body: dict, fed):
         rid = f"laap-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
 
-        # 執行緒安全 buffer（替代 asyncio.Queue + event loop 開銷）
-        import threading as _th
-        _buf: list = []
-        _lock = _th.Lock()
-        _sig = _th.Event()
+        # 推遲 tool outcomes I/O（fire-and-forget，不擋 hot path）
+        try:
+            _post_tool_outcomes(body)
+        except Exception:
+            pass
+
+        # ⚠️ 這裡曾用 threading.Event.wait 直接擋在 event loop 主線程上 —
+        # 每個串流工具請求凍整個 loop 最長 125s：/health 逾時 → watchdog 殺行程、
+        # 其他 in-flight 回應 IncompleteRead（2026-07-17 實測，第三次踩同型坑，
+        # 前科 9b904a3）。正確做法 = _queue_pump（thread → call_soon_threadsafe →
+        # 主 loop asyncio.Queue）+ await wait_for(queue.get())，loop 不被擋。
+        # pump 結束必投 None 哨兵，逾時不再是常態收場。
+        queue: asyncio.Queue = asyncio.Queue()
         saw_tool_calls = False
-        _err: list = []
-
-        def _producer():
-            try:
-                for ev in respond_tools_stream(body, psi_state, delta):
-                    with _lock:
-                        _buf.append(ev)
-                    _sig.set()
-            except Exception as e:
-                with _lock:
-                    _err.append(str(e))
-                _sig.set()
-
         loop = asyncio.get_event_loop()
-        loop.run_in_executor(None, _producer)
+        loop.run_in_executor(None, _queue_pump, loop, queue,
+                             respond_tools_stream(body, psi_state, delta))
 
         try:
             while True:
-                while not _buf and not _err:
-                    got = _sig.wait(timeout=_TOOLCHAT_TIMEOUT_S)
-                    _sig.clear()
-                    if not got:
-                        raise asyncio.TimeoutError()
-                with _lock:
-                    if _err:
-                        ev = {"type": "error", "text": _err.pop(0)}
-                    else:
-                        ev = _buf.pop(0)
+                ev = await asyncio.wait_for(queue.get(),
+                                            timeout=_TOOLCHAT_TIMEOUT_S)
                 if ev is None:
                     break
                 if ev["type"] == "reasoning":
-                    saw_tool_calls = True
                     chunk = _sse_chunk(rid, created, model,
                                        delta={"reasoning": ev["text"]})
                     await resp.write(chunk.encode("utf-8"))
@@ -696,20 +690,6 @@ async def _stream_sse(request, web, result: dict, model: str):
     rid = f"laap-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-
-def _sse_chunk(rid: str, created: int, model: str, delta: dict,
-               finish_reason: str = None) -> str:
-    """建立單筆 SSE chunk（OpenAI delta 格式）。"""
-    choice = {"index": 0, "delta": delta}
-    if finish_reason:
-        choice["finish_reason"] = finish_reason
-    data = json.dumps({
-        "id": rid, "object": "chat.completion.chunk",
-        "created": created, "model": model,
-        "choices": [choice],
-    })
-    return f"data: {data}\n\n"
-
     def chunk(delta: dict, fin_=None) -> bytes:
         return ("data: " + json.dumps({
             "id": rid, "object": "chat.completion.chunk", "created": created,
@@ -739,11 +719,26 @@ def _sse_chunk(rid: str, created: int, model: str, delta: dict,
     return resp
 
 
+def _sse_chunk(rid: str, created: int, model: str, delta: dict,
+               finish_reason: str = None) -> str:
+    """建立單筆 SSE chunk（OpenAI delta 格式）— 工具模式串流路徑用。"""
+    choice = {"index": 0, "delta": delta}
+    if finish_reason:
+        choice["finish_reason"] = finish_reason
+    data = json.dumps({
+        "id": rid, "object": "chat.completion.chunk",
+        "created": created, "model": model,
+        "choices": [choice],
+    })
+    return f"data: {data}\n\n"
+
+
 async def _sse_from_queue(request, web, q: "asyncio.Queue", model: str,
-                          engine: str, first_ev: dict = None):
-    """把事件佇列即時寫成 OpenAI SSE。事件: {"type":"token"|"tool_status","text"}，
-    None = 結束哨兵。token 原樣出；tool_status 以獨立行出（前後補換行）。
-    最終 chunk 帶 engine 欄位（aris-chat 靠它顯示引擎標籤）。"""
+                          engine: str, first_ev: dict = None, cancel=None):
+    """把事件佇列即時寫成 OpenAI SSE。事件: {"type":"token"|"reasoning"|"tool_status","text"}，
+    None = 結束哨兵。token 原樣出；reasoning 走 delta.reasoning（scream 渲染 🧠）；
+    tool_status 以獨立行出（前後補換行）。最終 chunk 帶 engine 欄位。
+    客戶端斷線 → set cancel（pump 停止迭代 → GeneratorExit 中止工具子行程）。"""
     resp = web.StreamResponse(headers={
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -763,43 +758,60 @@ async def _sse_from_queue(request, web, q: "asyncio.Queue", model: str,
             payload.update(extra)
         return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode()
 
-    await resp.write(chunk({"role": "assistant"}))
-
     async def write_ev(ev: dict) -> None:
+        kind = ev.get("type")
         text = ev.get("text", "")
-        if ev.get("type") == "tool_status":
+        if not text:
+            return
+        if kind == "reasoning":
+            await resp.write(chunk({"reasoning": text}))
+            return
+        if kind in ("tool_status", "error"):
             text = f"\n{text}\n"
-        if text:
-            await resp.write(chunk({"content": text}))
+        await resp.write(chunk({"content": text}))
 
-    if first_ev is not None:
-        await write_ev(first_ev)
-    while True:
-        try:
-            ev = await asyncio.wait_for(q.get(), timeout=_STREAM_IDLE_S)
-        except asyncio.TimeoutError:
-            await resp.write(chunk({"content": "\n（串流逾時中斷）"}))
-            break
-        if ev is None:
-            break
-        await write_ev(ev)
-    await resp.write(chunk({}, "stop", extra={"engine": engine}))
-    await resp.write(b"data: [DONE]\n\n")
-    await resp.write_eof()
+    try:
+        await resp.write(chunk({"role": "assistant"}))
+        if first_ev is not None:
+            await write_ev(first_ev)
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=_STREAM_IDLE_S)
+            except asyncio.TimeoutError:
+                await resp.write(chunk({"content": "\n（串流逾時中斷）"}))
+                break
+            if ev is None:
+                break
+            await write_ev(ev)
+        await resp.write(chunk({}, "stop", extra={"engine": engine}))
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+    except (ConnectionResetError, ConnectionError, OSError) as e:
+        # 客戶端斷線：叫停 pump（工具子行程隨 GeneratorExit 被殺，不再白跑）
+        if cancel is not None:
+            cancel.set()
+        logger.debug(f"[chatflow] SSE 客戶端斷線: {e}")
     return resp
 
 
-def _queue_pump(loop, q: "asyncio.Queue", gen) -> None:
+def _queue_pump(loop, q: "asyncio.Queue", gen, cancel=None) -> None:
     """executor thread：迭代 sync generator，事件轉投 event loop 的佇列。
-    結束（正常/異常）必投 None 哨兵。"""
+    結束（正常/異常）必投 None 哨兵。cancel set 後停止迭代並 close 生成器
+    （GeneratorExit 一路傳到 _popen_lines 的 finally → 子行程被殺）。"""
     def emit(ev):
         loop.call_soon_threadsafe(q.put_nowait, ev)
     try:
         for ev in gen:
+            if cancel is not None and cancel.is_set():
+                break
             emit(ev)
     except Exception as e:
-        emit({"type": "tool_status", "text": f"（串流異常: {e}）"})
+        emit({"type": "error", "text": f"（串流異常: {e}）"})
     finally:
+        try:
+            gen.close()
+        except Exception:
+            pass
         emit(None)
 
 
@@ -818,21 +830,25 @@ async def _stream_live(request, web, fed, user_msg: str, messages: list, model: 
 
     memories = _take_pending_memories()   # 零等待：只拿上一輪遲到的召回
     hist = [m for m in messages if m.get("role") in ("user", "assistant")][:-1]
+    import threading
+    cancel = threading.Event()
     loop = asyncio.get_event_loop()
     q: asyncio.Queue = asyncio.Queue()
     gen = respond_stream(user_msg, fed[0], history=hist,
                          memories=memories, delta=fed[1])
-    loop.run_in_executor(None, _queue_pump, loop, q, gen)
+    loop.run_in_executor(None, _queue_pump, loop, q, gen, cancel)
 
     try:
         first = await asyncio.wait_for(q.get(), timeout=_STREAM_FIRST_S)
     except asyncio.TimeoutError:
         logger.warning(f"[chatflow] 串流首事件逾時 {_STREAM_FIRST_S}s → 落回 RACE")
+        cancel.set()   # 降級後 pump 不再白跑（工具子行程隨 GeneratorExit 中止）
         return None
     if first is None:   # generator 沒 yield 任何事件（LLM off / 無 key / 空回應）
         return None
     return await _sse_from_queue(request, web, q, model,
-                                 engine="psi-llm-stream", first_ev=first)
+                                 engine="psi-llm-stream", first_ev=first,
+                                 cancel=cancel)
 
 
 async def _stream_tool_test(request, web, model: str):
@@ -853,10 +869,13 @@ async def _stream_tool_test(request, web, model: str):
             else:
                 yield {"type": "tool_status", "text": ev["text"]}
 
+    import threading
+    cancel = threading.Event()
     loop = asyncio.get_event_loop()
     q: asyncio.Queue = asyncio.Queue()
-    loop.run_in_executor(None, _queue_pump, loop, q, gen())
-    return await _sse_from_queue(request, web, q, model, engine="tool-stream-test")
+    loop.run_in_executor(None, _queue_pump, loop, q, gen(), cancel)
+    return await _sse_from_queue(request, web, q, model,
+                                 engine="tool-stream-test", cancel=cancel)
 
 
 def install() -> bool:

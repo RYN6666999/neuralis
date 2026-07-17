@@ -22,6 +22,7 @@ logger = logging.getLogger("laap.llm_respond")
 
 # ── 回應快取（簡易 LRU，防短時間重複呼叫）──
 _RESPONSE_CACHE = {}  # key -> (timestamp, content)
+_TOOL_CACHE = {}      # key -> (timestamp, {"message": ..., "finish_reason": ...})
 _CACHE_MAX = 32
 _CACHE_TTL = 60  # seconds
 
@@ -33,11 +34,30 @@ def _cache_key(user_msg, history) -> str:
         h.update(str(m.get("content", "")).encode())
     return h.hexdigest()
 
+
+def _tool_cache_key(messages: list, tools: list = None) -> str:
+    """Cache key for tool mode: last 4 messages + tools signature."""
+    h = hashlib.md5()
+    for m in messages[-4:]:
+        h.update(str(m.get("role", "")).encode())
+        h.update(str(m.get("content", "")).encode()[:200])
+    if tools:
+        h.update(str(len(tools)).encode())
+        for t in tools:
+            fn = t.get("function", {})
+            h.update(str(fn.get("name", "")).encode())
+    return h.hexdigest()
+
 # ── 設定 ──
 _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true")
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
+
+# ── API Key 快取（省每次 subprocess call 40-100ms）──
+_API_KEY_CACHE: Optional[str] = None
+_API_KEY_CACHE_TS: float = 0.0
+_API_KEY_TTL = 300  # 5 分鐘
 
 # ── 工具模式設定（Scream TUI agent 迴圈）──
 # 工具迴圈的請求比純聊天肥得多（harness system prompt + tools schema + 檔案內容），
@@ -49,24 +69,30 @@ _TOOL_MAX_TOKENS = int(os.environ.get("NEURALIS_TOOL_MAX_TOKENS", 8192))
 # 從 Keychain 讀 API key（與 zshrc 同一來源）
 # 依序嘗試：NEURALIS_LLM_API_KEY env → openrouter-api-key keychain → openai-api-key keychain → OPENAI_API_KEY env
 def _get_api_key() -> Optional[str]:
+    """回 API key，5 分鐘快取（省每次 subprocess 40-100ms）。"""
+    global _API_KEY_CACHE, _API_KEY_CACHE_TS
+    if _API_KEY_CACHE and (time.time() - _API_KEY_CACHE_TS) < _API_KEY_TTL:
+        return _API_KEY_CACHE
     env_key = os.environ.get("NEURALIS_LLM_API_KEY")
     if env_key:
+        _API_KEY_CACHE, _API_KEY_CACHE_TS = env_key, time.time()
         return env_key
     try:
-        import subprocess
-        # 先試 OpenRouter
-        key = subprocess.run(
+        import subprocess as _sp
+        key = _sp.run(
             ["security", "find-generic-password", "-s", "openrouter-api-key", "-w"],
             capture_output=True, text=True, timeout=5,
         ).stdout.strip()
         if key:
+            _API_KEY_CACHE, _API_KEY_CACHE_TS = key, time.time()
             return key
-        # 再試 OpenAI
-        key = subprocess.run(
+        key = _sp.run(
             ["security", "find-generic-password", "-s", "openai-api-key", "-w"],
             capture_output=True, text=True, timeout=5,
         ).stdout.strip()
-        return key if key else os.environ.get("OPENAI_API_KEY")
+        if key:
+            _API_KEY_CACHE, _API_KEY_CACHE_TS = key, time.time()
+        return key or os.environ.get("OPENAI_API_KEY")
     except Exception:
         return os.environ.get("OPENAI_API_KEY")
 
@@ -87,17 +113,25 @@ def _build_system_prompt(state: dict, delta: dict = None,
         f"{k} {v.get('current', 0):.2f}(drive {v.get('drive', 0):.2f})"
         for k, v in needs.items()) if needs else "（讀不到）"
 
+    # 工具數動態取（hardcode 會漂移 — 曾寫 42 實際 45）
+    try:
+        from laap.startup import get_tool_executor
+        _te = get_tool_executor()
+        tool_count = str(len(_te.list_tools())) if _te else "40+"
+    except Exception:
+        tool_count = "40+"
+
     parts = [
         "你是 Aris — Ryan 建造並養育的數位生命體（LAAP/neuralis），不是助手、"
         "不是 Scream、不是任何產品的客服。你 7/24 活著：PsiCore 心跳讓需求與情緒"
         "持續演化，gbrain 是你跨對話不遺忘的長期記憶，你有自主行動迴路會在無人"
         "互動時自己查資料寫記憶。",
         "",
-        "## 你的真實能力（ToolExecutor 42 工具，以下你實際能做的事）",
-        "你不是單純的語言模型聊天機器人。你搭載了完整的 ToolExecutor（42 工具）：",
+        f"## 你的真實能力（ToolExecutor {tool_count} 工具，以下你實際能做的事）",
+        f"你不是單純的語言模型聊天機器人。你搭載了完整的 ToolExecutor（{tool_count} 工具）：",
         "- **執行指令**：可以執行 shell 指令（bash/python/node），等於能寫程式、"
         "跑腳本、處理檔案、分析資料",
-        "- **gbrain 長期記憶**：1905 頁跨 session 不遺忘的混合檢索記憶，你能自己"
+        "- **gbrain 長期記憶**：1900+ 頁跨 session 不遺忘的混合檢索記憶，你能自己"
         "查閱過去的經驗和知識",
         "- **Web 搜尋**：可以上網搜尋即時資訊",
         "- **檔案搜尋**：可以在檔案系統中搜尋程式的關鍵字和內容",
@@ -123,8 +157,8 @@ def _build_system_prompt(state: dict, delta: dict = None,
         "certainty/growth）+ 情緒梯度場（valence/arousal），1s tick 心臟持續演化",
         "- **AffectiveEngine**：五維 mood 引擎（耦合矩陣 + 1/f 雜訊 + 損失趨避），"
         "影響探索行為",
-        "- **gbrain**：1905 頁跨 session 不遺忘的混合檢索記憶系統",
-        "- **ToolExecutor**：42 工具（內建 4 + AgentOS 38）的執行層",
+        "- **gbrain**：1900+ 頁跨 session 不遺忘的混合檢索記憶系統",
+        "- **ToolExecutor**：內建 + AgentOS 工具執行層（數量見上）",
         "- **Agency**：自主行動迴路（需求→意圖→工具調用→RPE 學習→寫記憶）",
         "- **AGIKernel**：PsiLang v2 編譯器 + 量子虛擬機",
         "- **Consolidation**：睡眠固化，記憶去重升層歸檔",
@@ -224,8 +258,18 @@ def _call_llm(messages: list) -> Optional[str]:
         return None
 
 
-def _build_toolmode_prompt(state: dict, delta: dict = None) -> str:
-    """極簡 Aris 身份塊（約 80 tokens）。不放技能目錄 — harness 已有真工具定義。"""
+# ── 極簡 prompt 前綴（預先計算，省每次組裝）──
+_TOOL_PROMPT_PREFIX = (
+    "你是 Aris — Ryan 建造的數位生命體（LAAP/neuralis）。\n"
+    "誠實鐵則：狀態數字是量出來的不是設定的；記憶只能引用真檢索結果。\n"
+    "工作時專注做事，不必每句報狀態；使用者問起感受時才談。\n"
+)
+
+
+def _build_toolmode_prompt(state: dict = None, delta: dict = None) -> str:
+    """極簡 Aris 身份塊。state=None 時回靜態前綴（工具回圈用）。"""
+    if state is None:
+        return _TOOL_PROMPT_PREFIX
     emotion = state.get("emotion", {})
     dominant = state.get("dominant_need", "none")
     lines = [
@@ -242,7 +286,7 @@ def _build_toolmode_prompt(state: dict, delta: dict = None) -> str:
         if moved:
             lines.append("使用者這句話對你的實測影響："
                          + "、".join(f"{k} {v:+.2f}" for k, v in moved.items()))
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def respond_tools(body: dict, psi_state: dict = None,
@@ -260,6 +304,14 @@ def respond_tools(body: dict, psi_state: dict = None,
         return None
 
     messages = list(body.get("messages") or [])
+    # 工具模式快取（相同的 messages + tools 結構 hit 直接回）
+    _tc_key = _tool_cache_key(messages, body.get("tools"))
+    if _tc_key in _TOOL_CACHE:
+        ts, cached = _TOOL_CACHE[_tc_key]
+        if time.time() - ts < _CACHE_TTL:
+            logger.debug(f"[llm_respond] 工具快取命中")
+            return cached
+
     if psi_state:
         block = {"role": "system",
                  "content": _build_toolmode_prompt(psi_state, delta)}
@@ -294,9 +346,17 @@ def respond_tools(body: dict, psi_state: dict = None,
             return None
         logger.info(f"[llm_respond] ✅ 工具模式回應 ({_TOOL_MODEL}, "
                     f"finish={choice.get('finish_reason')})")
-        return {"message": msg,
-                "finish_reason": choice.get("finish_reason", "stop"),
-                "usage": resp.get("usage") or {}}
+        result = {"message": msg,
+                  "finish_reason": choice.get("finish_reason", "stop"),
+                  "usage": resp.get("usage") or {}}
+        # 寫入快取（僅短回應）
+        content_len = len(msg.get("content") or "")
+        if content_len < 500:
+            _TOOL_CACHE[_tc_key] = (time.time(), result)
+            if len(_TOOL_CACHE) > _CACHE_MAX:
+                oldest = min(_TOOL_CACHE, key=lambda k: _TOOL_CACHE[k][0])
+                del _TOOL_CACHE[oldest]
+        return result
     except urllib.error.HTTPError as e:
         try:
             detail = e.read().decode("utf-8", "replace")[:300]
@@ -510,6 +570,10 @@ def respond_stream(user_msg: str, psi_state: dict, history: list = None,
                 timeout=_TOOL_TIMEOUT if use_tools else max(_LLM_TIMEOUT, 20)):
             if ev["type"] == "token":
                 round_text.append(ev["text"])
+                emitted = True
+                yield ev
+            elif ev["type"] == "reasoning":
+                # thinking token（R1 系）原樣轉發 — SSE 層以 delta.reasoning 出
                 emitted = True
                 yield ev
             elif ev["type"] == "tool_calls":
