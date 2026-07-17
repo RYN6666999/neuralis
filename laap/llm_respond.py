@@ -568,8 +568,58 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
     if calls:
         yield {"type": "tool_calls", "calls": [calls[i] for i in sorted(calls)]}
     elif not saw_token:
-        # 整條 stream 零 token 零 call — 上游回了非 SSE 錯誤 body 或空 choices，
-        # 靜默吞掉 = caller 無聲斷尾。給出可回溯的錯誤。
+        # 空串流：上游回了空 response（無 token、無 calls）— 重試一次
+        for attempt in range(_RETRY_MAX):
+            logger.info(f"[llm_respond] 空串流，重試 {attempt+1}/{_RETRY_MAX}")
+            time.sleep(_RETRY_BASE_DELAY * (2 ** attempt))
+            # 重新嘗試（重新建立連線）
+            try:
+                req2 = urllib.request.Request(
+                    f"{_LLM_BASE_URL}/chat/completions",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json",
+                             "Authorization": f"Bearer {key}"},
+                )
+                resp2 = urllib.request.urlopen(req2, timeout=timeout or max(_LLM_TIMEOUT, 30))
+            except Exception as e:
+                detail = f"重試連線失敗: {e}"
+                stray.append(detail)
+                continue
+            # 重新解析串流
+            saw_token2 = False
+            calls2 = {}
+            try:
+                for raw2 in resp2:
+                    line2 = raw2.decode("utf-8", "replace").strip()
+                    if not line2.startswith("data: "):
+                        continue
+                    d2 = line2[6:]
+                    if d2 == "[DONE]":
+                        break
+                    try:
+                        ch2 = json.loads(d2)
+                    except json.JSONDecodeError:
+                        continue
+                    dl2 = (ch2.get("choices") or [{}])[0].get("delta") or {}
+                    if dl2.get("reasoning") or dl2.get("reasoning_content"):
+                        yield {"type": "reasoning", "text": dl2.get("reasoning") or dl2.get("reasoning_content")}
+                    if dl2.get("content"):
+                        saw_token2 = True
+                        yield {"type": "token", "text": dl2["content"]}
+                    for tc2 in dl2.get("tool_calls") or []:
+                        s2 = calls2.setdefault(tc2.get("index", 0), {"id": "", "name": "", "arguments": ""})
+                        if tc2.get("id"): s2["id"] = tc2["id"]
+                        fn2 = tc2.get("function") or {}
+                        if fn2.get("name"): s2["name"] = fn2["name"]
+                        if fn2.get("arguments"): s2["arguments"] += fn2["arguments"]
+            except Exception:
+                continue
+            if saw_token2 or calls2:
+                logger.info(f"[llm_respond] 重試成功")
+                if calls2:
+                    yield {"type": "tool_calls", "calls": [calls2[i] for i in sorted(calls2)]}
+                return
+        # 全部重試失敗
         detail = " | ".join(stray)[:200] or "空回應（無 token、無 tool_calls）"
         yield {"type": "error", "text": f"LLM 空串流: {detail}"}
 
