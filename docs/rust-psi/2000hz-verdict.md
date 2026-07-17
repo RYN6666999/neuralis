@@ -1,9 +1,17 @@
-# 2000Hz Verdict — the author's "Rust PSI core at 2000Hz" claim
+# 2000Hz Verdict — the "Rust PSI core at 2000Hz" claim
 
-**Scope:** this document judges **one** thing — the claim, made in the `lorryjovens-hub/laap-AGI`
-README, that a Rust PSI core runs at 2000Hz / 500µs. Evidence is in
-`docs/rust-psi/evidence-ledger.md`. Grades: E0 direct, E1 author claim, E2 indirect,
-I inference, D Neuralis design.
+**Scope:** this document judges **one** thing — the assertion that a Rust PSI core runs at
+2000Hz / 500µs. Evidence is in `docs/rust-psi/evidence-ledger.md`. Grades: E0 direct,
+E1 author claim, E2 indirect, I inference, D Neuralis design.
+
+> **Read this first — the author already retracted the headline claim.**
+> "2000Hz / Rust PSI Core" appears only on `main`, which is **not** the repo's default branch
+> and is 3 days older than it. On the **default** branch (`feat/port-old-modules`, what any
+> visitor or `git clone` actually gets) the `2000Hz|Rust PSI` count is **0**; the author
+> relabelled it 「Python fallback；Rust binary optional」, 「~100 ms」, and 「Rust 原生 PSI 核心
+> …… 属于可选扩展或后续阶段」 (E0-12). Their own commit called it an "honest cleanup", and the
+> content matches the message. This document judges the **residual** claim that survives on
+> the default branch — not the superseded copy on `main`.
 
 ---
 
@@ -11,10 +19,18 @@ I inference, D Neuralis design.
 
 # C — CLAIMED, NOT VERIFIED
 
-The 2000Hz Rust PSI core exists in public form only as README assertions (E1) and launcher
-path references (E2). No Rust PSI source, no `Cargo.toml` for a PSI crate, no compiled PSI
-binary, no release, and no benchmark exists in any first-party public artifact. A real
-first-party Rust binary **does** exist — and it is not a PSI engine.
+**What is being judged:** the residual assertion on the default branch (README L515) that the
+native Rust core 「可达 500 μs」 ("can reach 500µs" = 2000Hz) as an *optional external binary*,
+while the stated actual heartbeat is ~100 ms.
+
+That residual assertion carries no source, no `Cargo.toml` for a PSI crate, no compiled PSI
+binary, no release, and no benchmark in any first-party public artifact (E0-1, E0-11). It
+survives only as prose (E1) plus launcher path references (E2). A real first-party Rust
+binary **does** exist — and it is not a PSI engine (E0-4).
+
+**The superseded `main` copy** (2000Hz headline, "psi_core/ # Rust source", "Cargo.toml")
+would receive the same letter on the same evidence — but it is no longer the author's
+position and must not be quoted as if it were.
 
 ## Why C and not the others
 
@@ -27,8 +43,9 @@ first-party Rust binary **does** exist — and it is not a PSI engine.
 
 ## Where the "2000Hz" number comes from
 
-Single first-party origin: the `laap-AGI` README on `main`
-(`8393eb58f733419ade477c713beb52c0d970062b`).
+Single first-party origin: the `laap-AGI` README on the **older, non-default** `main` branch
+(`8393eb58f733419ade477c713beb52c0d970062b`, 2026-07-12) — **superseded** on the default
+branch 3 days later (E0-12).
 
 - L67 — "Every heartbeat of the Rust PSI core at 2000Hz" (manifesto prose)
 - L83 — table: "Rust PSI Core (5 needs, 2000Hz) | 500 microseconds"
@@ -46,9 +63,10 @@ The claim never states whether 2000Hz denotes internal state update rate, `lates
 rate, IPC rate, or marketing shorthand. The public material makes it **internally
 inconsistent** two different ways:
 
-1. **README vs README.** L83/L104/L146 say 2000Hz (500µs). L372 of the same README says
-   "PSI Heartbeat | 100ms | Rust-native cognitive rhythm" — 10 Hz. Both describe the same
-   component. They differ by 200×.
+1. **README vs README.** On `main`, L83/L104/L146 say 2000Hz (500µs) while L372 of the *same*
+   README says "PSI Heartbeat | 100ms | Rust-native cognitive rhythm" — 10 Hz. Both describe
+   the same component. They differ by 200×. The author resolved this on the default branch in
+   favour of the slower figure: 「PSI 核心心跳 | ~100 ms | Python fallback」 (E0-12).
 2. **Claim vs documented protocol.** The only documented PSI protocol writes `latest.json`
    on **every tick** (E2-5; `psi_core/engine.py` `_write_state` inside the loop, and
    `psi_core_integration.py` "PSI 引擎每 tick 写入 state/latest.json"). At 2000Hz that is
@@ -124,13 +142,18 @@ on `main`). Summarized here so this verdict stands alone:
 
 ## Standing correction for downstream docs
 
-Do not write "LAAP has a Rust PSI core at 2000Hz". On public evidence the accurate statements
-are:
+Do not write "LAAP has a Rust PSI core at 2000Hz". Also do not write "the author claims a
+2000Hz Rust PSI core" in the present tense — on their default branch, they no longer do. On
+public evidence the accurate statements are:
 
-1. The author's README **claims** a Rust PSI core at 2000Hz; the claim is unverified (C).
-2. The author's only public PSI **implementation** is Python, default 100ms tick (10Hz),
+1. A 2000Hz Rust PSI core was claimed on the **older, non-default `main`** branch and was
+   **retracted** on the default branch, which now says "Python fallback; Rust binary optional"
+   and ~100 ms (E0-12).
+2. What survives on the default branch is a weaker, unverified assertion that an *optional
+   external* Rust binary 「可达 500 μs」 — verdict C.
+3. The author's only public PSI **implementation** is Python, default 100ms tick (10Hz),
    writing `latest.json` every tick (E0-3).
-3. The author's only public Rust **artifact** is a PyO3 module for token/memory/session
+4. The author's only public Rust **artifact** is a PyO3 module for token/memory/session
    utilities, not PSI (E0-4).
-4. Neuralis's own Rust engine independently reaches a measured 2000Hz (D, E0) — a separate
-   fact that proves nothing about (1).
+5. Neuralis's own Rust engine independently reaches a measured 2000Hz (D, E0) — a separate
+   fact that proves nothing about (1) or (2).

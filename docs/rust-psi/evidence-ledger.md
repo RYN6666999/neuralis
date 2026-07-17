@@ -17,9 +17,16 @@ Rust PSI binary/source cannot be located, the entry says **cannot be verified**.
 
 | Source | Ref / anchor |
 |---|---|
-| Author repo `lorryjovens-hub/laap-AGI` — branch `main` | `8393eb58f733419ade477c713beb52c0d970062b` |
-| Author repo — branch `feat/port-old-modules` | `df111c732b029d3c1f6769bf2f96434bd22cebff` |
+| Author repo — **default branch** `feat/port-old-modules` | `df111c732b029d3c1f6769bf2f96434bd22cebff` (2026-07-15) |
+| Author repo — branch `main` (**not** the default branch; older) | `8393eb58f733419ade477c713beb52c0d970062b` (2026-07-12) |
 | Author repo — branch `feat/env-config-hermes` | `b055ac0161f7d001a59f8e03965f8c1403a3d890` |
+| Author repo metadata (GitHub API) | `default_branch=feat/port-old-modules`, `license=Apache-2.0`, `forks=13`, `archived=false`, releases=0, tags=0 |
+
+> **Read this first.** `main` is **not** the default branch of `laap-AGI` and is 3 days older
+> than the default branch. The 2000Hz claims live on `main`; the default branch — what a
+> visitor or `git clone` actually gets — **no longer makes them** (E0-12). Any citation of
+> `main`'s README as "the author's claim" without that context is unfair and is corrected
+> throughout this ledger.
 | Author repo — PRs | `refs/pull/1/head` = b055ac0, `refs/pull/2/head` = 8393eb5 |
 | PyPI `laap` (owner: lorryjovens per PyPI/libraries.io UI) | JSON API `https://pypi.org/pypi/laap/json`; versions 0.3.0, 0.3.1, 0.3.2 |
 | Neuralis repo `RYN6666999/neuralis` | base `ab14499ec1d5f30e84b85c56e6c780c7eb4d6913` |
@@ -159,17 +166,50 @@ execution of any packaged code**).
 ### E0-11 — No public Rust PSI package or release
 - **Grade:** E0 (negative)
 - **Claim:** PyPI hosts only the three `laap` versions above (no `-psi` / `aris-psi` variants
-  in this project). The author repo has **no** GitHub releases and **no** tags
-  (`git tag` empty; `for-each-ref` shows only heads + PR refs).
-- **Confidence:** Medium-High for what was checked. **Limits:** a crates.io / third-party
-  mirror search is a lead only; per the quality gate, no third-party result is treated as a
-  conclusion. No first-party Rust PSI crate/release was found.
+  in this project). The author repo has **no** GitHub releases and **no** tags.
+- **Evidence:** `git tag` empty; `for-each-ref` shows only heads + PR refs; first-party
+  GitHub API `repos/lorryjovens-hub/laap-AGI/releases` → `0`, `/tags` → `0`.
+- **Confidence:** High for what was checked. **Limits:** 13 forks exist (API `forks=13`);
+  forks were not treated as author evidence — per the quality gate, third-party content is a
+  lead only, never a conclusion. No first-party Rust PSI crate/release was found.
+
+### E0-12 — The author already retracted the 2000Hz claim on the default branch
+- **Grade:** E0
+- **Claim:** The 2000Hz / "Rust PSI Core" language exists **only** on the older, non-default
+  `main` branch. On the repo's **default** branch (`feat/port-old-modules`, 3 days newer) the
+  count of `2000Hz|Rust PSI` is **0**. The author replaced the claim with an explicit
+  Python-fallback framing.
+- **Original text (default branch, `df111c7`):**
+  - L57 — `Heartbeat : PSI Core (Python fallback; Rust binary optional)`
+  - L110 — 「本仓库是 LAAP 的第一阶段开源形态 …… 一个纯 Python 实现的 PSI Core fallback（无需 Rust 二进制即可运行）。Rust 原生 PSI 核心 …… 属于可选扩展或后续阶段。」
+    ("a pure-Python PSI Core fallback (runs without the Rust binary); the native Rust PSI core
+    … is an optional extension or a later stage")
+  - L264 — 「Rust toolchain（可选；仅当你要编译原生 PSI 核心时才需要）」 (optional)
+  - L416 — `psi_core/  # Python PSI 核心（不依赖 Rust）`
+  - L515 — 「PSI 核心心跳 | ~100 ms | Python fallback；Rust 原生可达 500 μs（可选外部二进制）」
+  - L528 — 「当前为 Python 实现；Rust 原生二进制可选」
+- **Permalink:** https://github.com/lorryjovens-hub/laap-AGI/blob/df111c732b029d3c1f6769bf2f96434bd22cebff/README.md#L110
+- **Chronology:** `main` README 2026-07-12 07:35 (+0800) → `6e5a03f` "fix: honest first-stage
+  cleanup + Python PSI Core fallback" 2026-07-15 00:09, **only on `feat/port-old-modules`** →
+  default-branch README 2026-07-15 01:42. `main` is **not** an ancestor of the default branch
+  (divergent).
+- **Confidence:** High.
+- **Residual claim (still E1, still unverified):** default-branch L515 asserts the native Rust
+  core 「可达 500 μs」 ("can reach 500µs" = 2000Hz) as an **optional external binary**, while
+  stating the actual heartbeat is ~100 ms. That residual assertion carries no source, binary,
+  or benchmark and is what the verdict now judges.
+- **Fairness note:** the author's own commit message called this an "honest cleanup", and the
+  content matches the message. Presenting `main`'s superseded marketing copy as the author's
+  live claim would misrepresent them.
 
 ---
 
 ## E1 — Author claims (README, unproven)
 
-All from `laap-AGI` `main` README.md; none accompanied by source, binary, or benchmark.
+All from `laap-AGI` **`main`** README.md — the **older, non-default** branch (2026-07-12).
+None is accompanied by source, binary, or benchmark. **All of them were superseded 3 days
+later on the default branch (E0-12), where they no longer appear.** They are recorded here as
+the historical origin of the "2000Hz" number, **not** as the author's current position.
 
 ### E1-1 — "Rust PSI core at 2000Hz"
 - **Text (L67):** "Every heartbeat of the Rust PSI core at 2000Hz, every quantum reasoning
