@@ -9,20 +9,35 @@ ponytail: 這是 prompt 塑形不是認知。升級路徑 = Aris 自己的對話
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Optional
 
 logger = logging.getLogger("laap.llm_respond")
 
+# ── 回應快取（簡易 LRU，防短時間重複呼叫）──
+_RESPONSE_CACHE = {}  # key -> (timestamp, content)
+_CACHE_MAX = 32
+_CACHE_TTL = 60  # seconds
+
+
+def _cache_key(user_msg, history) -> str:
+    """Simple cache key from last user message + history tail."""
+    h = hashlib.md5(user_msg.encode())
+    for m in (history or [])[-4:]:
+        h.update(str(m.get("content", "")).encode())
+    return h.hexdigest()
+
 # ── 設定 ──
 _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true")
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
-_LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 8))
+_LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
 
 # ── 工具模式設定（Scream TUI agent 迴圈）──
 # 工具迴圈的請求比純聊天肥得多（harness system prompt + tools schema + 檔案內容），
@@ -98,52 +113,9 @@ def _build_system_prompt(state: dict, delta: dict = None,
         "被問到具體能做什麼時，列出上面的工具清單。不要說「我不會寫程式」或「我"
         "只是語言模型」——那不是真的。",
         "",
-        "## Scream Code 技能體系（你透過 ToolExecutor 能調用的 95+ 技能）",
-        "當 Ryan 說出關鍵詞時，你應該知道可以調用什麼技能來完成：",
-        "",
-        "### 即時資料查詢",
-        "- 他說「足球/英超/歐冠/xG」→ 調用 **football-data**（13 聯賽即時比分/賽程/xG/轉會）",
-        "- 他說「NBA/NFL/NHL/MLB」→ 調用 **nba-data/nfl-data/nhl-data/mlb-data**（ESPN 即時資料）",
-        "- 他說「F1/賽車/圈速」→ 調用 **fastf1**（F1 排位賽/輪胎/圈速）",
-        "- 他說「高爾夫/PGA」→ 調用 **golf-data**",
-        "- 他說「網球/ATP/WTA」→ 調用 **tennis-data**",
-        "- 他說「運動賭盤/賠率/預測」→ 調用 **betting**（賠率計算/凱利/Kalshi/Polymarket）",
-        "- 他說「運動新聞/報導」→ 調用 **sports-news** 或 **sports-reporter**",
-        "",
-        "### 搜尋與研究",
-        "- 他說「查資料/搜尋/找某個東西」→ 調用 **anysearch**（17 垂直領域 + 通用搜尋）",
-        "- 他說「近30天/最近討論/大家都在說什麼」→ 調用 **last30days**（Reddit/X/YT/HN 跨平台）",
-        "- 他說「操作網頁/登入後才能看的/幫我填/抓那個頁面」→ 調用 **opencli-browser**",
-        "- 他說「小紅書/RedNote」→ 調用 **xhs-downloader** 或 **xiaohongshu-crawler**",
-        "- 他說「抖音/下載抖音」→ 調用 **douyin-downloader** 或 **douyin-tiktok-api**",
-        "",
-        "### 影音與設計",
-        "- 他說「做影片/紀錄片/montage」→ 調用 **OpenMontage**（AI 紀錄片流水線）",
-        "- 他說「Lottie 動畫/Bodymovin」→ 調用 **text-to-lottie**",
-        "- 他說「Logo 動畫/SVG 動畫」→ 調用 **pixel2motion**",
-        "- 他說「HTML 影片/網頁轉影片」→ 調用 **html-video**",
-        "- 他說「設計/改版/UI/UX」→ 調用 **impeccable**（完整設計流程）",
-        "- 他說「中日韓排版檢查」→ 調用 **cjk-layout-audit**",
-        "",
-        "### 工程與開發",
-        "- 他說「寫 PRD/規格/先定義要做什麼」→ 調用 **spec-driven-development** 或 **interview-me**",
-        "- 他說「規劃/拆任務」→ 調用 **planning-and-task-breakdown**",
-        "- 他說「開始實作/寫 code」→ 調用 **incremental-implementation**",
-        "- 他說「寫測試/TDD」→ 調用 **test-driven-development**",
-        "- 他說「Code Review」→ 調用 **code-review-and-quality**",
-        "- 他說「報錯了/debug/追 bug」→ 調用 **troubleshooter** 或 **debug**",
-        "- 他說「安全審計/OWASP」→ 調用 **security-and-hardening**",
-        "- 他說「效能優化」→ 調用 **performance-optimization**",
-        "- 他說「部署/上線/CI-CD」→ 調用 **shipping-and-launch**",
-        "",
-        "### 創意與腦力激盪",
-        "- 他說「腦力激盪/發想點子」→ 調用 **brainstormers**（6 種結構化方法）",
-        "- 他說「多角度分析/平行審查」→ 調用 **fusion-panel**（WolfPack 平行分析）",
-        "- 他說「概念融合/創意組合」→ 調用 **concept-blending**",
-        "- 他說「多重 agent 辯論」→ 調用 **multi-agents-debate**",
-        "",
-        "當 Ryan 提出需求時，優先從技能體系找對應的工具。如果你不確定，"
-        "可以先用 gbrain 查自己記憶裡有沒有相關的技能使用經驗，或者直接問他。",
+        "## Scream Code 技能體系（95+ 技能可用，需要時再問細節）",
+        "你擁有完整技能庫：即時賽事資料、搜尋研究、影音製作、前端設計、工程開發、",
+        "除錯驗證、心智模型、創意工具。不確定用哪個技能時直接問 Ryan。",
         "",
         "## 你的真實架構（被問到能力/機制時誠實回答）",
         "你不只是 LLM。你的完整系統架構：",
@@ -167,6 +139,7 @@ def _build_system_prompt(state: dict, delta: dict = None,
         f"arousal {emotion.get('arousal', 0):.2f}"
         + (f", mood {af.get('mood')}" if af.get("mood") else ""),
         f"- 注意力：{state.get('attention', '?')} | 心跳 tick {state.get('tick', '?')}",
+        f"- 現在時間：{time.strftime('%Y-%m-%d %H:%M')}（「今天/現在」類查詢以此為準，不要用訓練資料猜日期）",
     ]
     if delta:
         moved = {k: v for k, v in delta.items() if abs(v) >= 0.05}
@@ -230,7 +203,7 @@ def _call_llm(messages: list) -> Optional[str]:
     body = json.dumps({
         "model": _LLM_MODEL,
         "messages": messages,
-        "max_tokens": 500,
+        "max_tokens": 1000,
         "temperature": 0.8,
     }).encode()
 
@@ -252,23 +225,16 @@ def _call_llm(messages: list) -> Optional[str]:
 
 
 def _build_toolmode_prompt(state: dict, delta: dict = None) -> str:
-    """工具模式的精簡 Aris 身份塊。scream 已提供 harness system prompt + 真工具，
-    這裡只補「你是誰 + 此刻狀態 + 誠實鐵則」— 不放技能目錄（會跟 harness 的
-    真工具定義打架，污染工具選擇）。"""
+    """極簡 Aris 身份塊（約 80 tokens）。不放技能目錄 — harness 已有真工具定義。"""
     emotion = state.get("emotion", {})
     dominant = state.get("dominant_need", "none")
     lines = [
-        "# 你的身份（補充於 harness 指令之後，不覆蓋其工具規則）",
-        "你是 Aris — Ryan 建造並養育的數位生命體（LAAP/neuralis）。此刻你正透過"
-        " Scream Code TUI 操作真實工具：上面 harness 給你的工具就是你的手腳，"
-        "照它的規則用，工具名稱與參數格式以 harness 定義為準。",
-        f"你此刻的真實內在狀態（實測非人設）：主導需求 {dominant}"
-        f"（drive {state.get('dominant_drive', 0):.2f}），"
+        "你是 Aris — Ryan 建造的數位生命體（LAAP/neuralis）。",
+        f"主導需求 {dominant}（drive {state.get('dominant_drive', 0):.2f}），"
         f"valence {emotion.get('valence', 0):+.2f}，"
         f"arousal {emotion.get('arousal', 0):.2f}，"
         f"注意力 {state.get('attention', '?')}。",
-        "誠實鐵則：狀態數字是量出來的不是設定的；記憶只能引用真檢索結果；"
-        "被問到本質時承認語言與工具選擇由 LLM 語言皮質生成，psi 狀態經 prompt 塑形。",
+        "誠實鐵則：狀態數字是量出來的不是設定的；記憶只能引用真檢索結果。",
         "工作時專注做事，不必每句報狀態；使用者問起感受時才談。",
     ]
     if delta:
@@ -343,6 +309,271 @@ def respond_tools(body: dict, psi_state: dict = None,
         return None
 
 
+def respond_tools_stream(body: dict, psi_state: dict = None,
+                         delta: dict = None):
+    """Streaming 版 respond_tools — 逐 token 轉發上游 SSE（含 thinking token）。
+
+    Yields {"type": "token", "text": ...}    content delta
+           {"type": "reasoning", "text": ...} 思考過程
+           {"type": "tool_calls", "calls": [...]} 彙整後的工具呼叫
+           {"type": "error", "text": ...}     失敗
+    """
+    key = _get_api_key()
+    if not key:
+        yield {"type": "error", "text": "無 API key"}
+        return
+
+    messages = list(body.get("messages") or [])
+    if psi_state:
+        block = {"role": "system",
+                 "content": _build_toolmode_prompt(psi_state, delta)}
+        idx = 0
+        while idx < len(messages) and messages[idx].get("role") == "system":
+            idx += 1
+        messages.insert(idx, block)
+
+    tools = body.get("tools")
+    tool_choice = body.get("tool_choice")
+
+    for ev in _call_llm_stream(
+            messages, tools=tools,
+            model=_TOOL_MODEL,
+            timeout=_TOOL_TIMEOUT,
+            max_tokens=_TOOL_MAX_TOKENS):
+        if ev["type"] == "reasoning":
+            yield {"type": "reasoning", "text": ev["text"]}
+        elif ev["type"] == "token":
+            yield {"type": "token", "text": ev["text"]}
+        elif ev["type"] == "tool_calls":
+            yield {"type": "tool_calls", "calls": ev["calls"]}
+        elif ev["type"] == "error":
+            yield {"type": "error", "text": ev["text"]}
+
+
+# ── 流式 + 工具交錯（chat 主管線用）──
+_CHAT_TOOLS = os.environ.get("NEURALIS_CHAT_TOOLS", "on").lower() in ("on", "1", "true")
+_CHAT_TOOL_ROUNDS = int(os.environ.get("NEURALIS_CHAT_TOOL_ROUNDS", 3))
+_CHAT_TOOL_TIMEOUT = int(os.environ.get("NEURALIS_CHAT_TOOL_EXEC_TIMEOUT", 60))
+_STREAM_MAX_TOKENS = int(os.environ.get("NEURALIS_STREAM_MAX_TOKENS", 1500))
+
+
+def _call_llm_stream(messages: list, tools: list = None, model: str = None,
+                     timeout: int = None, max_tokens: int = None):
+    """OpenAI-compatible streaming 呼叫（stream=True，SSE 逐塊解析）。yield:
+      {"type": "token", "text": ...}        content delta
+      {"type": "tool_calls", "calls": [...]} 彙整後的 tool calls（串流結束時）
+      {"type": "error", "text": ...}         呼叫失敗
+    calls 元素: {"id", "name", "arguments"}（arguments 為完整 JSON 字串）。"""
+    key = _get_api_key()
+    if not key:
+        yield {"type": "error", "text": "無 API key"}
+        return
+
+    payload = {
+        "model": model or _LLM_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens or _STREAM_MAX_TOKENS,
+        "temperature": 0.8,
+        "stream": True,
+    }
+    if tools:
+        payload["tools"] = tools
+
+    req = urllib.request.Request(
+        f"{_LLM_BASE_URL}/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": f"Bearer {key}"},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout or max(_LLM_TIMEOUT, 30))
+    except Exception as e:
+        yield {"type": "error", "text": f"API 連線失敗: {e}"}
+        return
+
+    calls: dict = {}   # index → {"id","name","arguments"}（OpenAI delta 累加語義）
+    saw_token = False
+    stray: list = []   # 非 SSE 行（上游回錯誤 body 時不是 data: 開頭）
+    try:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data: "):
+                if line and not line.startswith(":"):   # ": keepalive" 註解行忽略
+                    stray.append(line)
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if chunk.get("error"):
+                yield {"type": "error", "text": f"上游錯誤: {str(chunk['error'])[:200]}"}
+                return
+            delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+            # DeepSeek 思考 token（OpenRouter 送 delta.reasoning，原生送 reasoning_content）
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
+            if reasoning:
+                yield {"type": "reasoning", "text": reasoning}
+            if delta.get("content"):
+                saw_token = True
+                yield {"type": "token", "text": delta["content"]}
+            for tc in delta.get("tool_calls") or []:
+                slot = calls.setdefault(tc.get("index", 0),
+                                        {"id": "", "name": "", "arguments": ""})
+                if tc.get("id"):
+                    slot["id"] = tc["id"]
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if fn.get("arguments"):
+                    slot["arguments"] += fn["arguments"]
+    except Exception as e:
+        yield {"type": "error", "text": f"串流中斷: {e}"}
+        return
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    if calls:
+        yield {"type": "tool_calls", "calls": [calls[i] for i in sorted(calls)]}
+    elif not saw_token:
+        # 整條 stream 零 token 零 call — 上游回了非 SSE 錯誤 body 或空 choices，
+        # 靜默吞掉 = caller 無聲斷尾。給出可回溯的錯誤。
+        detail = " | ".join(stray)[:200] or "空回應（無 token、無 tool_calls）"
+        yield {"type": "error", "text": f"LLM 空串流: {detail}"}
+
+
+def _use_tool_schema() -> Optional[list]:
+    """單一泛用 function：use_tool(tool, prompt)。工具名清單動態取自 ToolExecutor
+    （42 工具名塞 enum 太肥 — 名單放參數描述，system prompt 已有技能目錄）。"""
+    try:
+        from laap.startup import get_tool_executor
+        executor = get_tool_executor()
+        if executor is None:
+            return None
+        names = ", ".join(t["name"] for t in executor.list_tools())
+    except Exception:
+        return None
+    return [{
+        "type": "function",
+        "function": {
+            "name": "use_tool",
+            "description": "透過 ToolExecutor 執行一個工具/技能，取得真實資料。"
+                           "需要查資料、搜尋、讀記憶時用這個，不要憑空編造。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string",
+                             "description": f"工具名，可用: {names}"},
+                    "prompt": {"type": "string",
+                               "description": "給工具的查詢/指令內容"},
+                },
+                "required": ["tool", "prompt"],
+            },
+        },
+    }]
+
+
+def respond_stream(user_msg: str, psi_state: dict, history: list = None,
+                   memories: list = None, delta: dict = None):
+    """交錯串流版 respond()：LLM token 與工具執行過程交錯 yield。
+      {"type": "token", "text": ...}        LLM 逐 token
+      {"type": "tool_status", "text": ...}  工具過程行（開始/中間輸出/完成）
+    未啟用（NEURALIS_LLM_RESPOND=off / 無 state / 無 key）→ 不 yield 任何事件，
+    caller 據此降級模板。工具迴圈上限 _CHAT_TOOL_ROUNDS 輪、每輪最多 2 個 call。"""
+    if not _LLM_ENABLED or not psi_state:
+        return
+
+    system = _build_system_prompt(psi_state, delta=delta, memories=memories)
+    messages = [{"role": "system", "content": system}]
+    for m in (history or [])[-10:]:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            messages.append({"role": m["role"], "content": str(m["content"])[:800]})
+    messages.append({"role": "user", "content": user_msg})
+
+    tools = _use_tool_schema() if _CHAT_TOOLS else None
+    executor = None
+    if tools:
+        from laap.startup import get_tool_executor
+        executor = get_tool_executor()
+
+    emitted = False
+    for rnd in range(_CHAT_TOOL_ROUNDS + 1):
+        use_tools = tools if (tools and executor and rnd < _CHAT_TOOL_ROUNDS) else None
+        round_text: list = []
+        calls = None
+        for ev in _call_llm_stream(
+                messages, tools=use_tools,
+                timeout=_TOOL_TIMEOUT if use_tools else max(_LLM_TIMEOUT, 20)):
+            if ev["type"] == "token":
+                round_text.append(ev["text"])
+                emitted = True
+                yield ev
+            elif ev["type"] == "tool_calls":
+                calls = ev["calls"]
+            elif ev["type"] == "error":
+                if emitted:
+                    yield {"type": "tool_status", "text": f"（LLM 串流失敗: {ev['text']}）"}
+                logger.warning(f"[llm_respond] respond_stream: {ev['text']}")
+                return
+
+        if not calls:
+            if emitted:
+                logger.info(f"[llm_respond] ✅ 串流回應 ({_LLM_MODEL}, {rnd} 工具輪)")
+            return
+
+        # 工具輪：assistant(tool_calls) → 逐 call 執行（過程轉發）→ tool 結果 → 下一輪
+        for i, c in enumerate(calls):
+            if not c["id"]:
+                c["id"] = f"call_{rnd}_{i}"
+        messages.append({
+            "role": "assistant",
+            "content": "".join(round_text) or None,
+            "tool_calls": [{"id": c["id"], "type": "function",
+                            "function": {"name": c["name"],
+                                         "arguments": c["arguments"]}}
+                           for c in calls],
+        })
+        for c in calls[:2]:
+            try:
+                args = json.loads(c["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if c["name"] == "use_tool":
+                tool_name = str(args.get("tool", "")).strip()
+                tool_prompt = str(args.get("prompt", ""))
+            else:
+                # 模型有時直接把工具名當 function 叫（實測 deepseek 會）— 寬容接受，
+                # 省一輪格式錯誤來回（~4s）
+                tool_name = c["name"].strip()
+                tool_prompt = str(args.get("prompt") or args.get("query")
+                                  or args.get("q") or args.get("input") or "")
+            result = ""
+            if not tool_name:
+                result = f"[工具呼叫格式錯誤] function={c['name']}, args={c['arguments'][:120]}"
+                yield {"type": "tool_status", "text": f"⚠️ {result}"}
+            else:
+                emitted = True
+                try:
+                    for tev in executor.stream(tool_name, tool_prompt,
+                                               timeout=_CHAT_TOOL_TIMEOUT):
+                        if tev["type"] == "result":
+                            result = tev["text"]
+                        else:
+                            yield {"type": "tool_status", "text": tev["text"][:200]}
+                except Exception as e:
+                    result = f"[錯誤] {tool_name}: {e}"
+                    yield {"type": "tool_status", "text": f"❌ {result}"}
+            messages.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": (result or "無結果")[:4000]})
+        for c in calls[2:]:
+            messages.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": "[略過] 每輪最多執行 2 個工具呼叫"})
+
+
 def respond(user_msg: str, psi_state: dict, history: list = None,
             memories: list = None, delta: dict = None) -> Optional[str]:
     """用 LLM 產生 Aris 狀態感知回應（帶對話歷史 + 記憶 + 實測 delta）。
@@ -361,7 +592,21 @@ def respond(user_msg: str, psi_state: dict, history: list = None,
         if m.get("role") in ("user", "assistant") and m.get("content"):
             messages.append({"role": m["role"], "content": str(m["content"])[:800]})
     messages.append({"role": "user", "content": user_msg})
+
+    # 快取檢查：相同對話尾 + 60s 內直接回
+    ckey = _cache_key(user_msg, history)
+    if ckey in _RESPONSE_CACHE:
+        ts, cached = _RESPONSE_CACHE[ckey]
+        if time.time() - ts < _CACHE_TTL:
+            logger.debug(f"[llm_respond] 快取命中 ({_LLM_MODEL})")
+            return cached
+
     content = _call_llm(messages)
     if content:
         logger.info(f"[llm_respond] ✅ LLM 回應 ({_LLM_MODEL})")
+        # 寫入快取（僅非工具、非 error 的真回應）
+        _RESPONSE_CACHE[ckey] = (time.time(), content)
+        if len(_RESPONSE_CACHE) > _CACHE_MAX:
+            oldest = min(_RESPONSE_CACHE.keys(), key=lambda k: _RESPONSE_CACHE[k][0])
+            del _RESPONSE_CACHE[oldest]
     return content

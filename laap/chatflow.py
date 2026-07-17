@@ -29,7 +29,11 @@ logger = logging.getLogger("laap.chatflow")
 _CHAT_PATH = "/v1/chat/completions"
 # 作者的 process_with_laap 是同步阻塞函式，卸載到 executor 後才不會凍結 event loop。
 # 逾時降級（executor 版本下 wait_for 有效，因 event loop 沒被阻塞）。
-_CHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_CHAT_TIMEOUT_S", 25))
+_CHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_CHAT_TIMEOUT_S", 8))
+# 交錯串流：等第一個事件的預算（LLM 連線 + 首 token）；之後事件間隔上限
+# （要 ≥ 工具執行 timeout，不然長工具跑到一半會被誤判斷線）。
+_STREAM_FIRST_S = float(os.environ.get("NEURALIS_STREAM_FIRST_S", 12))
+_STREAM_IDLE_S = float(os.environ.get("NEURALIS_STREAM_IDLE_S", 130))
 _BOOT_TS = time.time()
 
 
@@ -146,7 +150,7 @@ def _write_author_state(st: dict) -> None:
 # ponytail: v0 規則表組句，不是認知。天花板 = 模板語感；升級路徑 = 把 st/delta
 # 塞給真 LLM 的 system prompt（等 LAAP 管線接上 LLM 後改走那條）。
 _quoted_recently: deque = deque(maxlen=6)   # 引用過的記憶（避免每輪想起同一件事）
-_MEM_EXTRA_WAIT_S = float(os.environ.get("NEURALIS_PSI_MEMORY_WAIT", 2.5))
+_MEM_EXTRA_WAIT_S = float(os.environ.get("NEURALIS_PSI_MEMORY_WAIT", 1.0))
 _pending_memories: dict = {"ts": 0.0, "lines": []}   # 遲到的召回 → 下一輪「剛想起」
 
 
@@ -181,26 +185,34 @@ def _take_pending_memories() -> list:
 
 def _psi_memories_sync(query: str) -> list[str]:
     """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。
-    去重：近 6 輪引用過的段落不再引（不然同話題每句都想起同一件事，穿幫）。"""
+    去重：近 6 輪引用過的段落不再引（不然同話題每句都想起同一件事，穿幫）。
+    執行前先嘗試取得 gbrain 資源鎖，若鎖被 cron 佔用則跳過（零競爭）。"""
     try:
-        from gbrain_client import get_client, hybrid_hits
-        client = get_client()
-        if client is None:
+        from laap.resource_lock import acquire, release
+        if not acquire("gbrain", timeout=2, ttl=90):
+            logger.debug("[chatflow] gbrain 鎖被佔用，跳過此輪 recall")
             return []
-        hits = hybrid_hits(client, query[:100], 4)
-        out = []
-        for h in hits:
-            if h.get("score", 0) < 0.3:
-                continue
-            t = " ".join((h.get("chunk_text", "") or "").split())
-            key = t[:40]
-            if len(t) < 4 or key in _quoted_recently:
-                continue
-            _quoted_recently.append(key)
-            out.append(t[:80])
-            if len(out) >= 2:
-                break
-        return out
+        try:
+            from gbrain_client import get_client, hybrid_hits
+            client = get_client()
+            if client is None:
+                return []
+            hits = hybrid_hits(client, query[:100], 4)
+            out = []
+            for h in hits:
+                if h.get("score", 0) < 0.3:
+                    continue
+                t = " ".join((h.get("chunk_text", "") or "").split())
+                key = t[:40]
+                if len(t) < 4 or key in _quoted_recently:
+                    continue
+                _quoted_recently.append(key)
+                out.append(t[:80])
+                if len(out) >= 2:
+                    break
+            return out
+        finally:
+            release("gbrain")
     except Exception:
         return []
 
@@ -346,58 +358,127 @@ def _make_chat_handler(orig_handler):
         if body.get("tools"):
             return await _tool_chat(request, web, body, fed)
 
-        # 記憶聯想：與作者管線「平行」召回（gbrain hybrid 實測 5-9s，序列等 = 延遲牆）。
-        # 管線回來後只再等一小段；沒等到就 stash，下一輪用「剛想起」帶出 — 零延遲牆。
+        # 串流管線自測鉤：使用者輸入 stream_test → 直接跑 stream-test 工具，
+        # 逐事件 SSE 出去（不經 LLM，確定性驗證整條交錯串流管線）
+        if user_turn and body.get("stream") \
+           and user_msg.strip().lower().replace("-", "_") == "stream_test":
+            live = await _stream_tool_test(request, web, body.get("model", "laap-core"))
+            if live is not None:
+                return live
+
+        # 交錯串流主路：stream 請求 + 真使用者回合 + LLM 開 → 逐 token 直出，
+        # 工具執行過程交錯顯示。LLM 啞掉（無 key/連不上/零 token）回 None，
+        # 落回下面的三路 RACE（含假串流），行為不比現在差。
+        if user_turn and body.get("stream") and fed:
+            live = await _stream_live(request, web, fed, user_msg,
+                                      body.get("messages", []),
+                                      body.get("model", "laap-core"))
+            if live is not None:
+                return live
+
+        # 記憶聯想：與回應管線「平行」召回（gbrain hybrid 實測 5-9s，序列等 = 延遲牆）。
         memories = []
         mem_task = None
         if user_turn and user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
-            mem_task = asyncio.get_event_loop().run_in_executor(
-                None, _psi_memories_sync, user_msg)
+            loop = asyncio.get_event_loop()
+            mem_task = loop.run_in_executor(None, _psi_memories_sync, user_msg)
 
-        # streaming 也走我們的管線（scream TUI 用 stream:true — 交回作者會繞過
-        # psi-llm 且作者 streaming 路有同步阻塞 event loop 的老 bug）。
-        # 統一：算完 content 後，stream 就用 SSE 送、否則 JSON。
+        # 三路平行：(A) LLM 回應 (B) 作者管線 (C) 記憶召回
+        # RACE：誰先出可用內容就用誰，取消慢的那路。
         model = body.get("model", "laap-core")
         messages = body.get("messages", [])
         prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
-        try:
-            import laap_brain_api as api   # 執行時已載入（runpy 起 API 後）
-            loop = asyncio.get_event_loop()
-            result = await asyncio.wait_for(
+
+        loop = asyncio.get_event_loop()
+        import laap_brain_api as api   # 執行時已載入（runpy 起 API 後）
+
+        # Path A: LLM respond（psi-llm / delta 模板）
+        def _llm_respond_path():
+            if not fed:
+                return None
+            return _psi_respond(fed, user_msg, history=[
+                m for m in messages if m.get("role") in ("user", "assistant")
+            ][:-1])  # 這句 user_msg 由 llm_respond 自己補
+
+        # Path B: 作者管線
+        async def _author_path():
+            return await asyncio.wait_for(
                 loop.run_in_executor(None, api.process_with_laap, messages, model),
                 timeout=_CHAT_TIMEOUT_S)
-            content = result.get("content", "")
-            engine = result.get("engine", "laap-core")
-            memories = _collect_memories(mem_task) + _take_pending_memories()
-            if mem_task and not mem_task.done():
-                try:
-                    got = await asyncio.wait_for(
-                        asyncio.shield(mem_task), timeout=_MEM_EXTRA_WAIT_S)
-                    memories = got + memories
-                except (asyncio.TimeoutError, Exception):
-                    mem_task.add_done_callback(_stash_late_memories)  # 下一輪「剛想起」
-            # 作者管線只剩 canned fallback 時 → 用真實 psi 狀態回應（情緒真的影響回應）
-            # 安全網：RulesEngine 誤匹配（回 rules:* + 工具錯誤）也讓 psi-respond 接管
-            if fed and (
-                engine == "laap-fallback"
-                or (engine.startswith("rules:") and re.match(r'^\[.*\]', content.strip()))
-            ):
-                hist = [m for m in messages
-                        if m.get("role") in ("user", "assistant")]
-                if hist and hist[-1].get("role") == "user":
-                    hist = hist[:-1]   # 這句 user_msg 由 llm_respond 自己補
-                psi_content = _psi_respond(fed, user_msg, memories=memories,
-                                           history=hist)
+
+        # 同時啟動 A、B，收集記憶
+        llm_task = loop.run_in_executor(None, _llm_respond_path) if fed else None
+        author_task = asyncio.create_task(_author_path())
+
+        done, pending = await asyncio.wait(
+            [t for t in [llm_task, author_task] if t is not None],
+            return_when=asyncio.FIRST_COMPLETED, timeout=_CHAT_TIMEOUT_S)
+
+        content = None
+        engine = None
+
+        # 收集記憶（平行記憶最慢，但我們不 blocking 等它）
+        memories = _collect_memories(mem_task) + _take_pending_memories()
+        if mem_task and not mem_task.done():
+            mem_task.add_done_callback(_stash_late_memories)
+
+        if llm_task and llm_task in done:
+            # Path A won — LLM 有內容可用
+            try:
+                psi_content = llm_task.result()
                 if psi_content:
                     content = psi_content
                     engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
-        except asyncio.TimeoutError:
-            logger.warning(f"[chatflow] 認知管線逾時 {_CHAT_TIMEOUT_S}s → 降級回應")
-            content = "（認知管線處理逾時，本次降級回應。狀態未受影響。）"
+            except Exception:
+                pass
+
+        if content is None and author_task in done:
+            # Path A 沒贏或沒內容 → Path B 贏了
+            try:
+                result = author_task.result()
+                auth_content = result.get("content", "")
+                auth_engine = result.get("engine", "laap-core")
+                # 非 fallback 才用；fallback 則進入下面最後手段
+                if not (auth_engine == "laap-fallback"
+                        or (auth_engine.startswith("rules:") and re.match(r'^\[.*\]', auth_content.strip()))):
+                    content = auth_content
+                    engine = auth_engine
+            except asyncio.TimeoutError:
+                logger.warning(f"[chatflow] 作者管線逾時 {_CHAT_TIMEOUT_S}s")
+            except Exception:
+                pass
+
+        if content is None and llm_task and not llm_task.done():
+            # 作者管線贏了但回 fallback → 等 LLM（短暫等，不超過 timeout 餘額）
+            try:
+                done2, _ = await asyncio.wait([llm_task], timeout=4)
+                if llm_task in done2:
+                    psi_content = llm_task.result()
+                    if psi_content:
+                        content = psi_content
+                        engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
+            except Exception:
+                pass
+
+        if content is None:
+            # 兩路都失敗 → 最後手段：用記憶餵 _psi_respond
+            try:
+                psi_content = _psi_respond(fed, user_msg, memories=memories)
+                if psi_content:
+                    content = psi_content
+                    engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
+            except Exception:
+                pass
+
+        if content is None:
+            logger.warning(f"[chatflow] 兩路皆失敗，降級回應")
+            content = "（回應產生逾時，狀態未受影響。）"
             engine = "laap-timeout"
-        except Exception as e:
-            logger.debug(f"[chatflow] executor 路徑失敗，交回作者 handler: {e}")
-            return await orig_handler(request)
+
+        # 取消慢的那路（如果還在跑）
+        for t in [llm_task, author_task]:
+            if t is not None and not t.done():
+                t.cancel()
 
         if body.get("stream"):
             return await _stream_sse(
@@ -445,11 +526,13 @@ def _post_tool_outcomes(body: dict) -> None:
 async def _tool_chat(request, web, body: dict, fed):
     """Scream agent 迴圈：帶 tools 的請求 → llm_respond.respond_tools（executor
     卸載 + timeout，作者管線完全不在迴路）。engine=psi-llm-tools。
+    stream=True 時使用 respond_tools_stream 做真串流（含 thinking token）。
     失敗降級為說明性 content（回合不炸，TUI 不掛）。"""
     _post_tool_outcomes(body)   # 工具結果 → 情緒事件佇列（下個 psi tick 生效）
     model = body.get("model", "laap-core")
     messages = body.get("messages", [])
     prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
+    is_stream = body.get("stream", False)
 
     psi_state = fed[0] if fed else None
     delta = fed[1] if fed else None
@@ -461,6 +544,101 @@ async def _tool_chat(request, web, body: dict, fed):
         except Exception:
             psi_state = None
 
+    # Streaming 路徑：真串流含 thinking token
+    if is_stream:
+        from laap.llm_respond import respond_tools_stream
+        resp = web.StreamResponse(headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        })
+        await resp.prepare(request)
+        rid = f"laap-{uuid.uuid4().hex[:12]}"
+        created = int(time.time())
+
+        # 執行緒安全 buffer（替代 asyncio.Queue + event loop 開銷）
+        import threading as _th
+        _buf: list = []
+        _lock = _th.Lock()
+        _sig = _th.Event()
+        saw_tool_calls = False
+        _err: list = []
+
+        def _producer():
+            try:
+                for ev in respond_tools_stream(body, psi_state, delta):
+                    with _lock:
+                        _buf.append(ev)
+                    _sig.set()
+            except Exception as e:
+                with _lock:
+                    _err.append(str(e))
+                _sig.set()
+
+        loop = asyncio.get_event_loop()
+        loop.run_in_executor(None, _producer)
+
+        try:
+            while True:
+                while not _buf and not _err:
+                    got = _sig.wait(timeout=_TOOLCHAT_TIMEOUT_S)
+                    _sig.clear()
+                    if not got:
+                        raise asyncio.TimeoutError()
+                with _lock:
+                    if _err:
+                        ev = {"type": "error", "text": _err.pop(0)}
+                    else:
+                        ev = _buf.pop(0)
+                if ev is None:
+                    break
+                if ev["type"] == "reasoning":
+                    saw_tool_calls = True
+                    chunk = _sse_chunk(rid, created, model,
+                                       delta={"reasoning": ev["text"]})
+                    await resp.write(chunk.encode("utf-8"))
+                elif ev["type"] == "token":
+                    chunk = _sse_chunk(rid, created, model,
+                                       delta={"content": ev["text"]})
+                    await resp.write(chunk.encode("utf-8"))
+                elif ev["type"] == "tool_calls":
+                    saw_tool_calls = True
+                    for tc in ev["calls"]:
+                        chunk = _sse_chunk(rid, created, model,
+                                           delta={"tool_calls": [{
+                                               "index": 0, "id": tc["id"],
+                                               "type": "function",
+                                               "function": {
+                                                   "name": tc["name"],
+                                                   "arguments": tc["arguments"]}}]})
+                        await resp.write(chunk.encode("utf-8"))
+                    chunk = _sse_chunk(rid, created, model,
+                                       delta={}, finish_reason="tool_calls")
+                    await resp.write(chunk.encode("utf-8"))
+                elif ev["type"] == "error":
+                    chunk = _sse_chunk(rid, created, model,
+                                       delta={"content": f"\n\n（串流失敗: {ev['text']}）"},
+                                       finish_reason="stop")
+                    await resp.write(chunk.encode("utf-8"))
+            if not saw_tool_calls:
+                chunk = _sse_chunk(rid, created, model,
+                                   delta={}, finish_reason="stop")
+                await resp.write(chunk.encode("utf-8"))
+        except asyncio.TimeoutError:
+            chunk = _sse_chunk(rid, created, model,
+                               delta={"content": "\n\n（串流逾時）"},
+                               finish_reason="stop")
+            await resp.write(chunk.encode("utf-8"))
+        except Exception as e:
+            logger.warning(f"[chatflow] 工具模式串流失敗: {e}")
+            chunk = _sse_chunk(rid, created, model,
+                               delta={"content": f"\n\n（串流失敗: {e}）"},
+                               finish_reason="stop")
+            await resp.write(chunk.encode("utf-8"))
+        await resp.write(b"data: [DONE]\n\n")
+        return resp
+
+    # 非 streaming 路徑（既有 blocking 路徑）
     result = None
     try:
         from laap.llm_respond import respond_tools
@@ -480,9 +658,6 @@ async def _tool_chat(request, web, body: dict, fed):
                         "NEURALIS_TOOL_MODEL 是否支援 tools。本回合降級純文字。）"},
             "finish_reason": "stop", "usage": {},
         }
-
-    if body.get("stream"):
-        return await _stream_sse(request, web, result, model)
     return web.json_response(_build_tool_response(result, model, prompt_chars))
 
 
@@ -521,6 +696,20 @@ async def _stream_sse(request, web, result: dict, model: str):
     rid = f"laap-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
+
+def _sse_chunk(rid: str, created: int, model: str, delta: dict,
+               finish_reason: str = None) -> str:
+    """建立單筆 SSE chunk（OpenAI delta 格式）。"""
+    choice = {"index": 0, "delta": delta}
+    if finish_reason:
+        choice["finish_reason"] = finish_reason
+    data = json.dumps({
+        "id": rid, "object": "chat.completion.chunk",
+        "created": created, "model": model,
+        "choices": [choice],
+    })
+    return f"data: {data}\n\n"
+
     def chunk(delta: dict, fin_=None) -> bytes:
         return ("data: " + json.dumps({
             "id": rid, "object": "chat.completion.chunk", "created": created,
@@ -548,6 +737,126 @@ async def _stream_sse(request, web, result: dict, model: str):
     await resp.write(b"data: [DONE]\n\n")
     await resp.write_eof()
     return resp
+
+
+async def _sse_from_queue(request, web, q: "asyncio.Queue", model: str,
+                          engine: str, first_ev: dict = None):
+    """把事件佇列即時寫成 OpenAI SSE。事件: {"type":"token"|"tool_status","text"}，
+    None = 結束哨兵。token 原樣出；tool_status 以獨立行出（前後補換行）。
+    最終 chunk 帶 engine 欄位（aris-chat 靠它顯示引擎標籤）。"""
+    resp = web.StreamResponse(headers={
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    })
+    await resp.prepare(request)
+    rid = f"laap-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    def chunk(delta: dict, fin_=None, extra: dict = None) -> bytes:
+        payload = {
+            "id": rid, "object": "chat.completion.chunk", "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": fin_}],
+        }
+        if extra:
+            payload.update(extra)
+        return ("data: " + json.dumps(payload, ensure_ascii=False) + "\n\n").encode()
+
+    await resp.write(chunk({"role": "assistant"}))
+
+    async def write_ev(ev: dict) -> None:
+        text = ev.get("text", "")
+        if ev.get("type") == "tool_status":
+            text = f"\n{text}\n"
+        if text:
+            await resp.write(chunk({"content": text}))
+
+    if first_ev is not None:
+        await write_ev(first_ev)
+    while True:
+        try:
+            ev = await asyncio.wait_for(q.get(), timeout=_STREAM_IDLE_S)
+        except asyncio.TimeoutError:
+            await resp.write(chunk({"content": "\n（串流逾時中斷）"}))
+            break
+        if ev is None:
+            break
+        await write_ev(ev)
+    await resp.write(chunk({}, "stop", extra={"engine": engine}))
+    await resp.write(b"data: [DONE]\n\n")
+    await resp.write_eof()
+    return resp
+
+
+def _queue_pump(loop, q: "asyncio.Queue", gen) -> None:
+    """executor thread：迭代 sync generator，事件轉投 event loop 的佇列。
+    結束（正常/異常）必投 None 哨兵。"""
+    def emit(ev):
+        loop.call_soon_threadsafe(q.put_nowait, ev)
+    try:
+        for ev in gen:
+            emit(ev)
+    except Exception as e:
+        emit({"type": "tool_status", "text": f"（串流異常: {e}）"})
+    finally:
+        emit(None)
+
+
+async def _stream_live(request, web, fed, user_msg: str, messages: list, model: str):
+    """交錯串流主路：respond_stream 在 executor 跑，token/工具過程逐事件 SSE 直出。
+    LLM 未啟用或 _STREAM_FIRST_S 內無首事件 → 回 None（caller 落回 RACE 路）。
+    ponytail: 降級後 pump thread 可能還在跑（工具會執行完但輸出丟棄）— 無人消費
+    佇列無妨；升級路徑 = respond_stream 收 cancel event。"""
+    if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() not in ("on", "1", "true"):
+        return None
+    try:
+        from laap.llm_respond import respond_stream
+    except Exception as e:
+        logger.debug(f"[chatflow] respond_stream 不可用: {e}")
+        return None
+
+    memories = _take_pending_memories()   # 零等待：只拿上一輪遲到的召回
+    hist = [m for m in messages if m.get("role") in ("user", "assistant")][:-1]
+    loop = asyncio.get_event_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    gen = respond_stream(user_msg, fed[0], history=hist,
+                         memories=memories, delta=fed[1])
+    loop.run_in_executor(None, _queue_pump, loop, q, gen)
+
+    try:
+        first = await asyncio.wait_for(q.get(), timeout=_STREAM_FIRST_S)
+    except asyncio.TimeoutError:
+        logger.warning(f"[chatflow] 串流首事件逾時 {_STREAM_FIRST_S}s → 落回 RACE")
+        return None
+    if first is None:   # generator 沒 yield 任何事件（LLM off / 無 key / 空回應）
+        return None
+    return await _sse_from_queue(request, web, q, model,
+                                 engine="psi-llm-stream", first_ev=first)
+
+
+async def _stream_tool_test(request, web, model: str):
+    """stream_test 鉤：直接跑 stream-test 工具，事件逐條 SSE（不經 LLM）。
+    executor 不在 → None（落回正常管線）。"""
+    try:
+        from laap.startup import get_tool_executor
+        executor = get_tool_executor()
+    except Exception:
+        return None
+    if executor is None:
+        return None
+
+    def gen():
+        for ev in executor.stream("stream-test", "self-test"):
+            if ev["type"] == "result":
+                yield {"type": "token", "text": f"\n結果:\n{ev['text']}"}
+            else:
+                yield {"type": "tool_status", "text": ev["text"]}
+
+    loop = asyncio.get_event_loop()
+    q: asyncio.Queue = asyncio.Queue()
+    loop.run_in_executor(None, _queue_pump, loop, q, gen())
+    return await _sse_from_queue(request, web, q, model, engine="tool-stream-test")
 
 
 def install() -> bool:

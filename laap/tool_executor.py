@@ -16,6 +16,9 @@ import subprocess
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import os
+import time
+import uuid
 
 from laap.agi.cognitive_bus import CognitiveBus, CognitiveEventType
 
@@ -26,6 +29,7 @@ class ToolExecutor:
     """工具執行層 — 把 CognitiveBus 事件轉成真實動作。"""
 
     TOOL_STATUS_FILE = "/tmp/laap-tool-status.json"
+    CHANNEL_PATH = "/tmp/aris-scream-channel.jsonl"
 
     def __init__(self, bus: CognitiveBus, agentos_registry=None):
         self.bus = bus
@@ -45,15 +49,19 @@ class ToolExecutor:
 
     # ── 公開 API ──
 
-    def register_tool(self, name: str, exec_fn, description: str = "") -> None:
-        """註冊自訂工具。exec_fn 簽名: (prompt: str) → str"""
-        self._tools[name] = {"fn": exec_fn, "description": description}
+    def register_tool(self, name: str, exec_fn, description: str = "",
+                      stream_fn=None) -> None:
+        """註冊自訂工具。exec_fn 簽名: (prompt: str) → str。
+        stream_fn（可選）簽名: (prompt: str) → Iterator[str]，逐行 yield 中間輸出；
+        有 stream_fn 的工具在 stream() 路徑會逐步輸出，最終結果 = 全部行拼接。"""
+        self._tools[name] = {"fn": exec_fn, "description": description,
+                             "stream_fn": stream_fn}
         logger.info(f"[ToolExecutor] 工具註冊: {name}")
 
     def _emit_tool_status(self, icon: str, status: str, desc: str,
                           tool: str = "", elapsed: float = 0):
-        """寫 LAAP 工具狀態到檔案，供 Scream TUI 消費。"""
-        import time
+        """寫 LAAP 工具狀態到檔案 + channel，供 Scream TUI 即時消費。"""
+        import time, uuid
         payload = {
             "icon": icon, "status": status, "description": desc,
             "tool": tool, "elapsed": round(elapsed, 1),
@@ -62,6 +70,16 @@ class ToolExecutor:
         try:
             with open(self.TOOL_STATUS_FILE, "w") as f:
                 json.dump(payload, f)
+            # 同步寫入 aris-scream-channel（與 scream-ask/scream-task 同管道）
+            channel_event = {
+                "ts": time.time(), "id": uuid.uuid4().hex[:12],
+                "direction": "aris→scream", "type": "tool_execution",
+                "tool": tool, "status": status,
+                "icon": icon, "description": desc,
+                "elapsed": round(elapsed, 1),
+            }
+            with open(self.CHANNEL_PATH, "a") as f:
+                f.write(json.dumps(channel_event, ensure_ascii=False) + "\n")
             # 也輸出 stdout 標記（給直接 tail 的使用者）
             print(f"\n[LAAP-TOOL] {icon} {status} | {desc}", flush=True)
         except Exception:
@@ -83,30 +101,60 @@ class ToolExecutor:
     TOOL_ICONS = {
         "gbrain": "🧠", "qmd": "📚", "file-search": "🔍",
         "http-get": "🌐", "http": "🌐", "web-search": "🌐",
-        "shell": "⚙️", "bash": "⚙️",
+        "shell": "⚙️", "bash": "⚙️", "scream-ask": "💬",
+        "scream-task": "📋",
     }
 
     def execute(self, tool: str, prompt: str, timeout: int = 30) -> str:
-        """執行工具，回傳結果文字。所有呼叫先過安全閘（Phase 4a）。"""
+        """執行工具，回傳結果文字。所有呼叫先過安全閘（Phase 4a）。
+        = stream() 的 drain 包裝：吃完全部事件，只回最終 result（舊呼叫者零改動）。"""
+        result = ""
+        for ev in self.stream(tool, prompt, timeout=timeout):
+            if ev.get("type") == "result":
+                result = ev.get("text", "")
+        return result
+
+    def stream(self, tool: str, prompt: str, timeout: int = 30):
+        """執行工具，逐步 yield 事件 dict（sync generator，供 thread 中迭代）：
+          {"type": "status", "text": ...}  執行階段（開始/完成/失敗）
+          {"type": "output", "text": ...}  中間輸出（有 stream_fn 的工具逐行）
+          {"type": "result", "text": ...}  最終結果 — 恰一個、必為最後一個事件
+        安全閘與 execute() 同一道；拒絕時直接 yield result 事件。
+        ponytail: 只有掛 stream_fn 的工具有真中間輸出；opaque fn / AgentOS
+        executor 只有前後 status。升級路徑 = 把 subprocess builtins 換 _popen_lines。"""
         import time
         from laap.safety_gate import check as safety_check
         allowed, reason = safety_check(tool, prompt)
         if not allowed:
-            return f"[安全閘] 拒絕: {reason}"
+            yield {"type": "result", "text": f"[安全閘] 拒絕: {reason}"}
+            return
 
         icon = self.TOOL_ICONS.get(tool, "⚙️")
         short_desc = prompt.strip()[:40]
-        self._tool_start_time = time.time()
+        # elapsed 用區域變數：agency 與 chat 並行跑工具時，instance 共享的
+        # _tool_start_time 會互相覆蓋，elapsed 顯示錯亂（實測 127s 顯示 9.5s）
+        t0 = time.time()
+        self._tool_start_time = t0
         self._emit_tool_status(icon, "start", f"{tool}: {short_desc}", tool=tool)
+        yield {"type": "status", "text": f"{icon} {tool} 開始: {short_desc}"}
 
         logger.info(f"[ToolExecutor] 執行: {tool}({prompt[:60]})")
 
         result = ""
+        finished = False
         try:
             # 1. 本機工具
             if tool in self._tools:
                 self._emit_tool_status(icon, "running", f"{tool}: {short_desc}", tool=tool)
-                result = self._tools[tool]["fn"](prompt)
+                entry = self._tools[tool]
+                if entry.get("stream_fn"):
+                    lines = []
+                    for line in entry["stream_fn"](prompt):
+                        lines.append(line)
+                        yield {"type": "output", "text": line}
+                    result = "\n".join(lines).strip()[:3000] or "無結果"
+                else:
+                    result = entry["fn"](prompt)
 
             # 2. AgentOS executor
             elif self._registry:
@@ -120,17 +168,46 @@ class ToolExecutor:
             else:
                 result = f"[未知工具] {tool} — 未註冊"
 
-            elapsed = time.time() - self._tool_start_time
+            elapsed = time.time() - t0
             self._emit_tool_status(icon, "done", f"{tool}: 完成 ({elapsed:.1f}s)",
                                    tool=tool, elapsed=elapsed)
             self._clear_tool_status()
-            return result
+            finished = True
+            yield {"type": "status", "text": f"{icon} {tool} 完成 ({elapsed:.1f}s)"}
+            yield {"type": "result", "text": result}
 
         except Exception as e:
-            elapsed = time.time() - self._tool_start_time
+            elapsed = time.time() - t0
             self._emit_tool_status("❌", "fail", f"{tool}: {e}", tool=tool, elapsed=elapsed)
             self._clear_tool_status()
-            return f"[錯誤] {tool}: {e}"
+            finished = True
+            yield {"type": "status", "text": f"❌ {tool} 失敗: {e}"}
+            yield {"type": "result", "text": f"[錯誤] {tool}: {e}"}
+        finally:
+            # caller 中途棄迭代（GeneratorExit）時 done/clear 不會跑 →
+            # busy 檔卡 "running" = 忙碌保護把 Aris 永久噤聲。這裡兜底清掉。
+            if not finished:
+                self._clear_tool_status()
+
+    @staticmethod
+    def _popen_lines(argv: list, timeout: int = 30):
+        """跑 subprocess，stdout 逐行 yield（stderr 併入 stdout）。
+        ponytail: 逾時只在行與行之間檢查 — 沉默的長行程要等到下一行才被殺。"""
+        import time
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+        deadline = time.time() + timeout
+        try:
+            for line in proc.stdout:
+                yield line.rstrip("\n")
+                if time.time() > deadline:
+                    proc.kill()
+                    yield f"[逾時 {timeout}s，已中止]"
+                    return
+            proc.wait(timeout=5)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
 
     def list_tools(self) -> List[Dict[str, str]]:
         """列出所有可用工具。"""
@@ -147,6 +224,66 @@ class ToolExecutor:
 
     def _register_builtins(self):
         """註冊本機可直接叫的工具（不透過 AgentOS）。"""
+
+        # scream-ask — 向 Scream Code TUI 提問
+        CHANNEL_PATH = "/tmp/aris-scream-channel.jsonl"
+
+        def scream_ask(query: str) -> str:
+            if os.path.islink(CHANNEL_PATH):
+                return "[scream-ask 安全拒絕] 頻道檔案是 symlink"
+            entry_id = uuid.uuid4().hex[:12]
+            entry = {"ts": time.time(), "id": entry_id, "direction": "aris→scream",
+                     "type": "request", "content": query[:500], "context": {}}
+            with open(CHANNEL_PATH, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                time.sleep(1.0)
+                try:
+                    with open(CHANNEL_PATH) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            resp = json.loads(line)
+                            if resp.get("direction") == "scream→aris" \
+                               and resp.get("context", {}).get("request_ts") == entry["ts"]:
+                                return resp.get("content", "（無內容）")
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    pass
+            return "[scream-ask 逾時] 30s 內未收到 Scream 回應"
+
+        # scream-task — 向 Scream Code 委派任務（type=task→result, 120s timeout）
+        def scream_task(task_spec: str) -> str:
+            """寫入 type='task' 項目，輪詢最多 120s 以取得 type='result'。"""
+            if os.path.islink(CHANNEL_PATH):
+                return "[scream-task 安全拒絕] 頻道檔案是 symlink"
+            entry_id = uuid.uuid4().hex[:12]
+            entry = {"ts": time.time(), "id": entry_id,
+                     "direction": "aris→scream", "type": "task",
+                     "content": task_spec[:2000],
+                     "context": {"task_list": [], "task_index": 0,
+                                 "total_tasks": 1, "goal_id": ""}}
+            with open(CHANNEL_PATH, "a") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                time.sleep(2.0)
+                try:
+                    with open(CHANNEL_PATH) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            resp = json.loads(line)
+                            if (resp.get("direction") == "scream→aris"
+                                and resp.get("type") == "result"
+                                and resp.get("context", {}).get("request_ts") == entry["ts"]
+                                and resp.get("context", {}).get("task_index") == entry["context"]["task_index"]):
+                                return resp.get("content", "（無內容）")
+                except (FileNotFoundError, json.JSONDecodeError, OSError):
+                    pass
+            return "[scream-task 逾時] 120s 內未收到任務結果"
 
         # gbrain 記憶搜尋 — 走 neuralis 持久 MCP client（免 CLI 冷啟 ~3s/次），
         # client 不可用再退 CLI
@@ -190,10 +327,25 @@ class ToolExecutor:
             resp = httpx.get(url, timeout=10, follow_redirects=True)
             return resp.text[:3000]
 
+        # stream-test — 串流管線自測：固定慢指令逐行輸出（不插值使用者輸入，無 injection 面）
+        def stream_test_stream(_prompt: str):
+            yield from ToolExecutor._popen_lines(
+                ["/bin/sh", "-c",
+                 'echo "step 1/3 開始"; sleep 1; echo "step 2/3 處理中"; sleep 1; echo "step 3/3 done"'],
+                timeout=15)
+
+        def stream_test_exec(prompt: str) -> str:
+            return "\n".join(stream_test_stream(prompt))
+
         self.register_tool("gbrain", gbrain_search, "gbrain 長期記憶搜尋 (hybrid search)")
         self.register_tool("qmd", qmd_search, "qmd 本地知識庫搜尋 (hybrid + rerank)")
         self.register_tool("file-search", file_search, "ripgrep 檔案全文搜尋")
         self.register_tool("http-get", http_get, "HTTP GET 請求")
+        self.register_tool("scream-ask", scream_ask, "向 Scream Code 提問，學習 TUI 操作與工具使用")
+        self.register_tool("stream-test", stream_test_exec,
+                           "串流管線自測（固定慢指令，逐行輸出）",
+                           stream_fn=stream_test_stream)
+        self.register_tool("scream-task", scream_task, "向 Scream Code 委派任務（type=task→result, 120s timeout）")
 
     def _on_action_request(self, source: str, data: dict) -> None:
         """CognitiveBus ACTION_REQUEST 事件回呼。"""

@@ -23,7 +23,10 @@ from typing import List, Tuple
 
 logger = logging.getLogger("laap.safety_gate")
 
-READONLY_SAFE = frozenset({"gbrain", "qmd", "file-search"})
+READONLY_SAFE = frozenset({"gbrain", "qmd", "file-search", "scream-ask", "scream-task",
+                           "stream-test"})  # stream-test: 固定 echo/sleep 指令，不吃使用者輸入
+# 來自 AgentOS executor_registry 的唯讀工具（實測驗證過：DuckDuckGo 搜尋，無副作用）
+AGENTOS_READONLY: frozenset = frozenset({"web-search"})
 _ROOT = Path(__file__).resolve().parents[1]
 AUDIT_PATH = _ROOT / "safety-audit.jsonl"
 APPROVED_PATH = _ROOT / "approved-tools.txt"      # 一行一工具，人工簽名（4b 批准閘）
@@ -66,7 +69,34 @@ def _file_approved() -> frozenset:
 
 def _allowed_tools() -> frozenset:
     extra = os.environ.get("NEURALIS_TOOL_ALLOW", "")
-    return READONLY_SAFE | {t.strip() for t in extra.split(",") if t.strip()} | _file_approved()
+    return READONLY_SAFE | AGENTOS_READONLY \
+         | {t.strip() for t in extra.split(",") if t.strip()} | _file_approved()
+
+
+def classify(tool: str) -> str:
+    """回 "readonly_builtin" / "readonly_agentos" / "write"。
+
+    工具分類 chokepoint — 單一源頭，agency/status/審計都從這裡拿分類。
+    """
+    if tool in READONLY_SAFE:
+        return "readonly_builtin"
+    if tool in AGENTOS_READONLY:
+        return "readonly_agentos"
+    return "write"  # 所有非白名單視為 write（需 Phase 4b 批准）
+
+
+def get_allowed_tools() -> list:
+    """回 [{name, classification}, ...]"""
+    allowed = _allowed_tools()
+    return [{"name": t, "classification": classify(t)} for t in sorted(allowed)]
+
+
+def get_classification_map() -> dict:
+    """回 {"readonly_builtin": [...], "readonly_agentos": [...], "write": [...]}"""
+    m: dict = {}
+    for tool in sorted(READONLY_SAFE | AGENTOS_READONLY):
+        m.setdefault(classify(tool), []).append(tool)
+    return m
 
 
 def _queue_pending(tool: str, prompt: str) -> None:
@@ -97,11 +127,14 @@ def check(tool: str, prompt: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def _audit(tool: str, prompt: str, reason: str) -> None:
+def _audit(tool: str, prompt: str, reason: str, grade: str = "") -> None:
+    if not grade:
+        grade = classify(tool)
     try:
         with AUDIT_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps({"ts": time.time(), "tool": tool,
-                                "prompt": prompt[:200], "denied": reason},
+                                "prompt": prompt[:200], "denied": reason,
+                                "grade": grade},
                                ensure_ascii=False) + "\n")
     except Exception as e:
         logger.warning(f"[SafetyGate] 審計寫入失敗: {e}")
