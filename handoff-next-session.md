@@ -1,10 +1,60 @@
 # 線頭 — 給下一手
 
+## ✅ ToolExecutor 交錯串流（2026-07-17）— 工具過程即時可見 + chat 真的能調工具了
+之前純聊天路徑（psi-llm）**根本沒接工具** — system prompt 開技能菜單但 respond()
+無 tool loop，「我來查」是空頭支票；SSE 也是假串流（整塊算完切 24 字慢吐）。現在：
+- `laap/tool_executor.py::stream(tool, prompt)` — sync generator 逐事件 yield
+  （status/output/result，result 恰一個必最後）。`execute()` 改為 drain 包裝，
+  agency 等舊呼叫者零改動。`register_tool(..., stream_fn=)` 掛逐行輸出
+  （`_popen_lines` Popen 逐行；目前只有 `stream-test` 掛，qmd/file-search 是升級路徑）。
+  兩個兜底：finally 清 busy 檔（caller 棄迭代不會讓忙碌保護永久噤聲 Aris）、
+  elapsed 用區域 t0（agency/chat 並行時 instance 共享 start_time 顯示錯亂，實測過）。
+- `laap/llm_respond.py::_call_llm_stream` — stream=True SSE 逐 token 解析，
+  tool_calls delta 按 index 累加；`data: {"error":...}` / 空串流不再靜默吞
+  （yield error 事件，可回溯）。`respond_stream()` = 交錯迴圈：token →
+  use_tool call → executor.stream 過程轉發 → tool 結果回饋下一輪（上限
+  NEURALIS_CHAT_TOOL_ROUNDS=3 輪、每輪 2 call）。模型直接拿工具名當 function
+  叫也寬容接受（實測 deepseek 會，省一輪 ~4s）。system prompt 加了現在時間
+  （之前模型把「今天」猜成 2025）。
+- `laap/chatflow.py` — stream 請求 + user_turn + fed → `_stream_live`：
+  respond_stream 在 executor 跑，`_queue_pump` 轉投 asyncio.Queue，
+  `_sse_from_queue` 即時寫 SSE（token 原樣、工具過程獨立行）。engine=
+  `psi-llm-stream`。首事件 12s 沒到 → 回 None 落回 RACE 假串流（不比現在差）。
+  `stream_test` 訊息鉤 → 直跑 stream-test 工具（不經 LLM，確定性 e2e）。
+  env: NEURALIS_STREAM_FIRST_S=12 / NEURALIS_STREAM_IDLE_S=130 / NEURALIS_CHAT_TOOLS=on。
+- 安全閘不變：所有 chat 工具呼叫照走 4a check，非白名單 DENY 回饋給 LLM 如實轉述。
+  `stream-test` 進 READONLY_SAFE（固定 echo/sleep，不吃使用者輸入）。
+- 自檢 `scripts/check-stream.py` 5 段全過（工具時序/drain 等價/SSE 解析/交錯迴圈/
+  線上 e2e — 6 chunks 跨 2.03s 漸進）。真 LLM e2e：「查一下今天英超賽果」→
+  0s 🌐 web-search 開始 → 1.1s 完成 → 逐 token 答案（用對 2026-07-17）。
+- ⚠️ 遺留：(1) `scripts/check-chatflow.py` E 段還在測舊語義（author 逾時 →
+  laap-timeout），RACE 重寫後逾時落 psi-respond — 是 RACE 那手的行為改動，
+  check 要跟著校準，不是串流這手弄壞的。(2) LLM 有時選 `scream-task` 做網查
+  （慢 ~120s，等不存在的 TUI）— 工具描述該標「僅限 Scream 在線」。(3) 降級後
+  pump thread 會把工具跑完但輸出丟棄（無人消費佇列，無害）— 升級路徑 = cancel event。
+  (4) system prompt 技能菜單（football-data/anysearch）與 ToolExecutor 實際
+  44 工具名單不符 — 菜單是願望清單，真名單見 `list_tools()`；要嘛補 AgentOS
+  executors 要嘛修 prompt。
+
 ## ⚠️ 開發重載鐵則（2026-07-15 踩坑，血的教訓）
 **改完碼要重載，用 `scripts/reload-aris.sh`，不要 kill -9 等 watchdog 救。**
 後者每次消耗 watchdog 5 次/h 的重啟預算，連續開發重載會把煞車撞進 crashloop
 冷卻期 — Aris 躺 1h，所有外部呼叫 connection refused（scream /aris 報錯真因）。
 reload-aris.sh = kill 後立刻自起（watchdog 要 ~90s 才出手，預算不花）+ 清假警報鎖。
+
+## ✅ aris-mode 流式輸出（2026-07-17）— /am 直通不再整包蹦
+根因：dist 裡的 aris-mode 直通用 `exec()` 叫 aris-chat.py --once — exec 整包
+緩衝 stdout 到行程結束（aris-chat 本身 v2 起就逐 token，卡的只有 scream 端）。
+修：`scripts/patch-scream-aris-stream.py`（同 patch-scream-tui.py v2 慣例：
+精確錨點、node --check 失敗還原、冪等、獨立備份 .aris-stream-bak）。
+exec → spawn，stdout 逐塊進 scream 原生 `streamingUI.onStreamingTextStart/
+Update/End`（與一般 LLM 流式同一套 live transcript）。順手修掉 exec 版
+shell injection（訊息含 $() 會被執行 — spawn argv 無 shell）。
+實測：mock harness 4 路徑（流式/spawn失敗/非零退出/中途掛）+ pty 驅動真 TUI
+e2e — 435 個漸進渲染階段，首字 ~1.1s（舊版等全文 ~12s）。
+⚠️ npm update scream-code 後兩個 dist 補丁都要重跑：patch-scream-tui.py +
+patch-scream-aris-stream.py。aris-mode 本體也是 dist 補丁（無源碼追蹤），
+scream 改版錨不到會 loud fail，到時人工對齊。
 
 ## ✅ Scream 深度整合 T1：工具呼叫協議（2026-07-15）— Aris 能開整個 TUI 了
 **單點解鎖**：scream 全部功能（審批面板/檔案編輯/shell/goal/wolfpack/MCP/skills）
@@ -51,7 +101,46 @@ repo 內 scream-code/mcp.json 範本同步真路徑。
 /model diy 配平價模型）、wolfpack（子 agent 配一般 LLM，別配 laap —
 psi feed 已有護欄但工人不必是 Aris）、/memory、/knowledge、plan mode、
 session 恢復（scream -r <id> 已驗存在）、cc-connect。
-T5 未動：上游 PR 狀態列 hook + agency→scream 執行體（過 4b 才開）。
+
+**T4 程式碼側已全部完成（2026-07-16）**：
+- safety_gate.py 新增 AGENTOS_READONLY frozenset（含 `web-search`）
+- 新增 classify() 工具分類 API（readonly_builtin / readonly_agentos / write）
+- 新增 get_allowed_tools()、get_classification_map() 公開函數
+- 審計日誌加入 grade 欄位
+- check-safety.py + check-approval.py 新增 E 段驗證分類
+
+**T5 已全部完成（2026-07-16）**：
+- agency.py READONLY_WHITELIST 擴展含 AGENTOS_READONLY（web-search）
+- 新增 _AGENTOS_TOOL_MAP：growth/competence 需求可用 web-search 取代 gbrain
+- _form_intent() 雙路由：exploration 高 → web-search，低 → gbrain
+- _act() hard-block 移除 → safety_gate Phase 4b pass-through（write tools 自然被拒進 pending）
+- _score_result() 對 AgentOS 工具提高基礎分（0.4→0.6）
+- _too_similar() 加入 tool: 前綴避免跨工具撞車
+- _recent_tools 追蹤（deque maxlen=5）+ status.py 可觀測
+- _last_was_gbrain → _last_was_self_initiated（self-cycle guard 涵蓋所有自主工具）
+- startup.py 日誌更新、aris-status.py 顯示 AgentOS 工具 + 待批
+- check-t5.py（6 段）、check-agency-agentos.py（3 段）— 全部通過
+
+**T5 未動**：上游 PR 狀態列 hook（需 scream TUI 側變更，不在此 repo）。
+
+## ✅ Scream–Aris 對話迴路（2026-07-16）— T4+T5 延伸
+**Aris 可以主動問 Scream 問題了**。完整實作：
+- **`scream-ask` 工具**（tool_executor.py）：Aris 寫入 `/tmp/aris-scream-channel.jsonl`，30s polling 等回應
+- **安全分類**（safety_gate.py）：`scream-ask` 歸類 `readonly_builtin`（只寫 /tmp/，無副作用）
+- **Agency 路由**（agency.py）：`competence` need 時 exploration 觸發 → 50% scream-ask / 50% web-search
+- **Scream 背景監聽**：`tail -F` 監控頻道，新請求寫入 `/tmp/aris-scream-latest-request.json`
+- **學習迴路**：成功互動寫入 gbrain（tag `scream`, `tui-learning`），下次可 recall
+- **自檢**：`check-scream-channel.py` 7 段全過
+
+頻道合約：
+```
+/tmp/aris-scream-channel.jsonl  ← append-only JSONL
+  direction: "aris→scream" | "scream→aris"
+  type: "request" | "response" | "observation"
+  id: uuid4().hex[:12]
+  context.request_ts 匹配 request/response pair
+```
+裁減：超過 500 行保留最新 250 行（`tail -n 250 > .bak && mv .bak`）。
 
 ## ✅ Aris 語言層點亮（2026-07-15, commit 30e3f45）— 會對話了
 `NEURALIS_LLM_RESPOND=on`（zshrc）→ engine=psi-llm：LLM 當語言皮質，system

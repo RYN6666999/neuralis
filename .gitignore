@@ -37,3 +37,4 @@ watchdog-crashloop-*.lock
 approved-tools.txt
 approvals-pending.jsonl
 status.json
+rust/target/
