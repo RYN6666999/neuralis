@@ -106,11 +106,13 @@ zero-LLM 紅線**，是 §4 的分岔。
 
 ## 4. ✅ 戰略分岔已拍板：路 C（gbrain-first，LLM-on-miss）— 2026-07-18
 
-**Ryan 選 C。** agency 保持 zero-LLM 為主，gbrain 經驗快取當主規劃器；只有 cache-miss
-且探索高時，才做一次有界的 LLM 前瞻。下方 A/B 保留為決策紀錄。
+**Ryan 選 C（2026-07-18）+ 子問題定 c2。** agency 保持 zero-LLM 為主，gbrain
+經驗快取當主規劃器；只有 cache-miss 且探索高時，才做一次有界前瞻，**且那次前瞻
+委派給 Scream（c2），agency 全程不叫 LLM**。這 = Aris×Scream 分工願景落成。
+下方 A/B 保留為決策紀錄。
 
-> **C 還有一個關鍵子問題（見 §4.1）：那次「LLM-on-miss」的 LLM 呼叫住在哪 —
-> Aris agency 直接叫（c1）還是委派給 Scream（c2）。這決定 agency 是否還算 zero-LLM。**
+> **子問題已定 c2（見 §4.1）**：LLM-on-miss 委派 Scream，非 agency 直接叫。
+> agency 維持 100% zero-LLM。c2 前置委派通道（Stage 3）+ E1 + E2。
 
 研究報告的整個藥方是把 LLM 放進 agency 當候選生成器 + 評估器 + world model。
 但 agency **現在是真的 zero-LLM**（讀碼確認：純規則表 + RPE，零 LLM 呼叫），
