@@ -1,7 +1,10 @@
 """
 SafetyGate — Phase 4a：工具執行安全閘（外部審查紅線：煞車先於能力）。
 
-兩層，全部 0 LLM：
+三層，全部 0 LLM：
+  0. 委派 path-DENY（甲/乙 硬防線，最先跑、不可 env 繞過、不受工具批准影響）：
+     委派工具（scream-task…）指向 neuralis 認知碼 laap/** 一律 DENY，fail-closed。
+     Scream 永不得改 Aris 自己的腦 — 這是「甲不滑進乙」的物理防線。
   1. 工具分級：唯讀安全組（gbrain/qmd/file-search）直接過；其他工具
      預設拒絕，除非列進 NEURALIS_TOOL_ALLOW（逗號分隔）— v0 的人工批准閘
      = 人明確在環境變數簽名。
@@ -41,6 +44,38 @@ _FALLBACK_PATTERNS = [
     re.compile(r"清空資料庫|格式化硬碟|格式化磁碟"),
     re.compile(r"\b(shutdown|reboot|poweroff|halt)\b", re.I),
 ]
+
+
+# ── 層 0：委派 path-DENY（甲/乙 硬防線）────────────────────────────
+# 委派工具把工作交給外部執行體（Scream）— 那有「手」能寫檔。禁止委派指向
+# neuralis 認知碼，否則 Aris 能（直接或被誘導）改寫自己的腦 = 乙（RSI），已否決。
+# 設計：fail-closed 子串比對（寧誤擋不漏放）；base set 只能 env 擴充、不能縮；
+# 最先跑、不受工具批准影響（就算 scream-task 被 approve，指向 laap/ 仍 DENY）。
+_DELEGATION_BASE = frozenset({"scream-task"})
+
+
+def _delegation_tools() -> frozenset:
+    """委派工具集。base 不可縮，env NEURALIS_DELEGATION_TOOLS_EXTRA 只能加。"""
+    extra = {t.strip() for t in
+             os.environ.get("NEURALIS_DELEGATION_TOOLS_EXTRA", "").split(",") if t.strip()}
+    return _DELEGATION_BASE | extra
+
+
+def _protected_fragments() -> list:
+    """受保護認知碼比對片段。base = neuralis laap/（相對簽名 + 絕對路徑）。
+    env NEURALIS_PROTECTED_PATHS（逗號分隔）只能擴、不能縮。"""
+    frags = ["laap/", str(_ROOT / "laap")]
+    frags += [p.strip() for p in
+              os.environ.get("NEURALIS_PROTECTED_PATHS", "").split(",") if p.strip()]
+    return frags
+
+
+def _targets_protected_path(prompt: str) -> Tuple[bool, str]:
+    """委派內容是否指向受保護認知碼。fail-closed 子串比對。"""
+    for frag in _protected_fragments():
+        if frag and frag in prompt:
+            return True, frag
+    return False, ""
 
 
 def _agentos_check(text: str) -> Tuple[bool, List[str]]:
@@ -113,6 +148,14 @@ def _queue_pending(tool: str, prompt: str) -> None:
 
 def check(tool: str, prompt: str) -> Tuple[bool, str]:
     """回 (allowed, reason)。reason 只在拒絕時有內容。"""
+    # 層 0：委派 path-DENY（甲/乙 硬防線）— 最先跑，不可被工具批准/env 繞過。
+    if tool in _delegation_tools():
+        hit, frag = _targets_protected_path(prompt)
+        if hit:
+            reason = (f"[安全閘] 委派指向受保護認知碼（{frag}）— 甲不滑進乙硬防線，"
+                      f"DENY。Scream 永不得改 neuralis/laap/**。")
+            _audit(tool, prompt, reason, grade="delegation_path_denied")
+            return False, reason
     if tool not in _allowed_tools():
         _queue_pending(tool, prompt)
         reason = (f"工具 {tool} 未批准 — 已排入待批清單，"
