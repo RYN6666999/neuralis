@@ -104,7 +104,13 @@ zero-LLM 紅線**，是 §4 的分岔。
 
 ---
 
-## 4. ⚠️ 戰略分岔（待 Ryan 拍板）：LLM 要不要進 agency？
+## 4. ✅ 戰略分岔已拍板：路 C（gbrain-first，LLM-on-miss）— 2026-07-18
+
+**Ryan 選 C。** agency 保持 zero-LLM 為主，gbrain 經驗快取當主規劃器；只有 cache-miss
+且探索高時，才做一次有界的 LLM 前瞻。下方 A/B 保留為決策紀錄。
+
+> **C 還有一個關鍵子問題（見 §4.1）：那次「LLM-on-miss」的 LLM 呼叫住在哪 —
+> Aris agency 直接叫（c1）還是委派給 Scream（c2）。這決定 agency 是否還算 zero-LLM。**
 
 研究報告的整個藥方是把 LLM 放進 agency 當候選生成器 + 評估器 + world model。
 但 agency **現在是真的 zero-LLM**（讀碼確認：純規則表 + RPE，零 LLM 呼叫），
@@ -133,7 +139,29 @@ agency 維持規則表 + RPE。S_span 走我的 S1→S2→S3（學工具選擇 �
   「前瞻是 LLM 輔助的」
 - **證偽條件**：若快取命中率長期太低（多數還是叫 LLM），路 C 退化成路 B 的貴版本 → 回退
 
-> **這格拍板前，S2/S3 的寫入類動作與 world model 都不動手。** 先定方向再落地。
+## 4.1 C 的子問題：LLM-on-miss 住哪？（c1 vs c2）
+
+「gbrain-first」大家沒異議。爭點在那次 miss 時的 LLM 呼叫：
+
+- **c1 — agency 直接叫 LLM**：簡單、快（~1-2s）。但 agency 開始有 LLM 呼叫 →
+  不再是 100% zero-LLM（是「zero-LLM 除了 miss 時的有界前瞻」）。
+- **c2 — 委派給 Scream 做前瞻**：agency 維持 100% zero-LLM（只編排/委派），
+  LLM 工作全在 Scream。**這正是你先前的 Aris×Scream 分工願景**。代價：需委派通道
+  上線（脊椎 Stage 3），且 Scream 委派慢（~120s）、要過 path-DENY/批准閘。
+
+**建議的分階段 C（zero-LLM 先行）：**
+- **C-a（zero-LLM，可先做）**：只建 gbrain 經驗快取當主規劃器，**量 cache-hit 率**。
+  這步不叫任何 LLM —— 它就是 C 的證偽測試：命中率夠高才值得往下。命中率太低 =
+  C 退化成貴版 B，回頭。**這步安全（零 LLM、唯讀、不學壞信號），可當平行 agent
+  Phase 2 的正確方向**（取代它原本的路 B「LLM 到處生成」）。
+- **C-b（有界 LLM，prefer c2）**：命中率過關才加 LLM-on-miss。**終態選 c2**（委派
+  Scream，保住 agency zero-LLM）；c1 只在通道未上線時當臨時 MVP，且要誠實標註
+  agency 此時非純 zero-LLM。
+
+**順序硬約束**：C-b 是脊椎 **Stage 4**，前置 **E1（cache-hit 信號不可作弊，
+修 len/500）+ E2（LLM/委派成本閘）** 必須先到位。C-a 無此前置，可先做。
+
+> **落地前**：S2/S3 寫入類動作、world model 都不動手。C-a 可先做（純測快取假設）。
 
 ---
 

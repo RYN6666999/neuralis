@@ -73,15 +73,19 @@ tags: [self-evolution, safety, roadmap, spine, plan]
 - 唯讀/淺委派可自動；**write-capable 委派每次過 4b 批准閘**（不自動）。
 - path-DENY（Stage 0）+ 成本閘（Stage 2）+ 快照（Stage 0）此時全在位。
 
-### Stage 4 — 分工學習（甲的核心，zero-LLM）
+### Stage 4 — 分工學習 + 前瞻（甲的核心，走 §4 路 C）
 
-**能力：** Aris 學會「什麼時候委派 Scream 划算」——把 Scream 當工具之一納入 RPE。
+**能力：** Aris 學會「什麼時候委派 Scream 划算」+ 有界前瞻。光錐 §4 已拍板 **路 C**
+（gbrain-first，LLM-on-miss，終態 c2=委派 Scream 做前瞻，agency 維持 zero-LLM）。
 
-- ⬜ 光錐 **S1** 延伸（`cognitive-light-cone-plan.md`）：Aris 學「自己查 vs 委派
-  Scream 深做」，用 **E1 的不可作弊信號**（不是長度）。
-- ⬜ **E3 / 柱②**：異質任務集 + baseline benchmark，量 S_span 漂移是否真的 > 純規則表。
-- 此站達成 = 你設想的「Aris×Scream 成本更低分工」，且 Aris 全程 zero-LLM
-  （LLM 深工作外包給 Scream，繞過光錐 §4 的 zero-LLM 難題）。
+- ⬜ **C-a（zero-LLM，可先做，不需 E1/E2）**：gbrain 經驗快取當主規劃器 + 量
+  cache-hit 率。這是 C 的證偽測試，也是平行 agent S_span Phase 2 的**正確方向**
+  （取代原路 B）。
+- ⬜ 光錐 **S1** 延伸：Aris 學「自己查 vs 委派 Scream 深做」，用 **E1 不可作弊信號**。
+- ⬜ **C-b（有界 LLM-on-miss，prefer c2）**：命中率過關才加；前置 **E1 + E2**。
+- ⬜ **E3 / 柱②**：異質任務集 + baseline，量 S_span/前瞻是否真的 > 純規則表。
+- 此站達成 = 你設想的「Aris×Scream 成本更低分工」，agency 全程 zero-LLM
+  （LLM 深工作外包 Scream = c2，繞過 §4 zero-LLM 難題）。
 
 **這站是甲的終點。** 到這裡系統已經很強且全程安全可逆。**預設就停在這。**
 
