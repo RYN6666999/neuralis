@@ -208,6 +208,15 @@ def _psi_memories_sync(query: str) -> list[str]:
                     continue
                 _quoted_recently.append(key)
                 out.append(t[:80])
+                # E1.2：agency 記憶被 recall 進回應 = 真被用到 → 記下游效用信號
+                try:
+                    import re as _re
+                    from laap import memory_utility
+                    _m = _re.search(r"mem-\d+-\w+", str(h.get("slug", "")))
+                    if _m:
+                        memory_utility.record_recall(_m.group(0))
+                except Exception:
+                    pass
                 if len(out) >= 2:
                     break
             return out

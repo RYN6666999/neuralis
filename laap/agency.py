@@ -158,7 +158,27 @@ class AgencyLoop:
         effective = self.interval * factor
         return effective
 
+    def _apply_utility_rewards(self) -> None:
+        """E1.2 延遲獎勵：被 recall 用到的 agency 記憶 → 獎勵其 need/angle 權重。
+        下游效用信號進學習 —— 綁『被想起』不綁長度，長垃圾騙不了。"""
+        try:
+            from laap import memory_utility
+            from laap.constitution import get_constitution
+        except Exception:
+            return
+        for r in memory_utility.pending_rewards():
+            mem_id, need, angle = r["mem_id"], r.get("need"), r.get("angle")
+            if need and angle:
+                stats = self._need_stats.setdefault(
+                    need, {"expected": 0.3, "rpes": [], "angle_weights": {}})
+                aw = stats["angle_weights"]
+                allowed = get_constitution().guard_weight(need, angle, r["reward"] * 0.5)
+                aw[angle] = max(0.1, min(3.0, aw.get(angle, 1.0) + allowed))
+                logger.info(f"[Agency] E1.2 延遲獎勵 {need}/{angle} +{allowed:.3f}（記憶被 recall）")
+            memory_utility.mark_credited(mem_id)
+
     def _evaluate(self) -> None:
+        self._apply_utility_rewards()   # E1.2：先發被 recall 記憶的延遲獎勵
         # 任務佇列模式：當有活躍目標時，繞過隨機驅動評估
         if self._task_queue and self._task_index < len(self._task_queue):
             self._execute_next_task()
@@ -584,6 +604,13 @@ class AgencyLoop:
                     tags=["agency", need], importance=importance)
                 self.psi.satisfy(need, 0.2, "agency")
                 self._seed_snippet = self._extract_seed(result)
+                # E1.2：記 provenance（哪個 need/tool/angle 產生這條記憶）—
+                # 之後這條被 recall 用到 → 發延遲效用獎勵給該 angle
+                try:
+                    from laap import memory_utility
+                    memory_utility.tag_memory(mem_id, need, tool, used_angle)
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning(f"[Agency] 回寫失敗: {e}")
 
