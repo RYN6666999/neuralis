@@ -51,7 +51,7 @@ def cmd_analyze(rng="HEAD~5..HEAD"):
         for f in files:
             for d,k in kw.items():
                 if any(kk in f["p"] for kk in k): dom.add(d)
-        out.append({"hash":h,"author":raw[1],"date":raw[3],"subject":raw[4],"body":raw[5][:200],"domains":sorted(dom) if dom else ["other"],"files":files})
+        out.append({"hash":h,"author":raw[1],"date":raw[3],"subject":raw[4],"body":raw[5][:200] if len(raw)>5 else "","domains":sorted(dom) if dom else ["other"],"files":files})
     return out
 
 
