@@ -447,6 +447,41 @@ class AgencyLoop:
                 weights[angle] = 1.0  # 新角度初始權重
         return weights if weights else {"": 1.0}
 
+    def _candidate_tools(self, need: str) -> list:
+        """此 need 可用的工具集（S1：讓 RPE 學「哪個工具好用」的選項空間）。
+
+        gbrain 一律在（預設路）；competence 額外有 scream-ask；_AGENTOS_TOOL_MAP
+        的 need 額外有對應 AgentOS 工具（web-search 等）。scream-task（C-b 委派）
+        不在此集 —— 它是獨立的休眠前瞻路，不參與 S1 的工具選擇。
+        """
+        tools = ["gbrain"]
+        if need == "competence" and "問Scream" in self._ANGLE.get("competence", ""):
+            tools.append("scream-ask")
+        if need in self._AGENTOS_TOOL_MAP:
+            tools.append(self._AGENTOS_TOOL_MAP[need][0])
+        return tools
+
+    def _get_tool_weights(self, need: str) -> dict:
+        """per-(need, tool) bandit 權重（S1）。mirror _get_angle_weights：新工具初始
+        1.0，RPE 正 → 升、負 → 降（更新在 _bump_tool_weight，過憲法 guard_weight）。"""
+        stats = self._need_stats.get(need, {})
+        weights = dict(stats.get("tool_weights", {}))
+        for tool in self._candidate_tools(need):
+            weights.setdefault(tool, 1.0)
+        return weights
+
+    def _bump_tool_weight(self, need: str, tool: str, rpe: float) -> None:
+        """S1: RPE 回寫工具權重（mirror 角度，過同一條憲法 guard_weight 煞車 +
+        [0.1, 3.0] 硬夾）。非候選工具不動。"""
+        if tool not in self._candidate_tools(need):
+            return
+        from laap.constitution import get_constitution
+        stats = self._need_stats.setdefault(need, {"tool_weights": {}})
+        tw = stats.setdefault("tool_weights", {})
+        old = tw.get(tool, 1.0)
+        allowed = get_constitution().guard_weight(need, f"tool:{tool}", rpe * 0.5)
+        tw[tool] = max(0.1, min(3.0, old + allowed))
+
     def _cache_lookup(self, need: str, seed: str):
         """C-a：決策前問 gbrain 快取有沒有相關經驗（gbrain-first）。
         記 hit/miss → 真實命中率（校準 backtest 的粗略 65%）。命中用『詞相關』
@@ -524,28 +559,30 @@ class AgencyLoop:
         else:
             angle = max(weights, key=weights.get)       # 利用
         query = f"{seed} {angle}".strip()
-        # T5: 工具路由 — exploration 觸發時選擇使用哪個工具
+        # S1: 工具路由 — epsilon-greedy 依學來的 tool_weights 選（取代原 random 硬幣）。
+        # 探索時隨機抽候選、利用時取權重最高；RPE 在 _act 回寫 tool_weights。
+        def _tool_query(t: str) -> str:
+            if t == "scream-ask":
+                return f"問Scream {seed}".strip()
+            if need in self._AGENTOS_TOOL_MAP and t == self._AGENTOS_TOOL_MAP[need][0]:
+                return f"{seed} {self._AGENTOS_TOOL_MAP[need][1]}".strip()
+            return query  # gbrain 預設
+        candidates = self._candidate_tools(need)
+        tw = self._get_tool_weights(need)
         if random.random() < self._effective_exploration():
-            # competence: web-search 與 scream-ask 公平競爭
-            if need == "competence" and "問Scream" in self._ANGLE.get("competence", ""):
-                if random.random() < 0.5:
-                    scream_query = f"問Scream {seed}".strip()
-                    if not self._too_similar(scream_query, tool="scream-ask"):
-                        self._recent_queries.append(self._norm(f"scream-ask: {scream_query}"))
-                        return ("scream-ask", scream_query)
-            # AgentOS 工具路由（web-search 等）
-            if need in self._AGENTOS_TOOL_MAP:
-                agentos_tool, agentos_angle = self._AGENTOS_TOOL_MAP[need]
-                agentos_query = f"{seed} {agentos_angle}".strip()
-                if not self._too_similar(agentos_query, tool=agentos_tool):
-                    self._recent_queries.append(self._norm(f"{agentos_tool}: {agentos_query}"))
-                    return (agentos_tool, agentos_query)
-        # 預設 gbrain 路徑
-        if self._too_similar(query, tool="gbrain"):
+            chosen = random.choice(candidates)                       # 探索
+        else:
+            chosen = max(candidates, key=lambda t: tw.get(t, 1.0))   # 利用
+        tq = _tool_query(chosen)
+        if self._too_similar(tq, tool=chosen):
+            # 選中的太像 → 退回 gbrain 預設（保住行動機會，同舊 fallback 行為）
+            if chosen != "gbrain" and not self._too_similar(query, tool="gbrain"):
+                self._recent_queries.append(self._norm(f"gbrain: {query}"))
+                return ("gbrain", query)
             self.skipped_stale += 1
             return None
-        self._recent_queries.append(self._norm(f"gbrain: {query}"))
-        return ("gbrain", query)
+        self._recent_queries.append(self._norm(f"{chosen}: {tq}"))
+        return (chosen, tq)
 
     def _effective_exploration(self) -> float:
         """情緒偏差調變探索率（affective 引擎的偏差接真參數 — 移植的意義所在）。
@@ -604,7 +641,7 @@ class AgencyLoop:
         # ── RPE 計算 ──
         outcome = self._score_result(result, tool=tool) if ok else 0.0
         stats = self._need_stats.setdefault(need, {
-            "expected": 0.3, "rpes": [], "angle_weights": {}})
+            "expected": 0.3, "rpes": [], "angle_weights": {}, "tool_weights": {}})
         expected = stats["expected"]
         rpe = outcome - expected
         stats["expected"] = 0.9 * expected + 0.1 * outcome  # EMA
@@ -626,6 +663,9 @@ class AgencyLoop:
             # 憲法：權重變速上限 + 小時預算凍結（防 gbrain 分數線異常時垃圾訊號永久累積）
             allowed = get_constitution().guard_weight(need, used_angle, rpe * 0.5)
             aw[used_angle] = max(0.1, min(3.0, old + allowed))
+
+        # ── S1: 工具權重更新（mirror 角度，過同一條憲法煞車）──
+        self._bump_tool_weight(need, tool, rpe)
 
         # ── RPE 結果 → 5 維情緒事件（行動後果塑形情緒，情緒再回頭調變探索）──
         try:
