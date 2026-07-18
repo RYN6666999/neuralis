@@ -1,0 +1,16 @@
+{
+"ccp_id":"CCP-001-final",
+"base":"2982b68",
+"commits":[
+{"h":"7e1d403","m":"ponytail: 4合1 + 砍死碼 — 71% 行數減少"},
+{"h":"4b145a1","m":"fix: 補好三個缺口 — 憑證隔離 + path-DENY 共用 + 統一輸出格式"}
+],
+"files":[
+{"s":"M","p":".gitignore"},
+{"s":"D","p":".sandbox-start"},
+{"s":"A","p":"scripts/sandbox.py"},
+{"s":"M","p":"scripts/scream-task-executor.py"}
+],
+"diff_lines":     514,
+"test":{"passed":188,"failed":0}
+}

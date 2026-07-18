@@ -1,0 +1,42 @@
+{
+  "phase1_sample_analysis": {
+    "generated_at": "2026-07-18T15:33:17.446612",
+    "type": "four-facet-analysis",
+    "commit": "bc6e8487d7dda9671649139ad8219123713bd7c2",
+    "subject": "feat: E3 S_span 驗收 benchmark + 修 C-b 安全洞（專屬開關）"
+  },
+  "benefit": {
+    "description": "E3 誠實驗收：S_span 有了可證偽的度量（behavior_entropy + learning_correlation），能客觀判斷 agency 學習是否真的優於規則表。實測學習相關 0.80、熵 2.72 vs baseline 1.51。C-b 安全洞修復：專屬開關 NEURALIS_AGENCY_DELEGATE 預設 OFF，不搭舊批准便車，防止自主委派意外啟用。",
+    "magnitude": "large",
+    "who_feels_it": "開發者（現在有 S_span 的客觀驗收尺）+ Ryan（安全洞被封）",
+    "confidence": 0.9
+  },
+  "harm": {
+    "description": "新增 laap/s_span_bench.py (54 行) + scripts/benchmark-s-span.py (72 行) + tests/test_s_span_bench.py (40 行) + 修改 4 個既有檔案。新增一個專屬環境變數 NEURALIS_AGENCY_DELEGATE。",
+    "complexity_increase": "moderate",
+    "confidence": 0.85
+  },
+  "risk": {
+    "description": "最壞情況：C-b 專屬開關的邏輯有 bug，導致開關 ON 時仍不委派（false negative）或開關 OFF 時仍委派（false positive）。前者無害（C-b 不做事），後者被多重護欄擋住（path-DENY + 批准閘 + 成本閘）。",
+    "probability": 0.1,
+    "recoverable": true,
+    "confidence": 0.8
+  },
+  "cost": {
+    "dev_time_hours": 3.0,
+    "api_cost_usd": 0.5,
+    "ryan_attention": "medium",
+    "confidence": 0.75
+  },
+  "overall": {
+    "evidence_strength": "strong",
+    "evidence_detail": "pytest 188 passed; C-b 乾淨 env 確認休眠; S_span 實測 102 筆決策有效",
+    "recommendation": "approve",
+    "confidence": 0.85
+  },
+  "retrospective_notes": {
+    "would_do_differently": "s_span_bench.py 和 benchmark-s-span.py 可以合併成一個檔案，減少新增檔案數。NEURALIS_AGENCY_DELEGATE 環境變數應該在 Capability Manifest 中集中管理。",
+    "what_worked": "專屬開關設計（不搭舊批准便車）是正確的安全決策。S_span 的 learning_correlation 是很好的客觀度量。",
+    "what_didnt": "沒有事先建立 Capability Manifest 格式，導致新的 env 變數又散落在不同位置。"
+  }
+}

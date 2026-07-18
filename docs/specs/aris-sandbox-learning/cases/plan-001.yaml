@@ -1,0 +1,42 @@
+---
+plan_id: 'PLAN-001'
+generated_at: '2026-07-18T07:35:55.536515+00:00'
+phase: '2-suggestion'
+status: 'draft'
+
+# ── 問題與假設 ──
+problem: 'scream-task-executor 是 v0 stub，所有任務回模擬結果而非實際呼叫 Scream 工具'
+category: 'reliability'
+domain: 'scream-channel'
+if_not_done: '如果不處理此問題，不穩定因素未排除'
+falsifiable: '可證偽：如果修改後 問題仍然可復現，則方案無效'
+
+# ── 預測 ──
+predicted_benefit: '穩定性提升'
+measurable: '修改後既有測試仍全部通過'
+worst_case: '修改 scripts/scream-task-executor.py, laap/safety_gate.py 導致既有功能異常'
+recoverable: true
+est_dev_hours: 2.0
+est_api_cost: 0
+
+# ── 候選路線 ──
+  - route: 'A'
+    description: '直接修改 scripts/scream-task-executor.py, laap/safety_gate.py'
+    files: ["scripts/scream-task-executor.py", "laap/safety_gate.py"]
+    effort: 'medium'
+
+# ── CCP（diff 為空 — Phase 2）──
+base_commit: 'bc6e848'
+candidate_commit: null
+files_to_modify: ["scripts/scream-task-executor.py", "laap/safety_gate.py"]
+diff: null
+diff_stats: {files: 2, ins: 0, del: 0}
+test_plan: '修改後執行 pytest tests/'
+
+# ── 條件 ──
+success_conditions:
+  - '修改後既有測試仍全部通過'
+stop_conditions:
+  - '測試失敗且無法在三輪迭代內修復'
+
+# ⚠️ Phase 2：計畫尚未實作。diff 為空，無沙箱建立。
