@@ -447,6 +447,22 @@ class AgencyLoop:
                 weights[angle] = 1.0  # 新角度初始權重
         return weights if weights else {"": 1.0}
 
+    def _cache_lookup(self, need: str, seed: str):
+        """C-a：決策前問 gbrain 快取有沒有相關經驗（gbrain-first）。
+        記 hit/miss → 真實命中率（校準 backtest 的粗略 65%）。命中用『詞相關』
+        不用原始分數（backtest 教訓）。回經驗字串或 None。
+        『hit 用快取 / miss 委派 Scream』的分支是 C-b —— 這裡只做查詢 + 量測。"""
+        try:
+            from laap import experience_cache as ec
+            from gbrain_client import get_client, hybrid_hits
+            client = get_client()
+            hits = hybrid_hits(client, seed[:100], 5) if client is not None else []
+            r = ec.lookup(seed, hits)
+            ec.record(r["hit"], need)
+            return r["experience"]
+        except Exception:
+            return None
+
     def _form_intent(self, need: str):
         if need not in self._ANGLE:
             return None
@@ -464,6 +480,7 @@ class AgencyLoop:
         if not seed:
             self.skipped_stale += 1
             return None
+        self._cache_lookup(need, seed)   # C-a：gbrain-first 查快取 + 記真實命中率
         # RPE 角度選擇：依權重抽樣（epsilon-greedy，探索率被情緒偏差調變）
         weights = self._get_angle_weights(need)
         if not weights or not self._ANGLE.get(need, ""):

@@ -68,6 +68,15 @@ def main():
               f" | interval={eff}s"
               + (f" | {trust_str}" if trust_str else "")
               + (f" | {rpe}" if rpe else ""))
+        # C-a：gbrain 快取真實命中率（校準 backtest 65%）
+        try:
+            from laap.experience_cache import hit_rate
+            hr = hit_rate()
+            if hr["total"]:
+                print(f"🗃️  快取命中率 {hr['rate']:.0%} ({hr['hits']}/{hr['total']}) "
+                      f"— gbrain-first 扛下 {hr['rate']:.0%} 決策，miss 才委派")
+        except Exception:
+            pass
         agentos_tools = ag.get('agentos_tools_used', [])
         if agentos_tools:
             print(f"    AgentOS 工具: {', '.join(agentos_tools)}")
