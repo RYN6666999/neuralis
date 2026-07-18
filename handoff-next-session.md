@@ -1,5 +1,40 @@
 # 線頭 — 給下一手
 
+## ✅ 認知光錐「甲」完成（2026-07-18，commit bc6e848）— 建好但刻意休眠
+
+甲 = 安全自我進化的保守路（Aris 調判斷/分工，**不改自己核心碼**；乙 = 他 agent
+改 Aris 認知碼，人類手動閘，鑰匙永遠在 Ryan）。安全脊椎 6 階段全蓋，**防護欄先於能力**：
+- **Stage 0 硬邊界**：path-DENY（Scream 委派永不碰 `~/Developer/neuralis/laap/**`）·
+  scream-task 重分類 write · commit 級快照（`laap/snapshot.py`）
+- **Stage 1 評分完整性**：E1.1 de-game（堵 `_score_result` len/500 刷分洞）·
+  E1.2 下游效用信號（`laap/memory_utility.py`：記憶被 recall 用到才有獎，長度騙不了）
+- **Stage 2 成本閘**：E2（`laap/cost_ledger.py`，200k tokens/hr，超支降頻）
+- **Stage 4 分工**：C-a（`laap/experience_cache.py` gbrain 快取當規劃器 + 真實命中率
+  量測）· C-b（`agency._should_delegate`/`_form_delegation_intent`：cache-miss 委派
+  Scream 前瞻 = c2，agency 全程 zero-LLM）
+
+**E3 驗收**（`laap/s_span_bench.py` + `scripts/benchmark-s-span.py`）：選擇-outcome
+相關 **0.80**（學了不是隨機）· 多樣性熵 **2.72** vs 規則表 baseline 1.51 · live cache
+hit **64%**（對上 backtest 65%，校準通過）· pytest **188 passed**。
+
+**⚠️ 安全修復（血訓）**：backtest v1 假 100%（gbrain 對亂碼查詢 top hit 也 0.84 +
+查到自己寫的記憶）— 命中改用「詞相關」不用原始分數。且發現 approved-tools.txt
+遺留 scream-task 全域批准（舊 Q&A 頻道批的）→ C-b 差點 live。修：①C-b 專屬
+`NEURALIS_AGENCY_DELEGATE` 預設 **OFF**（不搭舊批准便車）②**07-18 已撤銷 approved-tools.txt
+的舊 scream-task 全域批准**（`approve-tool.sh -r scream-task`；專屬開關只封 Agency，
+全域批准會被其他呼叫路徑搭便車 → 未來接真 Scream 是延遲安全洞）③測試改 hermetic。
+
+**現況 = 建好但刻意休眠。禁止事項（下一手必讀）：**
+- 🚫 **禁 default-on** — 自主委派 + 真寫入是系統最高風險模式，須觀察後有意識決定
+- 🚫 **禁「只開 delegate 餵模擬結果」** — scream-task-executor **仍是 stub**，回假數據，學習會學歪
+- 真自主寫入要**兩個開關都開**：`NEURALIS_AGENCY_DELEGATE=on`（Aris 委派）+
+  executor 接真 Scream（RCE 面，Ryan 親接 + 簽名）
+- **下一步不是乙**；是「先撤舊批准（✅ 已做）→ 設計有人監督的真 executor canary」
+- 紅線：E3 只證「102 樣本內有學習訊號」，**未證長期泛化與無人值守安全**。
+  正確結論 = **甲驗收完成，但不啟用**。
+- spec 全在 `docs/specs/safe-self-evolution-route.md`（脊椎）+ cognitive-light-cone-plan
+  + rpe-evaluation-integrity。
+
 ## ✅ P0-P3 依序執行完（2026-07-17 晚）— commit wave + 凍結修復 + daemon 自動化
 - **Commit wave**：7/16-7/17 兩天散工全數入庫（交錯串流 / 對話迴路+任務佇列 /
   docs / 凍結修復 / daemon），樹乾淨。rust/target 入 gitignore（只有建置產物無源碼）。
