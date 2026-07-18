@@ -36,6 +36,12 @@ _STREAM_FIRST_S = float(os.environ.get("NEURALIS_STREAM_FIRST_S", 12))
 _STREAM_IDLE_S = float(os.environ.get("NEURALIS_STREAM_IDLE_S", 130))
 _BOOT_TS = time.time()
 
+_SSE_HEADERS = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+}
+
 
 def _content_text(c) -> str:
     """content 可能是 str / OpenAI content parts list / None（assistant tool_calls）。"""
@@ -317,6 +323,11 @@ def _build_response(content: str, engine: str, model: str, prompt_chars: int) ->
     }
 
 
+def _psi_engine_name() -> str:
+    """psi 回應引擎標籤：NEURALIS_LLM_RESPOND 開 → psi-llm，否則 psi-respond。"""
+    return "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
+
+
 def _make_chat_handler(orig_handler):
     """包住作者 chat handler：(1) 餵 psi (2) 非 streaming 走 executor 卸載 + timeout
     （治 event loop 阻塞隱患）。streaming 走作者原 handler（少數，保留其 SSE 邏輯）。"""
@@ -337,6 +348,9 @@ def _make_chat_handler(orig_handler):
         user_msg = _extract_user_msg(body)
         user_turn = _is_user_turn(body) and not _is_harness_noise(user_msg)
         fed = _feed(user_msg) if user_turn else None
+        model = body.get("model", "laap-core")
+        messages = body.get("messages", [])
+        prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
 
         # 忙碌保護：只擋「互斥通道」工具（scream-ask/scream-task — 新對話會真的
         # 打斷 Q&A/任務往返）。一般工具（gbrain/web-search/agency 背景查詢）不擋 —
@@ -352,9 +366,6 @@ def _make_chat_handler(orig_handler):
                    and _st.get("tool") in _EXCLUSIVE_TOOLS \
                    and time.time() - _st.get("ts", 0) < 120:
                     _busy_msg = f"（正在執行 {_st.get('description', '工作')}，請稍等，完成後會通知你。）"
-                    model = body.get("model", "laap-core")
-                    messages = body.get("messages", [])
-                    prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
                     return web.json_response(_build_response(_busy_msg, "laap-busy", model, prompt_chars))
             except Exception:
                 pass
@@ -377,7 +388,7 @@ def _make_chat_handler(orig_handler):
         # 逐事件 SSE 出去（不經 LLM，確定性驗證整條交錯串流管線）
         if user_turn and body.get("stream") \
            and user_msg.strip().lower().replace("-", "_") == "stream_test":
-            live = await _stream_tool_test(request, web, body.get("model", "laap-core"))
+            live = await _stream_tool_test(request, web, model)
             if live is not None:
                 return live
 
@@ -385,9 +396,7 @@ def _make_chat_handler(orig_handler):
         # 工具執行過程交錯顯示。LLM 啞掉（無 key/連不上/零 token）回 None，
         # 落回下面的三路 RACE（含假串流），行為不比現在差。
         if user_turn and body.get("stream") and fed:
-            live = await _stream_live(request, web, fed, user_msg,
-                                      body.get("messages", []),
-                                      body.get("model", "laap-core"))
+            live = await _stream_live(request, web, fed, user_msg, messages, model)
             if live is not None:
                 return live
 
@@ -400,10 +409,6 @@ def _make_chat_handler(orig_handler):
 
         # 三路平行：(A) LLM 回應 (B) 作者管線 (C) 記憶召回
         # RACE：誰先出可用內容就用誰，取消慢的那路。
-        model = body.get("model", "laap-core")
-        messages = body.get("messages", [])
-        prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
-
         loop = asyncio.get_event_loop()
         import laap_brain_api as api   # 執行時已載入（runpy 起 API 後）
 
@@ -443,7 +448,7 @@ def _make_chat_handler(orig_handler):
                 psi_content = llm_task.result()
                 if psi_content:
                     content = psi_content
-                    engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
+                    engine = _psi_engine_name()
             except Exception:
                 pass
 
@@ -471,7 +476,7 @@ def _make_chat_handler(orig_handler):
                     psi_content = llm_task.result()
                     if psi_content:
                         content = psi_content
-                        engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
+                        engine = _psi_engine_name()
             except Exception:
                 pass
 
@@ -481,7 +486,7 @@ def _make_chat_handler(orig_handler):
                 psi_content = _psi_respond(fed, user_msg, memories=memories)
                 if psi_content:
                     content = psi_content
-                    engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
+                    engine = _psi_engine_name()
             except Exception:
                 pass
 
@@ -563,11 +568,7 @@ async def _tool_chat(request, web, body: dict, fed):
     # Streaming 路徑：真串流含 thinking token
     if is_stream:
         from laap.llm_respond import respond_tools_stream
-        resp = web.StreamResponse(headers={
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        })
+        resp = web.StreamResponse(headers=_SSE_HEADERS)
         await resp.prepare(request)
         rid = f"laap-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
@@ -690,11 +691,7 @@ async def _stream_sse(request, web, result: dict, model: str):
     tool_call 先送 id/name 空殼，arguments 分段補 — 與 OpenAI delta 累加語義一致。"""
     msg = result["message"]
     fin = result.get("finish_reason", "stop")
-    resp = web.StreamResponse(headers={
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-    })
+    resp = web.StreamResponse(headers=_SSE_HEADERS)
     await resp.prepare(request)
     rid = f"laap-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
@@ -748,11 +745,7 @@ async def _sse_from_queue(request, web, q: "asyncio.Queue", model: str,
     None = 結束哨兵。token 原樣出；reasoning 走 delta.reasoning（scream 渲染 🧠）；
     tool_status 以獨立行出（前後補換行）。最終 chunk 帶 engine 欄位。
     客戶端斷線 → set cancel（pump 停止迭代 → GeneratorExit 中止工具子行程）。"""
-    resp = web.StreamResponse(headers={
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-    })
+    resp = web.StreamResponse(headers=_SSE_HEADERS)
     await resp.prepare(request)
     rid = f"laap-{uuid.uuid4().hex[:12]}"
     created = int(time.time())

@@ -137,6 +137,13 @@ def test_compose_psi_reply_is_traceable():
     assert "某段記憶" in reply_mem and "想起" in reply_mem
 
 
+def test_psi_engine_name(monkeypatch):
+    monkeypatch.setenv("NEURALIS_LLM_RESPOND", "on")
+    assert cf._psi_engine_name() == "psi-llm"
+    monkeypatch.setenv("NEURALIS_LLM_RESPOND", "off")
+    assert cf._psi_engine_name() == "psi-respond"
+
+
 def test_take_pending_memories_freshness():
     cf._pending_memories["lines"] = ["late recall"]
     cf._pending_memories["ts"] = time.time()
