@@ -40,3 +40,4 @@ status.json
 
 # Rust build artifacts
 rust/target/
+.sandbox-start
