@@ -43,6 +43,32 @@ def learning_correlation(records: list) -> dict:
     return {"corr": _pearson(xs, ys), "n_choices": n, "n_records": len(records)}
 
 
+def tool_learning(records: list) -> dict:
+    """S1 專屬度量：工具選擇是否學來的（per-need，隔離 need 路由的干擾）。
+
+    E3 的 (need,tool) 相關把「學會路由到哪個 need」和「學會哪個工具好用」混在一起。
+    S1 的主張只是後者，所以對每個 need 內部算『工具選擇頻率 vs 平均 outcome』相關，
+    再取各 need 加權平均。學了 → need 內常選的工具平均 outcome 較高（正相關）；
+    隨機（S1 前的 random 硬幣）→ ~0。
+
+    records: [{need, tool, outcome}]。回 {per_need, mean_corr, n_needs}。
+    """
+    by_need = defaultdict(list)
+    for r in records:
+        by_need[r["need"]].append(
+            {"choice": r["tool"], "outcome": r.get("outcome", 0)})
+    per = {}
+    for need, recs in by_need.items():
+        lc = learning_correlation(recs)
+        if lc["corr"] is not None:
+            per[need] = lc["corr"]
+    if not per:
+        return {"per_need": {}, "mean_corr": None, "n_needs": 0}
+    return {"per_need": per,
+            "mean_corr": sum(per.values()) / len(per),
+            "n_needs": len(per)}
+
+
 def _pearson(xs: list, ys: list) -> float:
     n = len(xs)
     mx, my = sum(xs) / n, sum(ys) / n

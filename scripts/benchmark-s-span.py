@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from laap.s_span_bench import behavior_entropy, learning_correlation
+from laap.s_span_bench import behavior_entropy, learning_correlation, tool_learning
 
 AUDIT = ROOT / "agency-audit.jsonl"
 
@@ -39,6 +39,15 @@ print(f"1. 選擇非隨機性（學了 vs 規則表）")
 print(f"   (need,tool) 選擇頻率 vs 平均 outcome 相關: "
       f"{corr if corr is None else round(corr, 3)}  "
       f"（{lc['n_choices']} 種選擇）")
+
+# 1b. S1 專屬：工具選擇是否學來的（per-need，隔離 need 路由）
+tl = tool_learning(recs)
+mc = tl["mean_corr"]
+print(f"\n1b. S1 工具選擇學習（per-need，隔離 need 路由）")
+print(f"    per-need 工具選擇↔outcome 平均相關: "
+      f"{mc if mc is None else round(mc, 3)}  （{tl['n_needs']} 個 need 可算）")
+for need, c in sorted(tl["per_need"].items()):
+    print(f"      {need}: {c:+.3f}")
 
 # 2. 動作多樣性熵 vs 規則表 baseline
 learned_ent = behavior_entropy([(r["need"], r["tool"]) for r in recs])
