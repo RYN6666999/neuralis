@@ -1,5 +1,32 @@
 # 線頭 — 給下一手
 
+## 🔻 2026-07-19 session — 基建 + 光錐 S1 + canary 前提（下一步是「跑 Aris 蒐證」）
+
+**這 session 做完、全部走 pre-commit 閘（見下）：**
+- **pre-commit 閘上線**（`aa7d009`）：`scripts/pre-commit.sh` symlink 進 `.git/hooks/`，
+  每次 commit 跑 `tests/`（用 `/opt/homebrew/bin/python3`，rtk 的 python3 沒 numpy）。
+  ecc 同款。這治了「改完沒跑就上 main」——本波開頭 ponytail 砍壞 executor 就是這樣進 main 的。
+- **Aris 讀圖**（`2f6cce3`）：`patch-scream-image.py` 讓 scream-code 放行拖曳圖片（laap-core
+  的 image_in=true）；neuralis 把含圖那輪路由到 `NEURALIS_VISION_MODEL`（預設
+  gemini-2.0-flash-001）。**要重啟 Scream 才生效。**
+- **回合中止觀測層**（`29788c4`，健壯性 Phase 1）：`laap/error_log.py`，中止/工具失敗寫
+  `~/.neuralis/aris-errors.jsonl`（traceback+上下文）。Phase 2（對症硬化）gated on 累積真中斷樣本。
+- **光錐 S1（學工具選擇）live**（`b2c15df`）+ 度量（`5a3094d`）：見 `cognitive-light-cone-plan.md`
+  執行進度。zero-LLM，不需休眠。
+- **canary 兩前提齊**：觀測層 ✅ + executor 監督(propose)模式（`442afa6`，`NEURALIS_EXECUTOR_MODE=propose`
+  預設，每任務先提案等人批准）。
+- **S2-shadow**（`77e2027`）：前瞻預測器 shadow 蒐證，**不改行為**，等資料證明前瞻贏 bandit（§9）。
+
+**下一手該做的（照 spec 紀律，都 gated on 資料/研究，別盲建）：**
+1. **跑 Aris 一陣**，讓 S1 + S2-shadow 累積真決策資料。
+2. `PYTHONPATH=.:../laap-AGI python scripts/benchmark-s-span.py` 看判決：S1 工具選擇是否
+   正相關 outcome（§6）、2b S2 前瞻投資閘是否轉綠（§9）。
+3. 綠了才做 **S2 真前瞻**（建好即休眠，propose 模式下每個委派要人批准）。
+4. **S3（學選目標）** 仍 gated on §7 內在動機理論 + 證偽條件（未解）。
+5. 中止再犯 → 貼 `~/.neuralis/aris-errors.jsonl` 做健壯性 Phase 2。
+
+---
+
 ## ✅ 認知光錐「甲」完成（2026-07-18，commit bc6e848）— 建好但刻意休眠
 
 甲 = 安全自我進化的保守路（Aris 調判斷/分工，**不改自己核心碼**；乙 = 他 agent
