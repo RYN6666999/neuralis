@@ -54,7 +54,7 @@ cases = [
     ("[0.82] slug — text\n[0.75] slug2 — more", 0.785 + 0.12, "2 hit 高品質"),
     ("[0.50] slug — text", 0.50 + 0.06, "1 hit 中等"),
     ("[0.10] slug — text\n[0.05] slug2 — text", 0.075 + 0.12, "2 hit 低品質"),
-    ("something without scores", min(0.4, 25 / 500), "無分數但有內容"),
+    ("something without scores", 0.4, "無分數但有內容（E1.1 flat base，非 len/500）"),
 ]
 for result, expected, label in cases:
     score = agency._score_result(result)

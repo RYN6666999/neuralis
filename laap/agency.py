@@ -400,9 +400,11 @@ class AgencyLoop:
             if m:
                 scores.append(float(m.group(1)))
         if not scores:
-            # AgentOS 工具結果無 [score] 前綴，給較高基礎分
-            base = 0.6 if classify(tool) in ("readonly_agentos",) else 0.4
-            return min(base, len(result) / 500)
+            # 無 [score] 前綴（web-search 等結構化結果）：給 flat 分級基礎分。
+            # 曾用 min(base, len/500) — 純長度信號 = 刷分漏洞（長垃圾 0.6 vs 短好 0.006）。
+            # E1.1 拿掉長度（改 flat）；真的品質區分留給 E1.2 下游效用信號
+            # （agency 寫的記憶後續有沒有被 recall 用到），不是長度。
+            return 0.6 if classify(tool) in ("readonly_agentos",) else 0.4
         hit_count = len(scores)
         avg_score = sum(scores) / len(scores)
         # 組合：平均分為主 + hit 數加成（遞減），鼓勵多樣化但不鼓勵垃圾多
