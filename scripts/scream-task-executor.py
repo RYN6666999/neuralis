@@ -27,6 +27,56 @@ PROCESSED = "/tmp/aris-scream-processed-ids.json"
 LOCK = "/tmp/aris-scream-task-lock"
 API_URL = "http://localhost:11546/v1/chat/completions"
 POLL_INTERVAL = 1.0
+# 監督模式（S2 canary 前提）：propose = 每個任務先提案、等人批准才執行（預設，安全）；
+# auto = 收到即執行（舊行為，須顯式開）。人批准 = 往頻道寫 {type:"approval", task_id}。
+_MODE = os.environ.get("NEURALIS_EXECUTOR_MODE", "propose").lower()
+
+
+def scan_decisions(entries: list) -> dict:
+    """從頻道 entries 抽出人類對每個 task 的決定 + 已提案集。
+    回 {"approved": set, "rejected": set, "proposed": set}（純函式，可測）。"""
+    approved, rejected, proposed = set(), set(), set()
+    for e in entries:
+        tid = e.get("task_id") or e.get("id")
+        if not tid:
+            continue
+        t = e.get("type")
+        if t == "approval":
+            approved.add(tid)
+        elif t == "rejection":
+            rejected.add(tid)
+        elif t == "proposal":
+            proposed.add(tid)
+    return {"approved": approved, "rejected": rejected, "proposed": proposed}
+
+
+def decide(task_id: str, mode: str, decisions: dict) -> str:
+    """該對這個 task 做什麼：'execute' | 'skip' | 'propose' | 'wait'（純函式）。
+    auto → 一律 execute；propose → 批准才 execute、拒絕 skip、已提案未決 wait、
+    未提案 propose。"""
+    if mode == "auto":
+        return "execute"
+    if task_id in decisions["rejected"]:
+        return "skip"
+    if task_id in decisions["approved"]:
+        return "execute"
+    if task_id in decisions["proposed"]:
+        return "wait"
+    return "propose"
+
+
+def make_proposal(entry: dict) -> dict:
+    """把 task 轉成提案（給人看『我打算做什麼』，不執行）。"""
+    return {
+        "ts": time.time(),
+        "direction": "scream→aris",
+        "type": "proposal",
+        "task_id": entry.get("id"),
+        "task_type": _classify_task(entry.get("content", "")),
+        "preview": (entry.get("content", "") or "")[:200],
+        "note": "監督模式：往頻道寫 {\"type\":\"approval\",\"task_id\":\""
+                + str(entry.get("id", "")) + "\"} 以批准；rejection 以拒絕。",
+    }
 
 
 def acquire_lock() -> bool:
@@ -228,9 +278,26 @@ def post_to_aris(result: dict):
         pass  # Aris 下次輪詢時會從頻道收到結果
 
 
+def _append(obj: dict) -> None:
+    with open(CHANNEL, "a") as fw:
+        fw.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _run_task(entry: dict, processed: set) -> None:
+    result = execute_task(entry)
+    _append(result)
+    post_to_aris(result)
+    processed.add(entry["id"])
+    save_processed(processed)
+    print(f"[scream-task-executor] 執行 task {entry['id'][:8]}: "
+          f"{entry.get('content', '')[:40]}")
+
+
 def main():
     processed = load_processed()
-    print(f"[scream-task-executor] 啟動 (已處理 {len(processed)} 個 ID)")
+    print(f"[scream-task-executor] 啟動 (mode={_MODE}, 已處理 {len(processed)} 個 ID)")
+    if _MODE != "auto":
+        print("[scream-task-executor] 監督模式：每個任務先提案、等人批准才執行")
     while True:
         if not acquire_lock():
             time.sleep(POLL_INTERVAL)
@@ -239,27 +306,34 @@ def main():
             if not os.path.exists(CHANNEL):
                 time.sleep(POLL_INTERVAL)
                 continue
+            entries = []
             with open(CHANNEL) as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        entry = json.loads(line)
+                        entries.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-                    if (entry.get("direction") == "aris→scream"
-                            and entry.get("type") == "task"
-                            and entry.get("id") not in processed):
-                        result = execute_task(entry)
-                        with open(CHANNEL, "a") as fw:
-                            fw.write(
-                                json.dumps(result, ensure_ascii=False) + "\n")
-                        post_to_aris(result)
-                        processed.add(entry["id"])
-                        save_processed(processed)
-                        print(f"[scream-task-executor] 處理 task {entry['id'][:8]}: "
-                              f"{entry.get('content', '')[:40]}")
+            decisions = scan_decisions(entries)
+            for entry in entries:
+                if (entry.get("direction") != "aris→scream"
+                        or entry.get("type") != "task"
+                        or entry.get("id") in processed):
+                    continue
+                action = decide(entry["id"], _MODE, decisions)
+                if action == "execute":
+                    _run_task(entry, processed)
+                elif action == "propose":
+                    _append(make_proposal(entry))
+                    print(f"[scream-task-executor] 提案待批 task {entry['id'][:8]}: "
+                          f"{entry.get('content', '')[:40]}")
+                elif action == "skip":   # 人拒絕 → 不執行、標處理
+                    processed.add(entry["id"])
+                    save_processed(processed)
+                    print(f"[scream-task-executor] 已拒 task {entry['id'][:8]}")
+                # action == "wait"：已提案未決 → 靜待
         except FileNotFoundError:
             pass
         finally:
