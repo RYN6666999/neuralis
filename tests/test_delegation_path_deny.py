@@ -30,10 +30,14 @@ def test_deny_laap_glob_subdir():
 
 # ── 應 ALLOW：委派到外部專案（甲的正常分工）──
 
-def test_allow_external_project():
+def test_external_project_not_hard_denied():
+    # Stage 0 起 scream-task 重分類為 write → 外部委派需 4b 批准（不自動放行）。
+    # 但它不被 path-DENY 硬擋 —— 可經批准放行，這正是與 laap/** 硬鎖的區別。
     allowed, reason = check("scream-task",
                             "在 ~/Developer/some-user-project/src/main.ts 加一個 function")
-    assert allowed, f"委派到外部專案應放行（甲的正常分工）：{reason}"
+    assert "認知碼" not in reason, \
+        f"外部委派不該被 path-DENY（那是 laap/** 專屬硬鎖）：{reason}"
+    assert "批准" in reason, f"外部委派應走批准閘（可核准），reason 應提批准：{reason}"
 
 
 # ── 應 ALLOW：唯讀工具讀 laap/ 不被路徑閘擋 ──

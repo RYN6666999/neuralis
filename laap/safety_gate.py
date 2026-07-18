@@ -26,7 +26,10 @@ from typing import List, Tuple
 
 logger = logging.getLogger("laap.safety_gate")
 
-READONLY_SAFE = frozenset({"gbrain", "qmd", "file-search", "scream-ask", "scream-task",
+# scream-task 是委派-寫入工具（把工作交給能改檔的 Scream），不是唯讀 —
+# 移出唯讀組後歸 write，自主委派需過 4b 批准閘（Stage 0：煞車先於能力）。
+# scream-ask 留唯讀（純 Q&A，不觸發寫入）。
+READONLY_SAFE = frozenset({"gbrain", "qmd", "file-search", "scream-ask",
                            "stream-test"})  # stream-test: 固定 echo/sleep 指令，不吃使用者輸入
 # 來自 AgentOS executor_registry 的唯讀工具（實測驗證過：DuckDuckGo 搜尋，無副作用）
 AGENTOS_READONLY: frozenset = frozenset({"web-search"})
