@@ -1,12 +1,24 @@
 ---
 title: 認知光錐補齊計劃 — S_span × T_reach
 date: 2026-07-17
-updated: 2026-07-17（整合外部研究報告）
-status: planned (未執行 · 含待拍板的戰略分岔)
+updated: 2026-07-19（S1 落地 + 度量 + canary 前提）
+status: in-progress (S1 live · S2/S3 證據/研究 gated)
 tags: [cognitive-light-cone, s-span, t-reach, agency, rpe, plan]
 ---
 
 # 認知光錐補齊計劃
+
+> **執行進度（2026-07-19）**
+> - **T_persist** ✅ live（既有，跨 session 權重續用）
+> - **S1（RPE 學工具選擇）** ✅ **live** — `agency.py` `_candidate_tools` / `_get_tool_weights` /
+>   `_bump_tool_weight` + `_form_intent` epsilon-greedy（commit `b2c15df`）。zero-LLM、非自主寫入 →
+>   不需休眠。度量 `s_span_bench.tool_learning`（per-need 隔離）+ runner 1b（commit `5a3094d`）。
+> - **canary 前提** ✅ 兩件齊：回合中止觀測層（`error_log.py`，commit `29788c4`）+
+>   executor 監督(propose)模式（`NEURALIS_EXECUTOR_MODE=propose` 預設，commit `442afa6`）。
+> - **S2（T_lookahead）** ⏸ **gated**：依 §9，投資前 S1 要先跑出真資料、benchmark 判決證明
+>   bandit 顯著贏過規則表。S1 剛 live、尚無真決策資料 → 讓 Aris 跑一陣，`scripts/benchmark-s-span.py`
+>   判決轉綠後才動手。建好即休眠，propose 模式下每個前瞻委派須人批准。
+> - **S3（學選目標）** ⏸ **gated**：§7 內在動機理論 + 證偽條件未解，最高假-agency 風險。
 
 > Levin 認知光錐 = 系統能主動追求的最大目標的時空邊界。
 > 用 **T_reach（時間深度）× S_span（決策廣度）** 量，可證偽、可回滾。
