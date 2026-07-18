@@ -464,14 +464,19 @@ class AgencyLoop:
             return None
 
     def _should_delegate(self, need: str) -> bool:
-        """C-b：該不該委派 Scream 做前瞻。預設休眠 —— scream-task 未批准（你沒簽名）
-        就回 False，agency 照舊自查、不生成會被閘擋的委派（不毒化學習）。
-        簽名批准 scream-task 後才活；再過成本閘 + 探索率。"""
+        """C-b：該不該委派 Scream 做前瞻。**專屬開關預設 OFF** —— 需 Ryan 明確
+        NEURALIS_AGENCY_DELEGATE=on。刻意不搭 scream-task 既有批准的便車：那是為
+        舊 Q&A/任務頻道批的，不等於同意『自主委派寫入迴路』。開關開了之後，還要
+        scream-task 過批准閘 + 成本閘 + 探索率（多重）。"""
         try:
+            import os as _os
+            if _os.environ.get("NEURALIS_AGENCY_DELEGATE", "off").lower() \
+                    not in ("on", "1", "true"):
+                return False        # C-b 專屬開關 OFF → 真正休眠（不管舊批准）
             from laap.safety_gate import is_tool_allowed
             from laap.cost_ledger import within_budget
             if not is_tool_allowed("scream-task"):
-                return False        # 未簽名 → C-b 休眠
+                return False        # scream-task 仍要批准
             if not within_budget(want=2000):
                 return False        # 成本閘（E2）
             return random.random() < self._effective_exploration()

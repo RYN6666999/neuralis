@@ -1,8 +1,16 @@
 """Stage 0 硬邊界 acceptance — scream-task 重分類 + commit 快照。"""
 import subprocess
+from pathlib import Path
 
 from laap.safety_gate import classify, check
 from laap.snapshot import create_snapshot, restore_snapshot
+
+
+def _no_local_approval(monkeypatch):
+    """讓測試 hermetic：清掉本機 approved-tools.txt / env（否則 scream-task 若被
+    批准過，approval 相關斷言會受本機狀態影響）。"""
+    monkeypatch.setattr("laap.safety_gate.APPROVED_PATH", Path("/nonexistent-approved-xyz"))
+    monkeypatch.delenv("NEURALIS_TOOL_ALLOW", raising=False)
 
 
 # ── scream-task 重分類為 write ──
@@ -12,8 +20,9 @@ def test_scream_task_is_write_not_readonly():
         "scream-task 是委派-寫入工具，不該是唯讀"
 
 
-def test_scream_task_benign_needs_approval():
+def test_scream_task_benign_needs_approval(monkeypatch):
     # 未批准的委派（非 laap 路徑）→ 排隊等批，不自動放行
+    _no_local_approval(monkeypatch)
     allowed, reason = check("scream-task", "在外部專案跑個測試")
     assert not allowed and "批准" in reason, f"未批准委派應排隊：{reason}"
 

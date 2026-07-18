@@ -30,9 +30,12 @@ def test_deny_laap_glob_subdir():
 
 # ── 應 ALLOW：委派到外部專案（甲的正常分工）──
 
-def test_external_project_not_hard_denied():
+def test_external_project_not_hard_denied(monkeypatch):
     # Stage 0 起 scream-task 重分類為 write → 外部委派需 4b 批准（不自動放行）。
     # 但它不被 path-DENY 硬擋 —— 可經批准放行，這正是與 laap/** 硬鎖的區別。
+    # hermetic：清本機批准，否則 scream-task 若已批准則 reason 為空。
+    monkeypatch.setattr("laap.safety_gate.APPROVED_PATH", __import__("pathlib").Path("/nonexistent-xyz"))
+    monkeypatch.delenv("NEURALIS_TOOL_ALLOW", raising=False)
     allowed, reason = check("scream-task",
                             "在 ~/Developer/some-user-project/src/main.ts 加一個 function")
     assert "認知碼" not in reason, \
