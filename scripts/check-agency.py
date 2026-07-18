@@ -77,6 +77,14 @@ def main():
     assert agency.actions_total - n0 <= 1, f"cap=2 應最多再 1 次，實際 {agency.actions_total - n0}"
     print("C. rate cap: OK")
 
+    # D. S_span 認知光錐
+    span = agency.s_span
+    assert isinstance(span, float), f"s_span 應為 float: {type(span)}"
+    assert 0 <= span <= 5, f"s_span 正常範圍 0-5: {span}"
+    assert agency.s_span_total >= agency.s_span_count >= 0
+    assert 0.2 <= agency._prediction_confidence <= 0.95
+    print(f"D. S_span: OK (span={span:.2f}, total={agency.s_span_total}, cnt={agency.s_span_count}, conf={agency._prediction_confidence:.2f})")
+
     # 清掉本次自檢回寫進 gbrain 的所有記憶（B + C 的行動都會寫）
     try:
         from gbrain_client import get_client

@@ -29,19 +29,33 @@ from pathlib import Path
 from typing import Optional
 
 from laap.safety_gate import AGENTOS_READONLY, classify
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 logger = logging.getLogger("laap.agency")
 
 READONLY_WHITELIST = frozenset({"gbrain", "qmd", "file-search", "scream-ask"}) | AGENTOS_READONLY
 NEED_COOLDOWN_S = 1800.0
 AUDIT_PATH = Path(__file__).resolve().parents[1] / "agency-audit.jsonl"
-
-
 def _env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
     except ValueError:
         return default
+
+
+_S_SPAN_THRESHOLD = _env_float("NEURALIS_AGENCY_SPAN_THRESHOLD", 0.12)
+
+
+@dataclass
+class CandidateAction:
+    """S_span 候選行動 — 評估前預測 outcome，選最佳執行。"""
+    tool: str
+    prompt: str
+    need: str
+    source: str = "rpe_best"       # "rpe_best" | "random_explore" | "llm_proposal"
+    predicted_value: float = 0.0   # 0.0-1.0
+    features: dict = field(default_factory=dict)
 
 
 class AgencyLoop:
@@ -109,8 +123,20 @@ class AgencyLoop:
         self._task_index: int = 0
         self._goal_spec: str = ""
         self._goal_completed: bool = False
+        # ── S_span：認知光錐 ──
+        self._last_predicted_value: float = 0.0
+        self._last_predicted_source: str = ""
+        self._prediction_confidence: float = 0.7
+        self.s_span_total: int = 0
+        self.s_span_count: int = 0
+        self.s_span_prediction_errors: deque = deque(maxlen=50)
 
     # ── 生命週期 ──
+
+    @property
+    def s_span(self) -> float:
+        """S_span = 考量過的候選累計 / S_span 啟動次數。值越大代表越廣。"""
+        return self.s_span_total / max(1, self.s_span_count)
 
     def start(self) -> None:
         if self._running:
@@ -232,6 +258,7 @@ class AgencyLoop:
             "trust_scores": self._trust_scores,
             "exploration_rate": self._exploration_rate,
             "task_queue": self._task_queue, "task_index": self._task_index, "goal_spec": self._goal_spec,
+            "prediction_confidence": self._prediction_confidence,
         }
         try:
             from gbrain_client import get_client
@@ -285,6 +312,7 @@ class AgencyLoop:
                 self._task_queue = state.get("task_queue", [])
                 self._task_index = state.get("task_index", 0)
                 self._goal_spec = state.get("goal_spec", "")
+                self._prediction_confidence = state.get("prediction_confidence", 0.7)
                 self._state_loaded = True
                 for need, s in self._need_stats.items():
                     aw = s.get("angle_weights", {})
@@ -467,7 +495,18 @@ class AgencyLoop:
                 if not self._too_similar(agentos_query, tool=agentos_tool):
                     self._recent_queries.append(self._norm(f"{agentos_tool}: {agentos_query}"))
                     return (agentos_tool, agentos_query)
-        # 預設 gbrain 路徑
+        # S_span 閘：探索率高 + 多角度時，評估多候選再選最佳
+        _s_span_on = (self._effective_exploration() > _S_SPAN_THRESHOLD
+                      and len(self._ANGLE.get(need, "").split()) >= 2)
+        if _s_span_on:
+            candidates = self._generate_candidates(need, seed)
+            for _c in candidates:
+                _c.predicted_value = self._evaluate_candidate(_c)
+            _best = self._select_candidate(candidates)
+            self._last_predicted_value = _best.predicted_value
+            self._last_predicted_source = _best.source
+            return (_best.tool, _best.prompt)
+        # 預設 gbrain 路徑（非 S_span）
         if self._too_similar(query, tool="gbrain"):
             self.skipped_stale += 1
             return None
@@ -503,6 +542,90 @@ class AgencyLoop:
             if p and len(q & p) / len(q | p) >= 0.7:
                 return True
         return False
+
+    # ── S_span：認知光錐（Phase 1 — 零 LLM） ──
+
+    def _generate_candidates(self, need: str, seed: str) -> list[CandidateAction]:
+        """產生 2-3 個候選行動。來源 A（RPE 最佳）+ 來源 B（隨機探索）。"""
+        candidates: list[CandidateAction] = []
+        angles = list(self._ANGLE.get(need, "").split())
+        weights = self._need_stats.get(need, {}).get("angle_weights", {})
+
+        # 來源 A — RPE 最佳角度（必含）
+        if weights:
+            best_angle = max(weights, key=weights.get)
+            c = CandidateAction("gbrain", f"{seed} {best_angle}".strip(), need, "rpe_best")
+            if not self._too_similar(c.prompt, tool=c.tool):
+                candidates.append(c)
+        elif angles:
+            c = CandidateAction("gbrain", f"{seed} {angles[0]}".strip(), need, "rpe_best")
+            if not self._too_similar(c.prompt, tool=c.tool):
+                candidates.append(c)
+
+        # 來源 B — 隨機探索角度（替代角度）
+        if len(angles) >= 2:
+            exclude = [max(weights, key=weights.get)] if weights else [angles[0]]
+            alt = [a for a in angles if a not in exclude]
+            if alt and random.random() < self._effective_exploration():
+                alt_angle = random.choice(alt)
+                c = CandidateAction("gbrain", f"{seed} {alt_angle}".strip(), need, "random_explore")
+                if not self._too_similar(c.prompt, tool=c.tool):
+                    candidates.append(c)
+
+        # 來源 C — LLM 提議（預留 Phase 2）
+
+        ret = candidates or [CandidateAction("gbrain", f"{seed} {angles[0]}".strip(), need, "rpe_best")]
+        self.s_span_total += len(ret)
+        self.s_span_count += 1
+        return ret
+
+    def _evaluate_candidate(self, c: CandidateAction) -> float:
+        """階梯式自我評估：gbrain 相似度 → 啟發式。回傳 0.0-1.0。"""
+        val = self._gbrain_sim_eval(c)
+        if val is not None:
+            c.features["method"] = "gbrain"
+            return val
+        val = self._heuristic_eval(c)
+        c.features["method"] = "heuristic"
+        # 信心調節
+        confidence = getattr(self, "_prediction_confidence", 0.7)
+        return val * (0.5 + 0.5 * confidence)
+
+    def _gbrain_sim_eval(self, c: CandidateAction) -> Optional[float]:
+        """Level 1：gbrain 相似度。離線時回 None。"""
+        try:
+            from gbrain_client import get_client, hybrid_hits as _hh
+            client = get_client()
+            if client is None:
+                return None
+            hits = _hh(client, c.prompt, limit=3)
+            if hits:
+                scores = [getattr(h, "score", 0.5) for h in hits]
+                if scores:
+                    return min(0.8, sum(scores) / len(scores) + 0.2)
+        except Exception:
+            pass
+        return None
+
+    def _heuristic_eval(self, c: CandidateAction) -> float:
+        """Level 2：啟發式（無外部依賴，永遠可用）。"""
+        score = 0.4
+        if len(c.prompt) > 10:
+            score += 0.1
+        if c.need and c.need in c.prompt:
+            score += 0.1
+        if c.source == "rpe_best":
+            score += 0.15
+        elif c.source == "random_explore":
+            score += 0.05
+        if c.tool in ("web-search",) and c.need in ("competence", "growth"):
+            score += 0.1
+        return min(1.0, max(0.0, score))
+
+    def _select_candidate(self, candidates: list[CandidateAction]) -> CandidateAction:
+        """依 predicted_value 降序選最佳。同分時 rpe_best > random_explore。"""
+        order = {"rpe_best": 2, "random_explore": 1, "llm_proposal": 0}
+        return max(candidates, key=lambda c: (c.predicted_value, order.get(c.source, 0)))
 
     # ── 行動 + RPE + 回寫 + 審計 ──
 
@@ -570,6 +693,21 @@ class AgencyLoop:
                 self._exploration_rate = min(0.30, self._exploration_rate + 0.005)
             elif avg_rpe < -0.05:
                 self._exploration_rate = max(0.05, self._exploration_rate - 0.005)
+
+                # ── S_span 預測 RPE ──
+                if self._last_predicted_value > 0:
+                    prediction_error = outcome - self._last_predicted_value
+                    if abs(prediction_error) < 0.15:
+                        self._prediction_confidence = min(0.95, self._prediction_confidence + 0.02)
+                    elif abs(prediction_error) > 0.3:
+                        self._prediction_confidence = max(0.2, self._prediction_confidence - 0.05)
+                    errors = self._need_stats.setdefault(need, {}).setdefault("prediction_errors", [])
+                    errors.append(round(prediction_error, 3))
+                    if len(errors) > 20:
+                        errors.pop(0)
+                    self.s_span_prediction_errors.append(prediction_error)
+                    self._last_predicted_value = 0.0  # 單次有效
+
 
         mem_id = ""
         if ok:
