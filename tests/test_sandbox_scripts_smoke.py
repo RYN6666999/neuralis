@@ -16,7 +16,6 @@ Not a full functional test — a "did anyone run this after editing it" guard.
 from __future__ import annotations
 
 import importlib.util
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -99,27 +98,71 @@ def test_executor_credential_isolation(monkeypatch):
     assert r.get("output", "").strip() == "DONE"
 
 
-def test_sandbox_ccp_parses_files():
-    """A real minimal sandbox cycle: cmd_ccp must parse changed files.
+def test_executor_blocks_dangerous_commands():
+    """_bash must refuse the destructive denylist BEFORE spawning a shell.
 
-    Catches the cmd_ccp `l[2]` IndexError — split("\\t", 1) yields 2 elements,
-    so any file change made the core Phase 3 output crash.
+    Safety-critical: this is the executor headed for the supervised canary. If a
+    refactor drops a denylist entry, this pin catches it. (The check is a
+    substring blocklist by design — weak, but these four must always be blocked.)
     """
+    ex = _load("scream-task-executor.py")
+    for cmd in ("rm -rf /", "mkfs", "dd if=", ":(){ :|:& };:"):
+        r = ex._bash(f"執行 `{cmd}`")
+        # use .get so a regression that lets the payload RUN fails as a clear
+        # assertion, never a KeyError (and never by executing the payload here)
+        assert r.get("success") is False, f"NOT blocked (would execute!): {cmd!r} -> {r}"
+        assert r.get("error") == "dangerous command blocked", f"wrong reason for {cmd!r}: {r}"
+    # a benign command still runs (denylist is not over-broad)
+    ok = ex._bash("執行 `echo safe`")
+    assert ok["success"] is True and "safe" in ok["output"]
+
+
+def test_sandbox_ccp_parses_files(tmp_path, monkeypatch):
+    """A minimal sandbox cycle in an ISOLATED temp repo: cmd_ccp must parse
+    changed files. Catches the cmd_ccp `l[2]` IndexError — split("\\t", 1)
+    yields 2 elements, so any file change made the core Phase 3 output crash.
+
+    Runs against a throwaway git repo, never the live checkout. The sandbox
+    tool does real `git worktree add/remove`; pointing it at the working repo
+    and cleaning worktree dirs behind git's back corrupts .git/config (observed:
+    core.bare flipped true). Redirect REPO/SB_ROOT/SB_INDEX so nothing here
+    touches the real repo.
+    """
+    # A git pre-commit hook exports GIT_DIR / GIT_WORK_TREE pointing at the live
+    # repo; child git processes inherit them and ignore cwd. Clear them so the
+    # sandbox's `git worktree add` targets the throwaway repo, not the real one.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+
     sb = _load("sandbox.py")
-    shutil.rmtree(sb.SB_ROOT, ignore_errors=True)  # clean stale global state
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def g(*a):
+        subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    g("init", "-q")
+    g("config", "user.email", "test@test")
+    g("config", "user.name", "test")
+    (repo / "seed.txt").write_text("seed")
+    g("add", "-A")
+    g("commit", "-q", "-m", "seed")
+
+    sb_root = tmp_path / "sandboxes"
+    monkeypatch.setattr(sb, "REPO", repo)
+    monkeypatch.setattr(sb, "SB_ROOT", sb_root)
+    monkeypatch.setattr(sb, "SB_INDEX", sb_root / ".index.json")
+
     info = sb.cmd_sandbox_create("smoke-ccp")
     sid = info["id"]
     try:
         wt = Path(info["path"])
         (wt / "smoke-probe.txt").write_text("change")
-        env_flags = ["-c", "user.email=smoke@test", "-c", "user.name=smoke"]
         subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(wt), *env_flags, "commit", "-m", "probe"],
-                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-m", "probe"], check=True, capture_output=True)
         ccp = sb.cmd_ccp(sid)
         assert ccp["files"], "cmd_ccp returned no files"
         assert all("p" in f and f["p"] for f in ccp["files"]), f"bad file rows: {ccp['files']}"
         assert any(f["p"] == "smoke-probe.txt" for f in ccp["files"])
     finally:
         sb.cmd_sandbox_destroy(sid)
-        shutil.rmtree(sb.SB_ROOT, ignore_errors=True)
