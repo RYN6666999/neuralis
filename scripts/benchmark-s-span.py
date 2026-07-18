@@ -13,7 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from laap.s_span_bench import behavior_entropy, learning_correlation, tool_learning
+from laap.s_span_bench import (behavior_entropy, learning_correlation,
+                               tool_learning, lookahead_accuracy)
 
 AUDIT = ROOT / "agency-audit.jsonl"
 
@@ -55,6 +56,15 @@ baseline_ent = behavior_entropy([r["need"] for r in recs])   # 規則表 = 固�
 print(f"\n2. 動作多樣性熵")
 print(f"   學習系統 (need,tool): {learned_ent:.2f} bits")
 print(f"   規則表 baseline (need only): {baseline_ent:.2f} bits")
+
+# 2b. S2 投資閘（§9）：shadow lookahead 預測 vs 實際
+la = lookahead_accuracy(recs)
+lac = la["corr"]
+print(f"\n2b. S2 前瞻投資閘（§9）— shadow 預測 vs 實際 outcome")
+print(f"    predicted↔actual 相關: {lac if lac is None else round(lac, 3)}  "
+      f"（{la['n']} 筆有預測）")
+if lac is not None:
+    print(f"    → {'前瞻預測器可靠，S2 值得投' if lac > 0.3 else 'shadow 預測沒明顯贏，暫不投 tree-search（或需更強預測器）'}")
 
 # 3. C-a 快取真實命中率
 try:

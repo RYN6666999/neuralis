@@ -482,6 +482,18 @@ class AgencyLoop:
         allowed = get_constitution().guard_weight(need, f"tool:{tool}", rpe * 0.5)
         tw[tool] = max(0.1, min(3.0, old + allowed))
 
+    def _predict_outcome(self, need: str, tool: str) -> float:
+        """S2-shadow：用學來的權重做 1-step lookahead 預測（zero-LLM）。
+        predicted = need 的 expected × 該工具相對權重，夾 [0,1]。**純預測、不改選擇** —
+        只把 predicted 記進 audit，供 lookahead_accuracy 量『前瞻會不會贏過 bandit』
+        （§9 投資閘的證據）。要用 pre-update 的 expected/weights 呼叫。"""
+        stats = self._need_stats.get(need, {})
+        base = stats.get("expected", 0.3)
+        tw = self._get_tool_weights(need)
+        avg = (sum(tw.values()) / len(tw)) if tw else 1.0
+        rel = (tw.get(tool, 1.0) / avg) if avg else 1.0
+        return max(0.0, min(1.0, base * rel))
+
     def _cache_lookup(self, need: str, seed: str):
         """C-a：決策前問 gbrain 快取有沒有相關經驗（gbrain-first）。
         記 hit/miss → 真實命中率（校準 backtest 的粗略 65%）。命中用『詞相關』
@@ -642,6 +654,8 @@ class AgencyLoop:
         outcome = self._score_result(result, tool=tool) if ok else 0.0
         stats = self._need_stats.setdefault(need, {
             "expected": 0.3, "rpes": [], "angle_weights": {}, "tool_weights": {}})
+        # S2-shadow：pre-update 權重下的 lookahead 預測（純記錄，不改選擇）
+        predicted = self._predict_outcome(need, tool)
         expected = stats["expected"]
         rpe = outcome - expected
         stats["expected"] = 0.9 * expected + 0.1 * outcome  # EMA
@@ -721,6 +735,7 @@ class AgencyLoop:
                  "tool": tool, "prompt": prompt, "ok": ok,
                  "result_len": len(result or ""), "mem_id": mem_id,
                  "outcome": round(outcome, 3), "expected": round(expected, 3),
+                 "predicted": round(predicted, 3),  # S2-shadow：lookahead 預測 vs 實際
                  "rpe": round(rpe, 3), "exploration": round(self._exploration_rate, 3)}
         self._audit(entry)
         # 持久化 checkpoint：每 N 次行動存一次

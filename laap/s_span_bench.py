@@ -69,6 +69,21 @@ def tool_learning(records: list) -> dict:
             "n_needs": len(per)}
 
 
+def lookahead_accuracy(records: list) -> dict:
+    """S2 投資閘（§9）證據：1-step lookahead 預測 vs 實際 outcome 的相關。
+
+    records: [{predicted, outcome}]（agency audit 的 S2-shadow 欄位）。高正相關 =
+    shadow 預測器可靠 = 前瞻值得投；~0 = 現況 bandit 的 shadow 預測沒用，別投
+    tree-search（或需更強的預測器 / LLM）。純 shadow，不改行為。回 {corr, n}。
+    """
+    pairs = [(r["predicted"], r.get("outcome", 0)) for r in records
+             if r.get("predicted") is not None]
+    n = len(pairs)
+    if n < 2:
+        return {"corr": None, "n": n}
+    return {"corr": _pearson([p for p, _ in pairs], [o for _, o in pairs]), "n": n}
+
+
 def _pearson(xs: list, ys: list) -> float:
     n = len(xs)
     mx, my = sum(xs) / n, sum(ys) / n
