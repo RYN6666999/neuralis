@@ -198,6 +198,13 @@ class TestAgencyMigration:
         agency._goal_spec = ""
         agency._goal_completed = False
         agency._recent_tools = deque(maxlen=5)
+        # S_span（認知光錐 Phase 1）— agency.__init__ L126-132 新增
+        agency._last_predicted_value = 0.0
+        agency._last_predicted_source = ""
+        agency._prediction_confidence = 0.7
+        agency.s_span_total = 0
+        agency.s_span_count = 0
+        agency.s_span_prediction_errors = deque(maxlen=50)
 
         # Test _effective_interval reads arousal from get_state()
         eff = agency._effective_interval()
