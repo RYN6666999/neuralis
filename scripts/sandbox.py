@@ -2,7 +2,7 @@
 """sandbox.py — Phase 1-3 合併。子命令：analyze | plan | sandbox | ccp
 Ponytail: 只要 JSON，不要 YAML。砍 docstring 到一行。"""
 from __future__ import annotations
-import argparse, json, os, shutil, subprocess, sys, time, uuid
+import argparse, json, shutil, subprocess, sys, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,11 +12,6 @@ CASES = REPO / "docs/specs/aris-sandbox-learning/cases"
 SB_ROOT = Path("/tmp/aris-sandboxes")
 SB_INDEX = SB_ROOT / ".index.json"
 SB_MAX = 3
-# 沙箱憑證隔離白名單
-_SAFE = frozenset({"PATH","HOME","USER","SHELL","TERM","LANG","LC_ALL","TMPDIR",
-  "NEURALIS_AGENCY_INTERVAL","NEURALIS_AGENCY_MAX_PER_HOUR","NEURALIS_AGENCY_DELEGATE",
-  "NEURALIS_CONSTITUTION","NEURALIS_CONSOLIDATION","NEURALIS_AGENCY_HOURLY_TOKEN_BUDGET",
-  "NEURALIS_LLM_MODEL","NEURALIS_TOOL_MODEL","NEURALIS_CHAT_TOOLS","AGENTOS_EXECUTOR_REGISTRY"})
 
 
 def _git(args, cwd=None):
@@ -33,8 +28,6 @@ def _find(sid):
     for s in _load()["sb"]:
         if s["id"]==sid: return s
     return None
-def _clean_env():
-    return {k:v for k,v in os.environ.items() if k in _SAFE}
 
 
 # ── analyze ──
@@ -120,7 +113,7 @@ def cmd_ccp(sid):
     except: stat = ""
     try: diff = _git(["diff",f"{info['base']}..HEAD"],cwd=d)
     except: diff = ""
-    try: files = [{"s":l[0],"p":l[2]} for l in (l.split("\t",1) for l in _git(["diff","--name-status",f"{info['base']}..HEAD"],cwd=d).strip().split("\n")) if len(l)==2]
+    try: files = [{"s":l[0],"p":l[1]} for l in (l.split("\t",1) for l in _git(["diff","--name-status",f"{info['base']}..HEAD"],cwd=d).strip().split("\n")) if len(l)==2]
     except: files = []
     return {"ccp_id":f"CCP-{sid}","sandbox_id":sid,"base":info["base"],"commits":commits,
       "files":files,"diff":diff,"diff_lines":len(diff.split("\n")),"test":info.get("test",{})}

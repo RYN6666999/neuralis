@@ -24,9 +24,16 @@ hit **64%**（對上 backtest 65%，校準通過）· pytest **188 passed**。
 的舊 scream-task 全域批准**（`approve-tool.sh -r scream-task`；專屬開關只封 Agency，
 全域批准會被其他呼叫路徑搭便車 → 未來接真 Scream 是延遲安全洞）③測試改 hermetic。
 
+> **複查更正（2026-07-18 後補）**：`scream-task-executor` 已非 v0 stub，是 v1 真工具
+> （read/write/search/bash）。但複查發現 ponytail（`5dcd0a3`）把它砍壞了——四工具全炸
+> （缺 `import subprocess`/`Path`、`urllib.parse.quote` 改錯、bash 少 `shell=True`），被
+> try/except 吞成 `success:False`。且宣稱補好的憑證隔離放錯檔（sandbox.py 死碼），executor
+> 沒接。**已全修 + 實跑驗證**（含 API key 不外洩、path-DENY 擋 laap/）。詳見
+> `docs/specs/aris-sandbox-learning/cases/analysis-phase1-3.md` 的複查更正。**下方休眠/紅線結論不變。**
+
 **現況 = 建好但刻意休眠。禁止事項（下一手必讀）：**
 - 🚫 **禁 default-on** — 自主委派 + 真寫入是系統最高風險模式，須觀察後有意識決定
-- 🚫 **禁「只開 delegate 餵模擬結果」** — scream-task-executor **仍是 stub**，回假數據，學習會學歪
+- 🚫 **禁「只開 delegate 餵模擬結果」** — executor v1 雖已修好可跑，但**未經監督 canary 前一律不啟用**；學習餵到未驗證的真結果一樣會學歪
 - 真自主寫入要**兩個開關都開**：`NEURALIS_AGENCY_DELEGATE=on`（Aris 委派）+
   executor 接真 Scream（RCE 面，Ryan 親接 + 簽名）
 - **下一步不是乙**；是「先撤舊批准（✅ 已做）→ 設計有人監督的真 executor canary」
