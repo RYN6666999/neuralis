@@ -24,6 +24,8 @@ import uuid
 from collections import deque
 from pathlib import Path
 
+from laap.error_log import log_abort
+
 logger = logging.getLogger("laap.chatflow")
 
 _CHAT_PATH = "/v1/chat/completions"
@@ -628,13 +630,16 @@ async def _tool_chat(request, web, body: dict, fed):
                 chunk = _sse_chunk(rid, created, model,
                                    delta={}, finish_reason="stop")
                 await resp.write(chunk.encode("utf-8"))
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
+            log_abort("tool_chat.stream_timeout", err=e, model=model,
+                      timeout_s=_TOOLCHAT_TIMEOUT_S)
             chunk = _sse_chunk(rid, created, model,
                                delta={"content": "\n\n（串流逾時）"},
                                finish_reason="stop")
             await resp.write(chunk.encode("utf-8"))
         except Exception as e:
             logger.warning(f"[chatflow] 工具模式串流失敗: {e}")
+            log_abort("tool_chat.stream_fail", err=e, model=model)
             chunk = _sse_chunk(rid, created, model,
                                delta={"content": f"\n\n（串流失敗: {e}）"},
                                finish_reason="stop")
@@ -650,10 +655,13 @@ async def _tool_chat(request, web, body: dict, fed):
         result = await asyncio.wait_for(
             loop.run_in_executor(None, respond_tools, body, psi_state, delta),
             timeout=_TOOLCHAT_TIMEOUT_S)
-    except asyncio.TimeoutError:
+    except asyncio.TimeoutError as e:
         logger.warning(f"[chatflow] 工具模式逾時 {_TOOLCHAT_TIMEOUT_S}s")
+        log_abort("tool_chat.blocking_timeout", err=e, model=model,
+                  timeout_s=_TOOLCHAT_TIMEOUT_S)
     except Exception as e:
         logger.warning(f"[chatflow] 工具模式失敗: {e}")
+        log_abort("tool_chat.blocking_fail", err=e, model=model)
 
     if result is None:
         result = {

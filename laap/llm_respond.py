@@ -18,6 +18,8 @@ import urllib.error
 import urllib.request
 from typing import Optional
 
+from laap.error_log import log_abort
+
 logger = logging.getLogger("laap.llm_respond")
 
 # ── 回應快取（簡易 LRU，防短時間重複呼叫）──
@@ -513,6 +515,9 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
         except Exception as e:
             last_err = e
             if not _is_retryable(e) or attempt >= _RETRY_MAX:
+                log_abort("call_llm_stream.connect", err=e,
+                          model=model or _LLM_MODEL, attempt=attempt,
+                          has_tools=bool(tools))
                 yield {"type": "error", "text": f"API 連線失敗: {e}"}
                 return
             delay = _RETRY_BASE_DELAY * (2 ** attempt)
@@ -537,6 +542,8 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
             except json.JSONDecodeError:
                 continue
             if chunk.get("error"):
+                log_abort("call_llm_stream.upstream", model=model or _LLM_MODEL,
+                          detail=str(chunk["error"])[:500], has_tools=bool(tools))
                 yield {"type": "error", "text": f"上游錯誤: {str(chunk['error'])[:200]}"}
                 return
             delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
@@ -558,6 +565,8 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
                 if fn.get("arguments"):
                     slot["arguments"] += fn["arguments"]
     except Exception as e:
+        log_abort("call_llm_stream.midstream", err=e, model=model or _LLM_MODEL,
+                  saw_token=saw_token, has_tools=bool(tools))
         yield {"type": "error", "text": f"串流中斷: {e}"}
         return
     finally:
@@ -700,6 +709,9 @@ def respond_stream(user_msg: str, psi_state: dict, history: list = None,
                 if emitted:
                     yield {"type": "tool_status", "text": f"（LLM 串流失敗: {ev['text']}）"}
                 logger.warning(f"[llm_respond] respond_stream: {ev['text']}")
+                log_abort("respond_stream.turn_abort", detail=ev["text"],
+                          round=rnd, model=_LLM_MODEL, emitted=emitted,
+                          msg_count=len(messages))
                 return
 
         if not calls:
@@ -749,6 +761,8 @@ def respond_stream(user_msg: str, psi_state: dict, history: list = None,
                 except Exception as e:
                     result = f"[錯誤] {tool_name}: {e}"
                     yield {"type": "tool_status", "text": f"❌ {result}"}
+                    log_abort("respond_stream.tool_fail", err=e,
+                              tool=tool_name, round=rnd)
             messages.append({"role": "tool", "tool_call_id": c["id"],
                              "content": (result or "無結果")[:4000]})
         for c in calls[2:]:
