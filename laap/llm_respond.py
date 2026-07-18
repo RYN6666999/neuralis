@@ -84,6 +84,23 @@ _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
+# 含圖的請求走 vision 模型（deepseek 非 vision，直送會被 OpenRouter 打回）。
+_VISION_MODEL = os.environ.get("NEURALIS_VISION_MODEL", "google/gemini-2.0-flash-001")
+
+
+def _has_image(messages: list) -> bool:
+    """訊息是否含 image_url content part（OpenAI 多模態格式）。"""
+    for m in messages or []:
+        c = m.get("content")
+        if isinstance(c, list) and any(
+                isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+            return True
+    return False
+
+
+def _route_model(messages: list, default: str) -> str:
+    """含圖 → vision 模型；否則用 default。"""
+    return _VISION_MODEL if _has_image(messages) else default
 
 # ── API Key 快取（省每次 subprocess call 40-100ms）──
 _API_KEY_CACHE: Optional[str] = None
@@ -270,7 +287,7 @@ def _call_llm(messages: list) -> Optional[str]:
         return None
 
     body = json.dumps({
-        "model": _LLM_MODEL,
+        "model": _route_model(messages, _LLM_MODEL),
         "messages": messages,
         "max_tokens": 1000,
         "temperature": 0.8,
@@ -356,7 +373,7 @@ def respond_tools(body: dict, psi_state: dict = None,
         messages.insert(idx, block)
 
     out = {
-        "model": _TOOL_MODEL,
+        "model": _route_model(messages, _TOOL_MODEL),
         "messages": messages,
         "max_tokens": _TOOL_MAX_TOKENS,
         "temperature": body.get("temperature", 0.7),
@@ -489,8 +506,9 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
         yield {"type": "error", "text": "無 API key"}
         return
 
+    model = _route_model(messages, model or _LLM_MODEL)
     payload = {
-        "model": model or _LLM_MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": max_tokens or _STREAM_MAX_TOKENS,
         "temperature": 0.8,
