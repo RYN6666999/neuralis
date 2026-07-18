@@ -4,6 +4,27 @@
 > 分析日期：2026-07-18
 > 分析者：Scream (as Aris 參謀)
 
+> **⚠️ 複查更正（2026-07-18，後補）** — 本文寫於 commit `28e9d5e`（ponytail 前）。之後
+> 兩件事讓下方部分評分失真，讀者請以本更正為準：
+>
+> 1. **佈局變更**：ponytail（`5dcd0a3`）把「產出盤點」表的 4 個 script（`phase1-analyze-commit.py`
+>    / `phase1-sample-analysis.py` / `phase2-plan-change.py` / `phase3-sandbox-manager.py`）合併為
+>    單一 `scripts/sandbox.py`（子命令 `analyze | plan | sandbox | ccp`）。那些檔名已不存在。
+> 2. **ponytail 迴歸（已修）**：合併時把 function-scoped 的 `import subprocess` 連同被刪的函式一起
+>    刪掉、未 hoist；`import urllib.parse; urllib.parse.quote()` 被改寫成錯的 `__import__('urllib.parse').quote()`；
+>    `Path` 少了 `from pathlib`。→ executor 四工具全炸（NameError/AttributeError，被 try/except 吞成
+>    `success:False`）。`sandbox.py cmd_ccp` 的 `l[2]` 一有檔案變更就 IndexError。兩 script 零測試覆蓋，
+>    所以「188 pytest passed」從沒碰過它們。**「工具鏈完整可用」在 `28e9d5e` 為真，在 ponytail 後為假。**
+>    複查已修：補齊 import、修 urllib、bash 加 `shell=True`、`l[2]`→`l[1]`，並實跑驗證四工具 + 完整
+>    sandbox 生命週期。
+> 3. **憑證隔離真相**：本文「壞處 #3 / 建議 #3」**正確**地把憑證隔離標為已知缺口。但 `28e9d5e`
+>    的「補三缺口」把 `_clean_env` 放進 `sandbox.py`（該檔不 spawn 子行程 → 死碼），真正跑 curl/bash 的
+>    executor 從未接上 → 缺口實際沒補。複查已把 `_SAFE` 白名單 + `_clean_env()` 接進 executor 的 `_run`，
+>    實測 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` 不再外洩給子行程。
+> 4. **修正後判斷**：HEAD 修好前，工具鏈**不可落地**（下方「建議 #1 可以落地」在 ponytail 後不成立）。
+>    修好 + 實跑驗證後，可進**有人監督的 canary**；handoff 的紅線（禁 default-on、executor 接真 Scream
+>    須 Ryan 親接）仍全數成立。
+
 ---
 
 ## 產出盤點

@@ -10,8 +10,17 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
-import uuid
+import urllib.parse
+from pathlib import Path
+
+# 沙箱憑證隔離白名單：subprocess 只繼承這些，API key 等一律不外洩給 cat/curl/bash
+_SAFE = frozenset({"PATH", "HOME", "USER", "SHELL", "TERM", "LANG", "LC_ALL", "TMPDIR"})
+
+
+def _clean_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k in _SAFE}
 
 CHANNEL = "/tmp/aris-scream-channel.jsonl"
 PROCESSED = "/tmp/aris-scream-processed-ids.json"
@@ -141,13 +150,13 @@ _TOOLS = {
     "read": lambda d: _run(["cat",_xp(d)],2000,10) if _xp(d) else {"success":False,"error":"no path"},
     "write": lambda d: _wr(d),
     "search": lambda d: _run(["curl","-s","-L","--max-time","10",
-      f"https://lite.duckduckgo.com/lite/?q={__import__('urllib.parse').quote(_xq(d) or '')}"],2000,15) if _xq(d) else {"success":False,"error":"no query"},
+      f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote(_xq(d) or '')}"],2000,15) if _xq(d) else {"success":False,"error":"no query"},
     "bash": lambda d: _bash(d),
 }
 
-def _run(cmd, limit, timeout):
+def _run(cmd, limit, timeout, shell=False):
     try:
-        r = subprocess.run(cmd,capture_output=True,text=True,timeout=timeout)
+        r = subprocess.run(cmd,capture_output=True,text=True,timeout=timeout,env=_clean_env(),shell=shell)
         out = (r.stdout+r.stderr)[:limit]
         return {"success":r.returncode==0,"output":out,"code":r.returncode}
     except subprocess.TimeoutExpired: return {"success":False,"error":"timeout"}
@@ -189,7 +198,7 @@ def _bash(d):
     if not cmd: return {"success":False,"error":"no command"}
     for bad in ["rm -rf /","mkfs","dd if=",":(){ :|:& };:"]:
         if bad in cmd: return {"success":False,"error":"dangerous command blocked"}
-    return _run(cmd,3000,30)
+    return _run(cmd,3000,30,shell=True)
 
 
 # 這些已內聯到 _TOOLS / _run / _xp / _xq / _wr / _bash 中
