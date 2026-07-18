@@ -123,6 +123,12 @@ def classify(tool: str) -> str:
     return "write"  # 所有非白名單視為 write（需 Phase 4b 批准）
 
 
+def is_tool_allowed(tool: str) -> bool:
+    """工具是否已在允許集（已批准）— 無副作用探測，不審計、不排隊。
+    給呼叫端判斷『這工具現在能不能用』（如 C-b 探測 scream-task 是否已簽名批准）。"""
+    return tool in _allowed_tools()
+
+
 def get_allowed_tools() -> list:
     """回 [{name, classification}, ...]"""
     allowed = _allowed_tools()

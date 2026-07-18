@@ -463,6 +463,33 @@ class AgencyLoop:
         except Exception:
             return None
 
+    def _should_delegate(self, need: str) -> bool:
+        """C-b：該不該委派 Scream 做前瞻。預設休眠 —— scream-task 未批准（你沒簽名）
+        就回 False，agency 照舊自查、不生成會被閘擋的委派（不毒化學習）。
+        簽名批准 scream-task 後才活；再過成本閘 + 探索率。"""
+        try:
+            from laap.safety_gate import is_tool_allowed
+            from laap.cost_ledger import within_budget
+            if not is_tool_allowed("scream-task"):
+                return False        # 未簽名 → C-b 休眠
+            if not within_budget(want=2000):
+                return False        # 成本閘（E2）
+            return random.random() < self._effective_exploration()
+        except Exception:
+            return False
+
+    def _form_delegation_intent(self, need: str, seed: str):
+        """C-b：形成委派 Scream 前瞻的意圖（c2，走 scream-task 頻道）。記估算成本。"""
+        prompt = f"針對「{seed[:60]}」做一步前瞻研究，回關鍵發現"
+        try:
+            from laap.cost_ledger import record
+            record(2000, source="scream-task-lookahead")
+        except Exception:
+            pass
+        self._recent_queries.append(self._norm(f"scream-task: {prompt}"))
+        logger.info(f"[Agency] C-b 委派 Scream 前瞻（cache miss）: {seed[:40]}")
+        return ("scream-task", prompt)
+
     def _form_intent(self, need: str):
         if need not in self._ANGLE:
             return None
@@ -480,7 +507,9 @@ class AgencyLoop:
         if not seed:
             self.skipped_stale += 1
             return None
-        self._cache_lookup(need, seed)   # C-a：gbrain-first 查快取 + 記真實命中率
+        cache_exp = self._cache_lookup(need, seed)   # C-a：查快取 + 記真實命中率
+        if cache_exp is None and self._should_delegate(need):
+            return self._form_delegation_intent(need, seed)   # C-b：miss → 委派 Scream
         # RPE 角度選擇：依權重抽樣（epsilon-greedy，探索率被情緒偏差調變）
         weights = self._get_angle_weights(need)
         if not weights or not self._ANGLE.get(need, ""):
