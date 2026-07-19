@@ -16,6 +16,7 @@ import os
 import time
 import urllib.error
 import urllib.request
+from laap.error_log import log_abort
 from typing import Optional
 
 logger = logging.getLogger("laap.llm_respond")
