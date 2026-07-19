@@ -196,21 +196,47 @@ def _take_pending_memories() -> list:
 
 
 def _psi_memories_sync(query: str) -> list[str]:
-    """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。
-    去重：近 6 輪引用過的段落不再引（不然同話題每句都想起同一件事，穿幫）。
+    """同步查相關記憶，供 psi-respond 織入。timeout 由 caller 處理。
+
+    B6 混合策略：先從 memory_bridge 做結構化召回（各類型 top 3 trusted），
+    再用 gbrain 補足。去重：近 6 輪引用過的段落不再引。
     執行前先嘗試取得 gbrain 資源鎖，若鎖被 cron 佔用則跳過（零競爭）。"""
+    out = []
+    # B6: 先從 in-process memory_bridge 做結構化召回（不依賴 gbrain）
+    try:
+        from memory_bridge import recall_related
+        for mt in ("user", "feedback", "project"):
+            try:
+                hits = recall_related(query, top_k=3, mem_type=mt, status="trusted")
+                for f in hits:
+                    t = (f.content or "")[:80]
+                    key = t[:40]
+                    if len(t) < 4 or key in _quoted_recently:
+                        continue
+                    _quoted_recently.append(key)
+                    out.append(t)
+                    # B4: 記錄 outcome
+                    try:
+                        from laap.memory_evidence import record_outcome
+                        record_outcome(f.id, "recalled")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # gbrain 補足
     try:
         from laap.resource_lock import acquire, release
         if not acquire("gbrain", timeout=2, ttl=90):
             logger.debug("[chatflow] gbrain 鎖被佔用，跳過此輪 recall")
-            return []
+            return out
         try:
             from gbrain_client import get_client, hybrid_hits
             client = get_client()
             if client is None:
-                return []
+                return out
             hits = hybrid_hits(client, query[:100], 4)
-            out = []
             for h in hits:
                 if h.get("score", 0) < 0.3:
                     continue
@@ -220,22 +246,28 @@ def _psi_memories_sync(query: str) -> list[str]:
                     continue
                 _quoted_recently.append(key)
                 out.append(t[:80])
-                # E1.2：agency 記憶被 recall 進回應 = 真被用到 → 記下游效用信號
+                # E1.2：agency 記憶被 recall 進回應 → 記下游效用信號
                 try:
                     import re as _re
                     from laap import memory_utility
                     _m = _re.search(r"mem-\d+-\w+", str(h.get("slug", "")))
                     if _m:
                         memory_utility.record_recall(_m.group(0))
+                        # B4: 同時記錄到 evidence
+                        try:
+                            from laap.memory_evidence import record_outcome
+                            record_outcome(_m.group(0), "recalled")
+                        except Exception:
+                            pass
                 except Exception:
                     pass
-                if len(out) >= 2:
+                if len(out) >= 5:
                     break
             return out
         finally:
             release("gbrain")
     except Exception:
-        return []
+        return out
 
 
 _NEED_PHRASE = {
@@ -275,6 +307,13 @@ def _compose_psi_reply(st: dict, delta: dict, memories: list[str] = None) -> str
     # 不可宣稱「你說過」（誤標出處 = LARP）
     if memories:
         reply += f"\n（這讓我想起腦裡的一段：「{memories[0]}」）"
+        # B4: 記錄記憶被引用
+        try:
+            from laap.memory_evidence import record_outcome
+            for m in memories[:3]:
+                record_outcome(m, "cited_in_response")
+        except Exception:
+            pass
     return reply
 
 
@@ -545,6 +584,16 @@ def _post_tool_outcomes(body: dict) -> None:
             failed = any(k in text for k in _FAIL_MARKERS)
             psi.post_affective_event("task_failure" if failed else "task_success",
                                      intensity=0.5 if failed else 0.3)
+            # B4: 記錄 tool_call 到 evidence
+            try:
+                from laap.memory_evidence import record_tool_call
+                record_tool_call(
+                    session_id="chatflow",
+                    tool_name=m.get("tool_call_id", "?"),
+                    status="failure" if failed else "success",
+                )
+            except Exception:
+                pass
     except Exception as e:
         logger.debug(f"[chatflow] tool outcome 事件跳過: {e}")
 

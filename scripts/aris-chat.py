@@ -72,6 +72,19 @@ def chat_stream(user_msg: str, out=sys.stdout) -> str:
     messages = _load()
     messages.append({"role": "user", "content": user_msg, "ts": time.time()})
 
+    # B4/B6: 記憶注入 — 在 API 呼叫前先召回相關記憶
+    try:
+        from memory_bridge import recall_related, get_memory_context
+        memories = recall_related(user_msg, top_k=3)
+        context = get_memory_context(max_core=2, max_recent=2)
+        if context or memories:
+            mem_block = "## 相關記憶（自動檢索）\n" + context
+            if memories:
+                mem_block += "\n" + "\n".join(f"- {m.content[:200]}" for m in memories if hasattr(m, 'content'))
+            messages.insert(-1, {"role": "system", "content": mem_block, "ts": 0})
+    except Exception:
+        pass
+
     body = json.dumps({
         "model": "laap-core",
         "messages": [{"role": m["role"], "content": m["content"]}
@@ -119,6 +132,15 @@ def chat_stream(user_msg: str, out=sys.stdout) -> str:
         _post("/v1/reflect", {"assistant_message": content}, timeout=10)
     except Exception:
         pass  # 記憶寫入失敗不擋對話
+    # B4: 自動寫入記憶
+    try:
+        from memory_bridge import store_important
+        exchange = f"[user: {user_msg[:200]}]\n[aris: {content[:500]}]"
+        importance = 0.7 if len(content) > 200 else 0.4
+        store_important(exchange, tags=["conversation", "aris-auto"], importance=importance,
+                        mem_type="episodic", provenance="aris-chat")
+    except Exception:
+        pass
     return content
 
 
@@ -140,6 +162,15 @@ def chat_once(user_msg: str) -> str:
         _post("/v1/reflect", {"assistant_message": content}, timeout=10)
     except Exception:
         pass  # 記憶寫入失敗不擋對話
+    # B4: 自動寫入記憶
+    try:
+        from memory_bridge import store_important
+        exchange = f"[user: {user_msg[:200]}]\n[aris: {content[:500]}]"
+        importance = 0.7 if len(content) > 200 else 0.4
+        store_important(exchange, tags=["conversation", "aris-auto"], importance=importance,
+                        mem_type="episodic", provenance="aris-chat")
+    except Exception:
+        pass
     return f"[Aris/{engine}]\n{content}"
 
 
@@ -199,7 +230,8 @@ def main() -> None:
     print("直連 Aris（exit / Ctrl-D 離開，/state 看內在狀態，/sync 切同步模式）")
     show_state()
     sync_mode = False
-    while True:
+    _session_active = True
+    while _session_active:
         try:
             msg = input("\n你 › ").strip()
         except (EOFError, KeyboardInterrupt):
@@ -224,7 +256,27 @@ def main() -> None:
                 print()
         except Exception as e:
             print(f"（這輪失敗: {e} — Aris 可能在重啟，稍等重試）")
+    # A4: session 結束通知
+    try:
+        from laap.consolidation import ConsolidationLoop
+        # 用全局實例或 fire-and-forget
+        from laap.startup import get_consolidation
+        cons = get_consolidation()
+        if cons is not None:
+            cons.note_session_end()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        # A4: session 結束通知（任何 exit path 都走這條）
+        try:
+            from laap.startup import get_consolidation
+            cons = get_consolidation()
+            if cons is not None:
+                cons.note_session_end()
+        except Exception:
+            pass

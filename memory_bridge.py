@@ -22,16 +22,35 @@ logger = logging.getLogger("memory_bridge")
 _STORE = MemoryStore(capacity=1000)
 
 
-def store_important(content: str, tags: Union[List[str], None] = None, importance: float = 0.5) -> str:
-    frag = MemoryFragment(content=content, tags=list(tags or []), importance=importance)
+def store_important(content: str, tags: Union[List[str], None] = None, importance: float = 0.5,
+                    mem_type: str = "episodic", provenance: str = "", status: str = "provisional") -> str:
+    """儲存重要記憶。新參數向後相容：不傳 = 預設 episodic/provisional。
+
+    OpenSpace-inspired:
+      mem_type  — user/feedback/project/reference/episodic
+      status    — provisional（新記憶預設）/ trusted（寫入閘自動升）
+      provenance— 來源標記：chatflow / agency / scream-bridge
+    """
+    frag = MemoryFragment(content=content, tags=list(tags or []), importance=importance,
+                          mem_type=mem_type, provenance=provenance, status=status)
     mem_id = _STORE.store(frag)
-    logger.debug(f"[memory_bridge] store_important -> {mem_id}")
+    logger.debug(f"[memory_bridge] store_important -> {mem_id} type={mem_type} status={status}")
     return mem_id
 
 
-def recall_related(query: str, top_k: int = 5) -> List[MemoryFragment]:
-    """作者做 r.content[:50]，故回傳有 .content 的 MemoryFragment 序列。"""
+def recall_related(query: str, top_k: int = 5, mem_type: Optional[str] = None,
+                   status: Optional[str] = None) -> List[MemoryFragment]:
+    """作者做 r.content[:50]，故回傳有 .content 的 MemoryFragment 序列。
+
+    OpenSpace-inspired 新參數：
+        mem_type — user/feedback/project/reference 過濾
+        status   — provisional/trusted 過濾
+    """
     _feed_psi(query)
+    if mem_type or status:
+        return _STORE.structured_recall(query=query, top_k=top_k,
+                                        include_types={mem_type} if mem_type else None,
+                                        status_filter=status)
     return _STORE.recall(query=query, top_k=top_k)
 
 
@@ -52,8 +71,20 @@ def _feed_psi(user_message: str) -> None:
 
 
 def get_memory_context(max_core: int = 3, max_recent: int = 3, max_working: int = 2) -> str:
-    """作者以 max_core/max_recent/max_working kwargs 呼叫；回傳可拼進 prompt 的字串。"""
+    """作者以 max_core/max_recent/max_working kwargs 呼叫；回傳可拼進 prompt 的字串。
+
+    OpenSpace-inspired：輸出依類型分組，讓 LLM 能區分不同種類的記憶。
+    """
     core = _STORE.recall(top_k=max_core, layer="core")
     recent = _STORE.recall(top_k=max_recent, layer="episodic")
-    parts = [f"[核心] {m.content}" for m in core] + [f"[近期] {m.content}" for m in recent]
+    # 依類型分組
+    by_type: dict = {}
+    for m in core + recent:
+        t = m.mem_type if hasattr(m, 'mem_type') else "episodic"
+        by_type.setdefault(t, []).append(m.content)
+    parts = []
+    for t in ["user", "feedback", "project", "reference", "episodic"]:
+        if t in by_type:
+            for c in by_type[t]:
+                parts.append(f"[{t}] {c}")
     return "\n".join(parts)

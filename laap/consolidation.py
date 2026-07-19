@@ -38,6 +38,7 @@ PROMOTE_SEEN = 3          # 重複出現 ≥ 此次數 → 升 core
 STALE_DAYS = 30           # 超過此天數且低重要/低情緒 → 歸檔
 STALE_IMPORTANCE = 0.35
 STALE_EMOTION = 0.2
+PASSES_BEFORE_PROMOTE = 2  # provisional 存活 ≥ N 次固化 pass → 自動升 trusted
 AUDIT_PATH = Path(__file__).resolve().parents[1] / "consolidation-audit.jsonl"
 
 
@@ -73,15 +74,19 @@ class ConsolidationLoop:
     def __init__(self, psi=None,
                  interval: Optional[float] = None,
                  idle_s: Optional[float] = None,
-                 arousal_max: Optional[float] = None):
+                 arousal_max: Optional[float] = None,
+                 passes_before_promote: Optional[int] = None):
         self.psi = psi
-        self.interval = interval if interval is not None else _env_float("NEURALIS_CONSOLIDATION_INTERVAL", 1800.0)
-        self.idle_s = idle_s if idle_s is not None else _env_float("NEURALIS_CONSOLIDATION_IDLE_S", 600.0)
+        self.interval = interval if interval is not None else _env_float("NEURALIS_CONSOLIDATION_INTERVAL", 600.0)
+        self.idle_s = idle_s if idle_s is not None else _env_float("NEURALIS_CONSOLIDATION_IDLE_S", 300.0)
         self.arousal_max = arousal_max if arousal_max is not None else _env_float("NEURALIS_CONSOLIDATION_AROUSAL_MAX", 0.5)
+        self.passes_before_promote = passes_before_promote if passes_before_promote is not None else int(os.environ.get("NEURALIS_CONSOLIDATION_PASSES_PROMOTE", PASSES_BEFORE_PROMOTE))
         self._last_interaction = time.time()
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self.passes_total = 0
+        # session gate
+        self._session_since_last_pass: int = 0
         # 跨 pass 去重
         self._seen_hashes: set[str] = set()
         self._seen_hashes_max: int = 5000
@@ -103,6 +108,14 @@ class ConsolidationLoop:
     def note_interaction(self) -> None:
         """有互動就重置閒置計時（memory_bridge 餵 psi 時順手呼叫）。"""
         self._last_interaction = time.time()
+
+    def note_session_end(self) -> None:
+        """記錄一個 session 結束，讓下次固化 pass 知道有新 session。"""
+        self._session_since_last_pass += 1
+
+    def _session_gate(self) -> bool:
+        """自上次 pass 以來有新 session 才執行。"""
+        return self._session_since_last_pass > 0
 
     def _loop(self) -> None:
         while self._running:
@@ -130,6 +143,11 @@ class ConsolidationLoop:
 
     def run_pass(self) -> dict:
         """一輪固化。回傳統計 dict（供自檢/審計）。"""
+        # session gate（B5）：自上次 pass 以來無新 session 則跳過
+        if not self._session_gate():
+            return {"skipped": "session_gate", "pass": self.passes_total}
+        self._session_since_last_pass = 0
+
         try:
             from gbrain_client import get_client
             client = get_client()
@@ -141,7 +159,8 @@ class ConsolidationLoop:
         pages = client.call("list_pages", {"limit": 100})
         epi = [p for p in pages if p.get("slug", "").startswith(_EPI)][:MAX_PAGES_PER_PASS]
 
-        stats = {"scanned": len(epi), "merged": 0, "promoted": 0, "archived": 0}
+        stats = {"scanned": len(epi), "merged": 0, "promoted": 0, "archived": 0,
+                 "promoted_to_trusted": 0, "provisional_remaining": 0}
         mutations = 0
         seen: dict = {}  # normalized-hash → survivor info
 
@@ -159,6 +178,8 @@ class ConsolidationLoop:
                 "seen_count": int(_f(fm.get("seen_count"), 1)),
                 "age_days": _age_days(page.get("created_at", "")),
                 "tags": [],
+                "status": str(fm.get("status", "provisional")),
+                "passes_survived": int(_f(fm.get("passes_survived", 0))),
             }
             key = hashlib.md5(_normalize(body).encode()).hexdigest()
 
@@ -174,12 +195,15 @@ class ConsolidationLoop:
                 surv["seen_count"] += info["seen_count"]
                 surv["importance"] = max(surv["importance"], info["importance"])
                 surv["emotion"] = max(surv["emotion"], info["emotion"])
+                surv["passes_survived"] = max(surv["passes_survived"], info["passes_survived"])
+                surv["status"] = "trusted" if surv["status"] == "trusted" or info["status"] == "trusted" else surv["status"]
                 surv["dirty"] = True
                 self._delete(client, info["slug"])
                 stats["merged"] += 1
                 mutations += 1
             else:
                 info["dirty"] = False
+                info["passes_survived"] = info["passes_survived"] + 1  # 存活一次 pass
                 seen[key] = info
 
         for surv in seen.values():
@@ -200,6 +224,23 @@ class ConsolidationLoop:
             elif surv["dirty"]:
                 self._rewrite(client, surv, surv["slug"], layer="episodic")
                 mutations += 1
+
+            # B2: provisional → trusted 晉升（存活 ≥ N 次固化 pass 或 recall 證據充足）
+            fm_status = str(surv.get("status", "provisional"))
+            if fm_status == "provisional" and surv.get("passes_survived", 0) >= self.passes_before_promote:
+                # 從 frontmatter 讀取或預設 passes_survived
+                surv["status"] = "trusted"
+                self._rewrite(client, surv, surv["slug"], layer="episodic")
+                stats["promoted_to_trusted"] += 1
+                mutations += 1
+                try:
+                    from laap.memory_evidence import record_event
+                    record_event("promote", mem_id=surv["slug"].rsplit("/", 1)[-1],
+                                 payload={"to": "trusted", "pass": self.passes_total})
+                except Exception:
+                    pass
+            elif fm_status == "provisional":
+                stats["provisional_remaining"] += 1
 
         # 跨 pass 去重：註冊本次 pass 的 survivor hashes
         if self._crosspass:
@@ -244,6 +285,8 @@ class ConsolidationLoop:
             f"layer: {layer}\n"
             f"emotion_intensity: {round(surv['emotion'], 3)}\n"
             f"seen_count: {surv['seen_count']}\n"
+            f"status: {surv.get('status', 'provisional')}\n"
+            f"passes_survived: {surv.get('passes_survived', 0)}\n"
             f"source: laap-consolidation\n"
             f"---\n\n"
             f"{surv['body']}\n"

@@ -120,13 +120,22 @@ def _hash_embed(text: str) -> np.ndarray:
 
 @dataclass
 class MemoryFragment:
-    """記憶片段。作者以 r.content[:50] 取用，故 content 必為 str。"""
+    """記憶片段。作者以 r.content[:50] 取用，故 content 必為 str。
+
+    OpenSpace-inspired fields:
+      mem_type  — user/feedback/project/reference/episodic（見 memory_types.py）
+      status    — provisional（預設）/ trusted（已驗證有用）
+      provenance— 來源標記：chatflow / agency / scream-bridge / consolidation
+    """
     id: str = ""
     content: str = ""
     tags: List[str] = field(default_factory=list)
     importance: float = 0.5
     layer: str = "episodic"  # 'core' | 'episodic'
     ts: float = field(default_factory=time.time)
+    mem_type: str = "episodic"       # user/feedback/project/reference/episodic
+    status: str = "provisional"      # provisional/trusted
+    provenance: str = ""             # 來源標記
 
 
 class MemoryStore:
@@ -150,6 +159,9 @@ class MemoryStore:
         # importance >= 0.7 視為核心記憶
         if fragment.layer == "episodic" and fragment.importance >= 0.7:
             fragment.layer = "core"
+        # 寫入閘：高重要性或 project 類型直接 trusted（OpenSpace-inspired）
+        if fragment.importance >= 0.8 or fragment.mem_type == "project":
+            fragment.status = "trusted"
         self._store_local(fragment)
         client = _gbrain()
         if client is not None:
@@ -180,6 +192,9 @@ class MemoryStore:
             f"tags: [{tags}]\n"
             f"importance: {f.importance}\n"
             f"layer: {f.layer}\n"
+            f"mem_type: {f.mem_type}\n"
+            f"status: {f.status}\n"
+            f"provenance: {f.provenance}\n"
             f"emotion_intensity: {emotion_intensity()}\n"
             f"source: laap-runtime\n"
             f"---\n\n"
@@ -191,8 +206,9 @@ class MemoryStore:
     def get(self, mem_id: str) -> Optional[MemoryFragment]:
         return next((m for m in self._items if m.id == mem_id), None)
 
-    def recall(self, query: str = "", top_k: int = 5, layer: Optional[str] = None) -> List[MemoryFragment]:
-        local = self._recall_local(query, top_k, layer)
+    def recall(self, query: str = "", top_k: int = 5, layer: Optional[str] = None,
+               status_filter: Optional[str] = None) -> List[MemoryFragment]:
+        local = self._recall_local(query, top_k, layer, status_filter)
         if not query:
             # 無 query = 「最近/最重要」語意，本 session 的 in-process 快取就是對的來源
             return local
@@ -210,13 +226,40 @@ class MemoryStore:
         remote = [self._hit_to_fragment(h) for h in hits]
         if layer is not None:
             remote = [f for f in remote if f.layer == layer]
+        if status_filter is not None:
+            remote = [f for f in remote if f.status == status_filter]
         # 本 session 剛存的可能還沒進索引 → local 優先，slug/id 去重
         seen = {f.id for f in local}
         merged = local + [f for f in remote if f.id not in seen]
         return merged[:top_k]
 
-    def _recall_local(self, query: str, top_k: int, layer: Optional[str]) -> List[MemoryFragment]:
+    def structured_recall(self, query: str = "", top_k: int = 5,
+                          include_types: Optional[set] = None,
+                          exclude_types: Optional[set] = None,
+                          min_importance: float = 0.0,
+                          status_filter: Optional[str] = None) -> List[MemoryFragment]:
+        """兩階段：metadata 過濾 → 語意排序 → top_k cap。
+
+        OpenSpace-inspired：先按類型/重要性/狀態過濾，再對候選做語意排序。
+        """
+        candidates = [f for f in self._items
+                      if f.importance >= min_importance
+                      and (include_types is None or f.mem_type in include_types)
+                      and (exclude_types is None or f.mem_type not in exclude_types)
+                      and (status_filter is None or f.status == status_filter)]
+        if query:
+            q = query.lower()
+            candidates = [f for f in candidates if q in f.content.lower()]
+            candidates.sort(key=lambda f: (f.importance, f.ts), reverse=True)
+        else:
+            candidates.sort(key=lambda f: (f.importance, f.ts), reverse=True)
+        return candidates[:top_k]
+
+    def _recall_local(self, query: str, top_k: int, layer: Optional[str],
+                       status_filter: Optional[str] = None) -> List[MemoryFragment]:
         pool = [m for m in self._items if layer is None or m.layer == layer]
+        if status_filter:
+            pool = [m for m in pool if m.status == status_filter]
         if query:
             q = query.lower()
             pool = [m for m in pool if q in m.content.lower()]
@@ -234,11 +277,19 @@ class MemoryStore:
         else:
             # 腦庫既有知識頁 = 長期記憶 → core
             mem_id, layer = slug, "core"
+        # 從 frontmatter 解析新欄位（gbrain hit 可能附 frontmatter 或 chunk_text 不帶）
+        fm = hit.get("frontmatter") or {}
+        mem_type = str(fm.get("mem_type", "episodic"))
+        status = str(fm.get("status", "provisional"))
+        provenance = str(fm.get("provenance", ""))
         return MemoryFragment(
             id=mem_id,
             content=hit.get("chunk_text", "") or hit.get("title", ""),
             importance=min(1.0, float(hit.get("score", 0.5))),
             layer=layer,
+            mem_type=mem_type if mem_type in ("user","feedback","project","reference","episodic") else "episodic",
+            status=status if status in ("provisional","trusted") else "provisional",
+            provenance=provenance,
         )
 
     # ── stats ──────────────────────────────────────────────────

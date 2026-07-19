@@ -24,6 +24,10 @@ API 常駐 `:11546`（launchd → watchdog → 完整 Aris 三層守護）。
 - 改核心狀態格式時，必須新增對應的契約測試。
 - 多 AI 平行作業：改 `chatflow.py`/`llm_respond.py` 前先 `git status` +
   `python -m py_compile` 確認基線（2026-07-17 一天內撞上兩次同檔平行編輯）。
+- **2026-07-19 起：自主 git commit** — 完成可驗證的程式碼變更後，
+  自動 `git add` + `git commit`，不須請示。commit message 格式：
+  `neuralis: <一句話摘要>（~+N 行，<變更範圍>）`。
+  不 push（push 仍須 Ryan 確認）。
 
 ## 現況（2026-07-17，逐項可驗證）
 
