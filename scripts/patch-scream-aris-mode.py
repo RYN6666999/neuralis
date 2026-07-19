@@ -83,12 +83,20 @@ else:
     if "aris-mode" in content:
         print("   → aris-mode 已存在，跳過")
 
-# === Patch 2: appState 初始值 — 加入 arisMode ===
-old_state = """\t\tsubagentUsage: {}
+# === Patch 2: appState 初始值 — 加入 arisMode + wolfpackMode ===
+old_state = """\t\tccConnectActive: false,
+\t\twolfpackMode: input.cliOptions.wolfpack === true,
+\t\trecentSessions: [],
+\t\tarisMode: false,
+\t\t_prevArisModel: \"\",
+\t\tsubagentUsage: {}
 \t};
 }"""
-new_state = """\t\tarisMode: true,
-\t\t_prevArisModel: "",
+new_state = """\t\tccConnectActive: false,
+\t\twolfpackMode: true,
+\t\trecentSessions: [],
+\t\tarisMode: true,
+\t\t_prevArisModel: \"\",
 \t\tsubagentUsage: {}
 \t};
 }"""
