@@ -1,97 +1,73 @@
 #!/usr/bin/env python3
-"""套用/修復 LAAP 工具狀態通道的 Scream TUI 補丁（npm update 後需要重跑）。
+"""scream-tui 畫面跳頂補丁（npm update 後需要重跑）。
 
-v2 — 修掉 v1 的三個雷（2026-07-15 血的教訓，v1 曾把 scream 整個弄到起不來）：
-1. `\\$1` 轉義錯 → 塞進非法 JS（SyntaxError，scream 直接掛）。
-   現在自動偵測 SPINNER_FRAMES 的 minified 變體（此版是 SPINNER_FRAMES$1）。
-2. .mjs (ESM) 沒有 require → 舊補丁 require("fs") 在 try/catch 裡靜默失效。
-   現在檔首插入自有 import（__laapReadFS，名字自己取，不怕 minify 遮蔽）。
-3. 狀態檔沒有過期護欄 → tool 行程掛掉狀態列永遠卡「running」。
-   現在 ts 超過 15s 視為過期不顯示。
-另外：dist 檔名帶 hash（app-*.mjs），每版不同 → 改用 glob 自動找。
-patch 完跑 node --check 驗語法，失敗自動還原備份。
+問題：模型輸出長內容時，pi-tui 的 doRender 偵測到 firstChanged < prevViewportTop
+（串流更新導致元件從頭 re-render），觸發 fullRender(true) → 送出 \x1B[2J\x1B[H
+（清螢幕 + 游標歸位）→ 終端機捲到最上面。
+
+修法：把 fullRender(true) 改成不送 \x1B[2J\x1B[H，改為調整 viewport 位置後
+以非清除方式重繪。這樣畫面不會跳頂，串流內容正常追加在底部。
+
+慣例同 patch-scream-image.py：glob dist 檔名、精確錨點、獨立備份、node --check
+失敗自動還原。
 """
-import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-DIST = Path("/opt/homebrew/lib/node_modules/scream-code/dist")
-IMPORT_LINE = 'import { readFileSync as __laapReadFS } from "node:fs";\n'
-ANCHOR = ('function buildStatusLine(streamingPhase, streamingStartTime) {\n'
-          '\tif (streamingPhase === "idle") return t("status.idle");')
-MARK = "laap-tool-status"
+PI_TUI = Path("/opt/homebrew/lib/node_modules/scream-code/node_modules/@liutod-scream/pi-tui/dist/index.mjs")
+MARK = "scream-tui v1"
 
+# 精確錨點：firstChanged < prevViewportTop → fullRender(true)
+OLD = (
+    '\t\tif (firstChanged < prevViewportTop) {\n'
+    '\t\t\tlogRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);\n'
+    '\t\t\tfullRender(true);\n'
+    '\t\t\treturn;\n'
+    '\t\t}'
+)
 
-def patch_line(spinner: str) -> str:
-    return (
-        "\t// LAAP 工具狀態通道（patch-scream-tui.py v2）\n"
-        '\ttry { const raw=__laapReadFS("/tmp/laap-tool-status.json","utf8"); '
-        "const laap=JSON.parse(raw); "
-        'if((laap.status==="start"||laap.status==="running")'
-        "&&(Date.now()/1000-laap.ts)<15){"
-        "const n=Date.now();"
-        f"const f={spinner}[Math.floor(n/SPINNER_TICK_MS)%{spinner}.length];"
-        "const g=lerpGradient(n%GRADIENT_CYCLE_MS/GRADIENT_CYCLE_MS);"
-        'return chalk.hex(g).bold(f)+" "+laap.icon+" "+laap.description;}}'
-        "catch(e){}\n"
-    )
+# 改為不送 \x1B[2J\x1B[H，只調整 viewport 後非清除重繪
+NEW = (
+    '\t\tif (firstChanged < prevViewportTop) {\n'
+    '\t\t\tlogRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);\n'
+    '\t\t\t/* scream-tui v1: 不送 \\x1B[2J\\x1B[H（清螢幕+游標歸位=跳頂），'
+    '只調整 viewport */\n'
+    '\t\t\tprevViewportTop = Math.max(0, firstChanged);\n'
+    '\t\t\tfullRender(false);\n'
+    '\t\t\treturn;\n'
+    '\t\t}'
+)
 
 
 def main() -> int:
-    targets = sorted(DIST.glob("app-*.mjs"))
-    if not targets:
-        print(f"❌ {DIST} 找不到 app-*.mjs")
+    if not PI_TUI.exists():
+        print(f"❌ {PI_TUI} 不存在")
         return 1
-    target = targets[0]
-    backup = target.with_suffix(".mjs.bak")
-    content = target.read_text("utf-8")
 
-    # 偵測本版 SPINNER_FRAMES 的 minified 名（原碼 status line 就在用它）
-    m = re.search(r"(SPINNER_FRAMES\$?\w*)\[Math\.floor\(now / SPINNER_TICK_MS\)",
-                  content)
-    spinner = m.group(1) if m else "SPINNER_FRAMES"
-    want = patch_line(spinner)
+    backup = Path(str(PI_TUI) + ".scream-tui-bak")
+    content = PI_TUI.read_text("utf-8")
 
-    # 清掉任何舊補丁（含 v1 壞版本），統一重灌
-    cleaned = re.sub(r"\t// LAAP[^\n]*\n\ttry \{[^\n]*laap-tool-status[^\n]*\n",
-                     "", content)
-    if MARK in cleaned:
-        print("⚠️ 殘留無法辨識的舊補丁，人工檢查")
-        return 1
-    if want in content and IMPORT_LINE in content:
-        print("✅ 已是 v2 補丁，跳過")
+    if MARK in content:
+        print("✅ 已是 scream-tui v1 補丁，跳過")
         return 0
-
-    if ANCHOR not in cleaned:
-        print("⚠️ 找不到 buildStatusLine 錨點，scream 改版了 — 人工對齊")
+    if OLD not in content:
+        print("⚠️ 找不到 firstChanged < prevViewportTop 錨點 — pi-tui 改版了，人工對齊")
         return 1
 
-    if not backup.exists():   # 只留最原始的備份，不覆蓋
-        shutil.copy2(target, backup)
+    if not backup.exists():
+        shutil.copy2(PI_TUI, backup)
 
-    patched = cleaned.replace(
-        ANCHOR,
-        "function buildStatusLine(streamingPhase, streamingStartTime) {\n"
-        + want + '\tif (streamingPhase === "idle") return t("status.idle");')
-    if IMPORT_LINE not in patched:
-        lines = patched.split("\n", 1)
-        if lines[0].startswith("#!"):
-            patched = lines[0] + "\n" + IMPORT_LINE + lines[1]
-        else:
-            patched = IMPORT_LINE + patched
+    PI_TUI.write_text(content.replace(OLD, NEW, 1), "utf-8")
 
-    target.write_text(patched, "utf-8")
-
-    # 語法驗證 — 壞了就還原，絕不留一個起不來的 scream
-    check = subprocess.run(["node", "--check", str(target)],
+    check = subprocess.run(["node", "--check", str(PI_TUI)],
                            capture_output=True, text=True)
     if check.returncode != 0:
-        shutil.copy2(backup, target)
+        shutil.copy2(backup, PI_TUI)
         print(f"❌ node --check 失敗，已還原備份:\n{check.stderr[:400]}")
         return 1
-    print(f"✅ v2 補丁已套用（{target.name}, spinner={spinner}，語法驗證過）")
+    print(f"✅ scream-tui v1 補丁已套用（{PI_TUI.name}，語法驗證過）")
     return 0
 
 

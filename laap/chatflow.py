@@ -34,8 +34,8 @@ _CHAT_PATH = "/v1/chat/completions"
 _CHAT_TIMEOUT_S = float(os.environ.get("NEURALIS_CHAT_TIMEOUT_S", 8))
 # 交錯串流：等第一個事件的預算（LLM 連線 + 首 token）；之後事件間隔上限
 # （要 ≥ 工具執行 timeout，不然長工具跑到一半會被誤判斷線）。
-_STREAM_FIRST_S = float(os.environ.get("NEURALIS_STREAM_FIRST_S", 12))
-_STREAM_IDLE_S = float(os.environ.get("NEURALIS_STREAM_IDLE_S", 130))
+_STREAM_FIRST_S = float(os.environ.get("NEURALIS_STREAM_FIRST_S", 30))
+_STREAM_IDLE_S = float(os.environ.get("NEURALIS_STREAM_IDLE_S", 300))
 _BOOT_TS = time.time()
 
 _SSE_HEADERS = {
@@ -50,8 +50,12 @@ def _content_text(c) -> str:
     if isinstance(c, str):
         return c
     if isinstance(c, list):
-        return " ".join(p.get("text", "") for p in c
-                        if isinstance(p, dict) and p.get("type") == "text")
+        parts = [p.get("text", "") for p in c
+                 if isinstance(p, dict) and p.get("type") == "text"]
+        # 偵測 image_url 並標記，讓 psi 知道使用者傳了圖片
+        if any(isinstance(p, dict) and p.get("type") == "image_url" for p in c):
+            parts.append("[圖片]")
+        return " ".join(parts)
     return ""
 
 

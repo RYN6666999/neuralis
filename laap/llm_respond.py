@@ -84,24 +84,29 @@ _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
-# 含圖的請求走 vision 模型（deepseek 非 vision，直送會被 OpenRouter 打回）。
-# gemini-2.0-flash-001 已從 OpenRouter 下架（實測 404）；改用實測可讀圖的現役 slug。
-_VISION_MODEL = os.environ.get("NEURALIS_VISION_MODEL", "google/gemini-3.1-flash-image")
+# gemini-3.1-flash-image 不支援 tool_use，scream 送 tools 會 404。
+# 改用 gemini-2.5-flash（支援 image + file + tools）。
+_VISION_MODEL = os.environ.get("NEURALIS_VISION_MODEL", "google/gemini-2.5-flash")
 
 
 def _has_image(messages: list) -> bool:
     """訊息是否含 image_url content part（OpenAI 多模態格式）。"""
-    for m in messages or []:
+    for i, m in enumerate(messages or []):
         c = m.get("content")
-        if isinstance(c, list) and any(
-                isinstance(p, dict) and p.get("type") == "image_url" for p in c):
-            return True
+        if isinstance(c, list):
+            for j, p in enumerate(c):
+                if isinstance(p, dict) and p.get("type") == "image_url":
+                    logger.info(f"[llm_respond] _has_image: msg[{i}] content[{j}] = image_url ✓")
+                    return True
     return False
 
 
 def _route_model(messages: list, default: str) -> str:
     """含圖 → vision 模型；否則用 default。"""
-    return _VISION_MODEL if _has_image(messages) else default
+    has = _has_image(messages)
+    chosen = _VISION_MODEL if has else default
+    logger.info(f"[llm_respond] _route_model: has_image={has}, default={default}, chosen={chosen}")
+    return chosen
 
 # ── API Key 快取（省每次 subprocess call 40-100ms）──
 _API_KEY_CACHE: Optional[str] = None
@@ -508,6 +513,7 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
         return
 
     model = _route_model(messages, model or _LLM_MODEL)
+    logger.info(f"[llm_respond] _call_llm_stream: model={model}, msg_count={len(messages)}, tool_count={len(tools) if tools else 0}")
     payload = {
         "model": model,
         "messages": messages,
@@ -534,6 +540,10 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
         except Exception as e:
             last_err = e
             if not _is_retryable(e) or attempt >= _RETRY_MAX:
+                detail = ""
+                if isinstance(e, urllib.error.HTTPError):
+                    detail = f" code={e.code} body={e.read()[:200]!r}"
+                logger.info(f"[llm_respond] _call_llm_stream 失敗: model={model} err={e}{detail}")
                 log_abort("call_llm_stream.connect", err=e,
                           model=model or _LLM_MODEL, attempt=attempt,
                           has_tools=bool(tools))
@@ -697,7 +707,12 @@ def respond_stream(user_msg: str, psi_state: dict, history: list = None,
     messages = [{"role": "system", "content": system}]
     for m in (history or [])[-10:]:
         if m.get("role") in ("user", "assistant") and m.get("content"):
-            messages.append({"role": m["role"], "content": str(m["content"])[:800]})
+            c = m["content"]
+            if isinstance(c, list):
+                # 保留 content list 結構（如 image_url），讓 _route_model 能檢測到圖
+                messages.append({"role": m["role"], "content": c})
+            else:
+                messages.append({"role": m["role"], "content": str(c)[:800]})
     messages.append({"role": "user", "content": user_msg})
 
     tools = _use_tool_schema() if _CHAT_TOOLS else None
@@ -805,7 +820,11 @@ def respond(user_msg: str, psi_state: dict, history: list = None,
     messages = [{"role": "system", "content": system}]
     for m in (history or [])[-10:]:
         if m.get("role") in ("user", "assistant") and m.get("content"):
-            messages.append({"role": m["role"], "content": str(m["content"])[:800]})
+            c = m["content"]
+            if isinstance(c, list):
+                messages.append({"role": m["role"], "content": c})
+            else:
+                messages.append({"role": m["role"], "content": str(c)[:800]})
     messages.append({"role": "user", "content": user_msg})
 
     # 快取檢查：相同對話尾 + 60s 內直接回
