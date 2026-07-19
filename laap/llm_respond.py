@@ -85,7 +85,8 @@ _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
 # 含圖的請求走 vision 模型（deepseek 非 vision，直送會被 OpenRouter 打回）。
-_VISION_MODEL = os.environ.get("NEURALIS_VISION_MODEL", "google/gemini-2.0-flash-001")
+# gemini-2.0-flash-001 已從 OpenRouter 下架（實測 404）；改用實測可讀圖的現役 slug。
+_VISION_MODEL = os.environ.get("NEURALIS_VISION_MODEL", "google/gemini-3.1-flash-image")
 
 
 def _has_image(messages: list) -> bool:
