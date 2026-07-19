@@ -105,6 +105,15 @@ restarts=()          # crash-loop 視窗內的重啟時間戳
 cycles=0
 
 while :; do
+    # ── 熔斷 kill switch ──────────────────────────
+    HALT="$HOME/.aris-halt"
+    if [[ -f "$HALT" ]]; then
+        echo "[watchdog] 🛑  halt 檔存在 → 停 agency/executor + daemon（解除: rm $HALT）"
+        audit halt
+        kill_stale
+        exit 0
+    fi
+
     if probe; then
         [[ $consecutive -gt 0 ]] && echo "[watchdog] 恢復健康（先前連續失敗 $consecutive 次）"
         consecutive=0
