@@ -888,6 +888,31 @@ async def _stream_tool_test(request, web, model: str):
                                  engine="tool-stream-test", cancel=cancel)
 
 
+# 作者的 web.Application() 沒設 client_max_size → aiohttp 預設 1MB。帶 base64 圖 +
+# 長對話歷史的請求會超過 → request.json() 拋 → 作者 handler 回 400「invalid JSON」
+# （2026-07-19 拖圖實測撞到）。調大到 32MB（可 env 覆蓋）。
+_MAX_BODY = int(os.environ.get("NEURALIS_MAX_BODY_MB", 32)) * 1024 * 1024
+
+
+def _patch_max_body_size() -> None:
+    """把 aiohttp Application 的 client_max_size 預設調大。作者若自己設了則尊重。冪等。"""
+    try:
+        from aiohttp import web
+    except Exception:
+        return
+    if getattr(web.Application.__init__, "_laap_maxbody", False):
+        return
+    orig_init = web.Application.__init__
+
+    def patched_init(self, *a, **kw):
+        kw.setdefault("client_max_size", _MAX_BODY)
+        return orig_init(self, *a, **kw)
+
+    patched_init._laap_maxbody = True
+    web.Application.__init__ = patched_init
+    logger.info(f"[chatflow] aiohttp client_max_size 預設 → {_MAX_BODY // (1024*1024)}MB（防含圖請求超 1MB）")
+
+
 def install() -> bool:
     """patch aiohttp add_post，包住 chat completions handler。冪等。回是否安裝。"""
     if os.environ.get("NEURALIS_CHATFLOW", "on").lower() in ("off", "0", "false"):
@@ -897,6 +922,7 @@ def install() -> bool:
     except Exception as e:
         logger.warning(f"[chatflow] aiohttp 不可用，跳過: {e}")
         return False
+    _patch_max_body_size()
     if getattr(UrlDispatcher.add_post, "_laap_chatflow", False):
         return True  # 已裝
     orig = UrlDispatcher.add_post
