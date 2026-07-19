@@ -61,6 +61,15 @@ def _is_retryable(err: Exception) -> bool:
     return False
 
 
+def _is_transient_upstream(err) -> bool:
+    """SSE chunk 裡的上游 error 是否 transient（504 idle timeout / 過載 / 限流）值得重試。
+    err 是 dict（如 {'code':504,'message':'Upstream idle timeout exceeded'}）或字串。"""
+    s = str(err).lower()
+    return any(k in s for k in (
+        "504", "503", "502", "429", "timeout", "idle", "overload",
+        "rate limit", "unavailable", "temporarily"))
+
+
 def _retry_call(fn, *args, max_retries: int = None, **kwargs):
     """Retry wrapper with exponential backoff for transient errors."""
     retries = max_retries if max_retries is not None else _RETRY_MAX
@@ -537,6 +546,13 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
             except json.JSONDecodeError:
                 continue
             if chunk.get("error"):
+                # A2: transient 上游錯誤（504 idle timeout / 過載）且還沒吐 token →
+                # break 落到下面的重連重試路（不直接中止回合逼使用者手動「繼續」）
+                if not saw_token and _is_transient_upstream(chunk["error"]):
+                    stray.append(f"transient-upstream: {str(chunk['error'])[:80]}")
+                    break
+                log_abort("call_llm_stream.upstream", model=model or _LLM_MODEL,
+                          detail=str(chunk["error"])[:500], has_tools=bool(tools))
                 yield {"type": "error", "text": f"上游錯誤: {str(chunk['error'])[:200]}"}
                 return
             delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
@@ -558,8 +574,14 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
                 if fn.get("arguments"):
                     slot["arguments"] += fn["arguments"]
     except Exception as e:
-        yield {"type": "error", "text": f"串流中斷: {e}"}
-        return
+        # A2: transient 中斷（timeout/連線斷）且還沒吐 token → 不 return，落到下面的
+        # 空串流重連路自動重試。已吐 token 的不重試（避免重複輸出）。
+        if saw_token or not _is_retryable(e):
+            log_abort("call_llm_stream.midstream", err=e, model=model or _LLM_MODEL,
+                      saw_token=saw_token, has_tools=bool(tools))
+            yield {"type": "error", "text": f"串流中斷: {e}"}
+            return
+        stray.append(f"transient-midstream: {str(e)[:80]}")
     finally:
         try:
             resp.close()
