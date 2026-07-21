@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""任務通道監聽器（Scream 端背景精靈）— 偵測 type='task' → 執行 → 寫回 type='result'。
+"""⚠️ 已棄用 — 由 agentos-aris-bridge.py 取代。
+
+任務通道監聽器（Scream 端背景精靈）— 偵測 type='task' → 執行 → 寫回 type='result'。
+
+此檔案保留向後相容。新功能請使用 AgentOS Aris Bridge：
+  python3 ~/Developer/neuralis/scripts/agentos-aris-bridge.py [--daemon]
 
 啟動：python3 ~/Developer/neuralis/scripts/scream-task-executor.py &
 或由 scream-monitor.sh 自動 spawn。

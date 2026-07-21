@@ -9,7 +9,7 @@ from pathlib import Path
 
 DAEMONS = {
     "com.neuralis.phase-logger": "scream-phase-logger.py",
-    "com.neuralis.task-executor": "scream-task-executor.py",
+    "com.neuralis.agentos-bridge": "agentos-aris-bridge.py",
     "com.neuralis.scream-monitor": "scream-monitor.sh",
 }
 

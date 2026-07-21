@@ -24,7 +24,7 @@ mkdir -p "$AGENTS_DIR"
 # label|指令 清單（指令在 zsh -c 內執行）
 DAEMONS=(
   "com.neuralis.phase-logger|exec python3 $HOME/agent-sandbox/scripts/scream-phase-logger.py"
-  "com.neuralis.task-executor|cd $NEURALIS && PYTHONPATH=.:../laap-AGI exec $HOME/Developer/laapenv/bin/python scripts/scream-task-executor.py"
+  "com.neuralis.agentos-bridge|cd $NEURALIS && exec python3 scripts/agentos-aris-bridge.py --daemon"
   "com.neuralis.scream-monitor|exec bash $NEURALIS/scripts/scream-monitor.sh"
 )
 
