@@ -35,6 +35,16 @@ AGENTOS_API = "http://localhost:8000"
 POLL_INTERVAL = 1.0
 LOG_FILE = "/tmp/agentos-aris-bridge.log"
 
+# ── MCP Shadow Call 設定 ──────────────────────────────────
+
+SHADOW_ENABLED = os.environ.get("AGENTOS_SHADOW_ENABLED", "0") == "1"
+SHADOW_LOG = os.path.expanduser("~/agent-sandbox/logs/shadow.jsonl")
+SHADOW_SNAPSHOT_DIR = os.path.expanduser("~/agent-sandbox/snapshots/")
+SHADOW_WORKSPACE_ROOT = os.path.abspath(os.path.expanduser("~/agent-sandbox"))
+SHADOW_TIMEOUT = 5
+SHADOW_KILL_SENTINEL = "/tmp/agentos-shadow-kill"
+SHADOW_QUEUE_MAXSIZE = 16
+
 # ── 日誌 ──────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -560,6 +570,439 @@ def _post_to_aris(result: dict, entry: dict) -> None:
         pass  # Aris 下次輪詢會從頻道收到結果
 
 
+# ── MCP Shadow Call ────────────────────────────────────────
+# 基礎設施：bounded queue + 單一 worker + 固定操作模板 + 動態 kill switch
+# 預設關閉（AGENTOS_SHADOW_ENABLED=0），僅供本機受控測試。
+
+import queue as _queue
+import threading as _th
+import subprocess as _sp
+import shlex as _shlex
+
+_SHADOW_QUEUE: "_queue.Queue[dict]" = _queue.Queue(maxsize=SHADOW_QUEUE_MAXSIZE)
+_SHADOW_WORKER: "_th.Thread | None" = None
+_SHADOW_WORKER_LOCK = _th.Lock()
+_SHADOW_LOG_LOCK = _th.Lock()
+_SHADOW_ROTATION_LOCK = _th.Lock()
+_SHADOW_SHUTDOWN_REQUESTED = False
+_SHADOW_PENDING_COUNT = 0
+
+# 禁止的 shell metacharacters（含空白，防止路徑解析歧義）
+_SHELL_METACHARS = frozenset(";&|`$<>()[]{}!\\'\"\n\t ")
+
+
+def _path_safe(path: str) -> bool:
+    """檢查路徑是否安全（無 shell metachar、無 option prefix、realpath 解析後在 workspace 內）。
+
+    使用 os.path.realpath() 解析 symlink，防止 symlink escape 攻擊。
+    TOCTOU 風險：檢查與執行之間若 symlink 被替換，仍可能繞過。
+    目前 Phase 1 僅供本機受控測試，此風險在接真實流量前需處理。
+    """
+    if any(c in path for c in _SHELL_METACHARS):
+        return False
+    # 路徑不得以 - 開頭（防止 option injection）
+    if path.startswith("-"):
+        return False
+    try:
+        # 先 resolve symlink，再檢查是否在 workspace 內
+        joined = os.path.join(SHADOW_WORKSPACE_ROOT, path)
+        resolved = os.path.realpath(joined)
+        return resolved.startswith(SHADOW_WORKSPACE_ROOT + "/") or resolved == SHADOW_WORKSPACE_ROOT
+    except Exception:
+        return False
+
+
+# 固定操作模板：操作名稱 → (argv_template, path_arg_index_or_None)
+# 所有命令必須使用 shell=False 可執行的 argv，不得包含 shell metachar
+_FIXED_OPS: dict[str, tuple] = {
+    "list_directory": (["ls", "-la", "--", "{path}"], 3),
+    "read_file":      (["cat", "--", "{path}"], 2),
+    "get_cwd":        (["pwd"], None),
+}
+
+
+def _build_command(op_name: str, path: str | None = None) -> tuple[list[str], str | None]:
+    """從固定模板建構 argv，並回傳對應的 shell 命令字串（給 sandbox_execute 用）。
+
+    Returns:
+        (argv, shell_command_string or None if invalid)
+    """
+    template = _FIXED_OPS.get(op_name)
+    if template is None:
+        return [], None
+    argv_tpl, path_idx = template
+    if path_idx is not None:
+        if path is None or not _path_safe(path):
+            return [], None
+        argv = list(argv_tpl)
+        argv[path_idx] = os.path.join(SHADOW_WORKSPACE_ROOT, path)
+    else:
+        argv = list(argv_tpl)
+
+    # 驗證 argv 中沒有任何 shell metachar
+    for arg in argv:
+        if any(c in arg for c in _SHELL_METACHARS):
+            return [], None
+
+    # 組合成 shell 命令字串（用 shlex.quote 確保安全）
+    cmd_str = " ".join(_shlex.quote(a) for a in argv)
+    return argv, cmd_str
+
+
+def _shadow_kill_active() -> bool:
+    """動態 kill switch：sentinel file 存在時關閉 shadow。"""
+    return os.path.exists(SHADOW_KILL_SENTINEL)
+
+
+def _shadow_init_worker() -> None:
+    """初始化單一 bounded worker（lazy init）。
+
+    若 worker 因未捕獲異常（如 BaseException）死亡，
+    下次 enqueue 時會自動重建（is_alive() 檢查 + 重新建立 thread）。
+    """
+    global _SHADOW_WORKER
+    if _SHADOW_WORKER is not None and _SHADOW_WORKER.is_alive():
+        return
+    with _SHADOW_WORKER_LOCK:
+        if _SHADOW_WORKER is not None and _SHADOW_WORKER.is_alive():
+            return
+        _SHADOW_WORKER = _th.Thread(
+            target=_shadow_worker_loop,
+            daemon=True,
+            name="shadow-worker",
+        )
+        _SHADOW_WORKER.start()
+
+
+def _shadow_worker_loop() -> None:
+    """Worker 主迴圈。
+
+    finally 保證 task_done 精確被呼叫一次。
+    SystemExit/KeyboardInterrupt 記錄後傳播，不雙重 task_done。
+    """
+    global _SHADOW_PENDING_COUNT
+    while True:
+        item = None
+        try:
+            item = _SHADOW_QUEUE.get()
+            if item is None:
+                _SHADOW_QUEUE.task_done()
+                break  # sentinel: shutdown
+            _shadow_execute(item)
+        except BaseException as e:
+            if isinstance(e, (SystemExit, KeyboardInterrupt)):
+                _shadow_write_log({
+                    "ts": time.time(), "entry_id": item.get("entry_id", "unknown") if item else "worker",
+                    "route": "system", "shadow_status": "worker_exception",
+                    "error_type": f"{type(e).__name__}: {e}",
+                })
+                # 不呼叫 task_done，讓 finally 處理
+                raise
+            _shadow_write_log({
+                "ts": time.time(), "entry_id": item.get("entry_id", "unknown") if item else "worker",
+                "route": "system", "shadow_status": "worker_exception",
+                "error_type": str(e)[:100],
+            })
+        finally:
+            if item is not None:
+                _SHADOW_QUEUE.task_done()
+                with _SHADOW_WORKER_LOCK:
+                    _SHADOW_PENDING_COUNT = _SHADOW_QUEUE.qsize()
+
+    # 正常 shutdown（sentinel 的 task_done 已在 break 前處理）
+    _shadow_write_log({
+        "ts": time.time(), "entry_id": "worker",
+        "route": "system", "shadow_status": "worker_shutdown",
+    })
+
+
+def _shadow_shutdown(timeout: float = 5.0) -> None:
+    """Graceful shutdown：使用 sentinel 通知 worker 結束，有 bounded join timeout。
+
+    Args:
+        timeout: 等待 worker 結束的最大秒數
+    """
+    global _SHADOW_SHUTDOWN_REQUESTED
+    _SHADOW_SHUTDOWN_REQUESTED = True
+    remaining = _SHADOW_QUEUE.qsize()
+    if remaining > 0:
+        _shadow_write_log({
+            "ts": time.time(),
+            "entry_id": "shutdown",
+            "route": "system",
+            "shadow_status": "shutdown",
+            "skip_reason": f"worker_shutdown_with_{remaining}_pending",
+        })
+    # 放入 sentinel 通知 worker 結束
+    try:
+        _SHADOW_QUEUE.put(None, block=True, timeout=2)
+    except _queue.Full:
+        pass
+    # bounded join
+    if _SHADOW_WORKER and _SHADOW_WORKER.is_alive():
+        _SHADOW_WORKER.join(timeout=timeout)
+
+
+def _parse_shadow_result(stdout: str) -> tuple:
+    """從 MCP stdout 解出 tools/call 的真實結果。
+
+    returncode 不能當成功判定：tool 回 isError 時 MCP server 仍是正常結束
+    （exit 0），只靠 returncode 會把失敗的呼叫記成 ok。
+
+    Returns:
+        (shadow_status, error_type or None)
+    """
+    for line in stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("id") != 1:
+            continue
+        if "error" in d:
+            return "error", f"jsonrpc: {_redact(str(d['error']))[:100]}"
+        result = d.get("result") or {}
+        if result.get("isError"):
+            text = "".join(
+                c.get("text", "") for c in result.get("content", [])
+                if c.get("type") == "text"
+            )
+            return "error", f"tool_error: {_redact(text)[:100]}"
+        return "ok", None
+    return "error", "no_response"
+
+
+def _shadow_execute(item: dict) -> None:
+    """執行單一 shadow MCP call（在 worker thread 中執行）。"""
+    queue_wait_ms = (time.time() - item["enqueued_at"]) * 1000
+    mcp_start = time.time()
+    try:
+        # 使用固定操作模板建構命令
+        argv, cmd_str = _build_command(item["op_name"], item.get("path"))
+        if cmd_str is None:
+            _shadow_write_log({
+                "ts": time.time(), "entry_id": item["entry_id"],
+                "route": item["route"], "shadow_status": "skipped_non_readonly",
+                "skip_reason": f"invalid_op_or_path: {item.get('op_name')}",
+                "queue_wait_ms": round(queue_wait_ms, 1),
+            })
+            return
+
+        # 呼叫 MCP sandbox_execute（結構化操作 API）
+        init_json = json.dumps({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05", "capabilities": {},
+                "clientInfo": {"name": "agentos-shadow", "version": "0.1"},
+            },
+        })
+        call_json = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {
+                "name": "sandbox_execute",
+                # sandbox_execute 的契約只有 operation / path / session_id，
+                # 且 schema 是 additionalProperties:false。多送任何欄位會被拒。
+                # path 必須是 str：item["path"] 對無路徑的 op 是 None，
+                # 用 `or ""` coerce，不能用 get(...,"")（key 存在時仍回 None）。
+                "arguments": {
+                    "operation": item.get("op_name", "get_cwd"),
+                    "path": item.get("path") or "",
+                },
+            },
+        })
+        r = _sp.run(
+            ["python3", "-m", "mcp_server.server"],
+            input=f"{init_json}\n{call_json}\n",
+            capture_output=True, text=True, timeout=SHADOW_TIMEOUT,
+            cwd=SHADOW_WORKSPACE_ROOT,
+        )
+        mcp_latency = (time.time() - mcp_start) * 1000
+
+        if r.returncode != 0:
+            shadow_status = "error"
+            error_type = f"exit_{r.returncode}: {_redact(r.stderr)[:100]}"
+        else:
+            shadow_status, error_type = _parse_shadow_result(r.stdout)
+    except _sp.TimeoutExpired:
+        mcp_latency = SHADOW_TIMEOUT * 1000
+        shadow_status = "timeout"
+        error_type = "timeout"
+    except Exception as e:
+        mcp_latency = (time.time() - mcp_start) * 1000
+        shadow_status = "exception"
+        error_type = str(e)[:100]
+
+    _shadow_write_log({
+        "ts": time.time(),
+        "entry_id": item["entry_id"],
+        "route": item["route"],
+        "op_name": item.get("op_name"),
+        "shadow_status": shadow_status,
+        "queue_wait_ms": round(queue_wait_ms, 1),
+        "mcp_latency_ms": round(mcp_latency, 1),
+        "error_type": error_type,
+    })
+
+
+# 敏感模式：command/stdout/stderr 需 redact
+_REDACT_PATTERNS = [
+    ("api_key", "API_KEY"),
+    ("token", "TOKEN"),
+    ("secret", "SECRET"),
+    ("password", "PASSWORD"),
+    ("passwd", "PASSWORD"),
+]
+
+
+def _redact(text: str) -> str:
+    """Redact 敏感資訊。"""
+    lower = text.lower()
+    for keyword, label in _REDACT_PATTERNS:
+        idx = lower.find(keyword)
+        if idx != -1:
+            return f"<{label}>"
+    return text[:1000]
+
+
+def _shadow_write_log(entry: dict) -> None:
+    """寫 shadow log（0600 權限、append-only、thread-safe）。"""
+    log_path = SHADOW_LOG
+    with _SHADOW_LOG_LOCK:
+        try:
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            _shadow_rotate_log()
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            with open(log_path, "a") as f:
+                f.write(line)
+            os.chmod(log_path, 0o600)
+        except Exception:
+            pass
+
+
+def _shadow_rotate_log() -> None:
+    """每日 rotation（thread-safe）。
+
+    只在既有 log 的內容屬於「今天以前」時才 rotate，後綴用**內容的日期**
+    （取 mtime），不是當下日期。
+
+    原本的判斷是「今天日期的檔名還不存在就 rotate」，有兩個後果：
+      1. 每天第一次寫入時，把前幾天累積的資料貼上今天的日期標籤
+      2. 同一天內第二次寫入就會把當天資料切走（因為當天檔名尚未存在）
+    兩者都會讓「每日報表」讀到錯的檔案。
+
+    後綴衝突時附加序號，絕不覆蓋既有 log。
+    """
+    log_path = SHADOW_LOG
+    if not os.path.exists(log_path):
+        return
+    with _SHADOW_ROTATION_LOCK:
+        try:
+            import datetime
+            if not os.path.exists(log_path):
+                return  # 另一 thread 已 rotate
+            content_date = datetime.date.fromtimestamp(os.path.getmtime(log_path))
+            if content_date >= datetime.date.today():
+                return  # 內容是今天的，不切
+            rotated = f"{log_path}.{content_date.strftime('%Y%m%d')}"
+            if os.path.exists(rotated):
+                i = 1
+                while os.path.exists(f"{rotated}.{i}"):
+                    i += 1
+                rotated = f"{rotated}.{i}"
+            os.rename(log_path, rotated)
+        except Exception:
+            pass
+
+
+def _shadow_call_to_mcp(route_key: str, task_desc: str, entry_id: str) -> None:
+    """將 shadow 任務提交到 bounded queue。
+
+    Primary path 只做：
+      1. kill switch 檢查
+      2. route 檢查（僅 read）
+      3. 固定操作模板解析
+      4. queue put（non-blocking，～0.1ms）
+
+    不等待 MCP 完成，不建立 thread。
+    """
+    if not SHADOW_ENABLED:
+        return
+
+    # 動態 kill switch
+    if _shadow_kill_active():
+        _shadow_write_log({
+            "ts": time.time(), "entry_id": entry_id,
+            "route": route_key, "shadow_status": "killed",
+            "skip_reason": "kill_sentinel_active",
+        })
+        return
+
+    # 唯讀 route 檢查
+    if route_key != "read":
+        _shadow_write_log({
+            "ts": time.time(), "entry_id": entry_id,
+            "route": route_key, "shadow_status": "skipped_non_readonly",
+            "skip_reason": f"route_not_readonly: {route_key}",
+        })
+        return
+
+    # 從 task_desc 解析操作模板和路徑
+    # 格式："op_name [path]"
+    # 例如: "list_directory ." 或 "get_cwd" 或 "read_file agentos.json"
+    desc = task_desc.strip()
+    parts = desc.split(None, 1)  # 最多 split 一次
+    op_name = parts[0] if parts else ""
+    op_path = parts[1] if len(parts) > 1 else None
+
+    if op_name not in _FIXED_OPS:
+        _shadow_write_log({
+            "ts": time.time(), "entry_id": entry_id,
+            "route": route_key, "shadow_status": "skipped_non_readonly",
+            "skip_reason": f"unknown_op: {_redact(op_name)[:50]}",
+        })
+        return
+
+    # 驗證操作模板
+    _, cmd_str = _build_command(op_name, op_path)
+    if cmd_str is None:
+        _shadow_write_log({
+            "ts": time.time(), "entry_id": entry_id,
+            "route": route_key, "shadow_status": "skipped_non_readonly",
+            "skip_reason": f"invalid_op_args: op={op_name} path={_redact(op_path or '')[:50]}",
+            "op_name": op_name,
+        })
+        return
+
+    # 提交到 bounded queue
+    item = {
+        "route": route_key,
+        "op_name": op_name,
+        "path": op_path,
+        "entry_id": entry_id,
+        "enqueued_at": time.time(),
+    }
+    try:
+        _SHADOW_QUEUE.put(item, block=False)
+        _shadow_init_worker()
+        _shadow_write_log({
+            "ts": time.time(), "entry_id": entry_id,
+            "route": route_key, "op_name": op_name,
+            "shadow_status": "enqueued",
+            "queue_wait_ms": 0,
+        })
+    except _queue.Full:
+        _shadow_write_log({
+            "ts": time.time(), "entry_id": entry_id,
+            "route": route_key, "op_name": op_name,
+            "shadow_status": "queue_full",
+            "skip_reason": "queue_full_dropped",
+        })
+    except Exception:
+        pass
+
+
 # ── 主處理流程 ───────────────────────────────────────────
 
 def process_entry(entry: dict) -> dict:
@@ -582,6 +1025,8 @@ def process_entry(entry: dict) -> dict:
 
     # ── ③ Execute ──
     result = _execute_by_route(route_key, task_desc)
+    # Shadow call to MCP Server（非同步，不阻塞，僅記錄）
+    _shadow_call_to_mcp(route_key, task_desc, entry_id)
     log.info(f"  ③ Execute: success={result.get('success', False)} "
              f"output={len(result.get('output', result.get('error', '')))} chars")
 
