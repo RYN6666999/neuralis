@@ -578,6 +578,7 @@ import queue as _queue
 import threading as _th
 import subprocess as _sp
 import shlex as _shlex
+import hashlib as _hashlib
 
 _SHADOW_QUEUE: "_queue.Queue[dict]" = _queue.Queue(maxsize=SHADOW_QUEUE_MAXSIZE)
 _SHADOW_WORKER: "_th.Thread | None" = None
@@ -744,13 +745,19 @@ def _shadow_shutdown(timeout: float = 5.0) -> None:
 
 
 def _parse_shadow_result(stdout: str) -> tuple:
-    """從 MCP stdout 解出 tools/call 的真實結果。
+    """從 MCP stdout 解出 tools/call 的真實結果 + 可比對內容。
 
     returncode 不能當成功判定：tool 回 isError 時 MCP server 仍是正常結束
     （exit 0），只靠 returncode 會把失敗的呼叫記成 ok。
 
+    sandbox_execute 回 dict {status, stdout, stderr, ...}，FastMCP 把它序列化成
+    text content（並可能附 structuredContent）。可比對的檔案內容在 `stdout`，
+    不是整個信封 —— 拿信封去比會讓 diverged 恆為 true。這裡把 stdout 挖出來，
+    並用 tool 自身的 `status` 判定成敗（isError 只反映協議層，not_found 之類的
+    語意失敗 isError 仍是 false）。
+
     Returns:
-        (shadow_status, error_type or None)
+        (shadow_status, error_type or None, comparable_text)
     """
     for line in stdout.strip().split("\n"):
         if not line.strip():
@@ -762,16 +769,33 @@ def _parse_shadow_result(stdout: str) -> tuple:
         if d.get("id") != 1:
             continue
         if "error" in d:
-            return "error", f"jsonrpc: {_redact(str(d['error']))[:100]}"
+            return "error", f"jsonrpc: {_redact(str(d['error']))[:100]}", ""
         result = d.get("result") or {}
         if result.get("isError"):
             text = "".join(
                 c.get("text", "") for c in result.get("content", [])
                 if c.get("type") == "text"
             )
-            return "error", f"tool_error: {_redact(text)[:100]}"
-        return "ok", None
-    return "error", "no_response"
+            return "error", f"tool_error: {_redact(text)[:100]}", ""
+
+        # 挖出工具回傳 dict（優先 structuredContent，退回解析 text block）
+        payload = result.get("structuredContent")
+        if not isinstance(payload, dict):
+            raw = "".join(
+                c.get("text", "") for c in result.get("content", [])
+                if c.get("type") == "text"
+            )
+            try:
+                parsed = json.loads(raw)
+                payload = parsed if isinstance(parsed, dict) else {"stdout": raw}
+            except ValueError:
+                payload = {"stdout": raw}
+
+        tool_status = payload.get("status", "ok")
+        if tool_status != "ok":
+            return "error", f"tool_status:{tool_status}", ""
+        return "ok", None, payload.get("stdout") or ""
+    return "error", "no_response", ""
 
 
 def _shadow_execute(item: dict) -> None:
@@ -820,30 +844,55 @@ def _shadow_execute(item: dict) -> None:
         )
         mcp_latency = (time.time() - mcp_start) * 1000
 
+        new_text = ""
         if r.returncode != 0:
             shadow_status = "error"
             error_type = f"exit_{r.returncode}: {_redact(r.stderr)[:100]}"
         else:
-            shadow_status, error_type = _parse_shadow_result(r.stdout)
+            shadow_status, error_type, new_text = _parse_shadow_result(r.stdout)
     except _sp.TimeoutExpired:
         mcp_latency = SHADOW_TIMEOUT * 1000
         shadow_status = "timeout"
         error_type = "timeout"
+        new_text = ""
     except Exception as e:
         mcp_latency = (time.time() - mcp_start) * 1000
         shadow_status = "exception"
         error_type = str(e)[:100]
+        new_text = ""
 
-    _shadow_write_log({
+    entry = {
         "ts": time.time(),
         "entry_id": item["entry_id"],
         "route": item["route"],
         "op_name": item.get("op_name"),
         "shadow_status": shadow_status,
+        "gate_verdict": item.get("gate_verdict"),
+        "comparable": True,
         "queue_wait_ms": round(queue_wait_ms, 1),
         "mcp_latency_ms": round(mcp_latency, 1),
         "error_type": error_type,
-    })
+    }
+
+    # 雙路徑比對：只有舊路徑成功產出內容 + 新路徑成功回讀時才判 diverged。
+    # 兩邊都只存 _result_digest（hash + redact 頭），不落全文。
+    old_digest = item.get("old_digest")
+    if old_digest is not None:
+        entry["old_result"] = old_digest
+        if shadow_status == "ok":
+            new_digest = _result_digest(new_text)
+            entry["new_result"] = new_digest
+            entry["diverged"] = old_digest["hash"] != new_digest["hash"]
+            if entry["diverged"] and old_digest["len"] != new_digest["len"]:
+                entry["divergence_note"] = (
+                    f"length_mismatch old={old_digest['len']} new={new_digest['len']}"
+                )
+        else:
+            # 可比對的 read 但新路徑掛了 → diverged 未定義，誠實記 None
+            entry["diverged"] = None
+            entry["divergence_note"] = f"new_path_{shadow_status}"
+
+    _shadow_write_log(entry)
 
 
 # 敏感模式：command/stdout/stderr 需 redact
@@ -864,6 +913,48 @@ def _redact(text: str) -> str:
         if idx != -1:
             return f"<{label}>"
     return text[:1000]
+
+
+def _result_digest(text: str) -> dict:
+    """把結果內容壓成「可比對又不落全文」的摘要。
+
+    隱私：不存明文。sha256 讓 diverged 可判定；head 只留 redact 過的前 200 字，
+    讓 Phase 2 逐筆檢視時看得出分歧樣態，但不足以還原檔案。
+
+    正規化：先 strip 再 hash。舊路徑 `_run` 的輸出本來就 strip 過，新路徑的
+    read_file stdout 未必；兩邊統一 strip 才是 apples-to-apples，尾端換行差異
+    不會誤判成 divergence。
+    """
+    norm = (text or "").strip()
+    b = norm.encode("utf-8", "replace")
+    return {
+        "hash": _hashlib.sha256(b).hexdigest(),
+        "len": len(b),
+        "head": _redact(norm[:200]),
+    }
+
+
+def _resolve_workspace_read_path(task_desc: str) -> tuple:
+    """判定舊 read 路徑的目標檔是否落在 workspace 內、因而可比對新路徑。
+
+    刻意複用舊路徑同一個 `_extract_path`（而非現行 probe 那套 `op_name [path]`
+    split），保證 probe 與舊路徑指的是同一個檔 —— 這是原「合成探針」最大的
+    結構缺陷。`_extract_path` 已回絕對路徑。
+
+    Returns:
+        (workspace_relative_path, None) 若可比；(None, reason) 若不可比。
+        reason ∈ {"no_path", "path_protected", "out_of_workspace"}。
+    """
+    path = _extract_path(task_desc)
+    if not path:
+        return None, "no_path"
+    if _is_path_protected(path):
+        return None, "path_protected"
+    resolved = os.path.realpath(path)
+    if not (resolved == SHADOW_WORKSPACE_ROOT
+            or resolved.startswith(SHADOW_WORKSPACE_ROOT + os.sep)):
+        return None, "out_of_workspace"
+    return os.path.relpath(resolved, SHADOW_WORKSPACE_ROOT), None
 
 
 def _shadow_write_log(entry: dict) -> None:
@@ -916,89 +1007,91 @@ def _shadow_rotate_log() -> None:
             pass
 
 
-def _shadow_call_to_mcp(route_key: str, task_desc: str, entry_id: str) -> None:
-    """將 shadow 任務提交到 bounded queue。
+def _shadow_call_to_mcp(
+    route_key: str,
+    task_desc: str,
+    entry_id: str,
+    old_digest: dict | None = None,
+    gate_verdict: str | None = None,
+) -> None:
+    """雙路徑比對層：把可比對的 read 提交到 queue，其餘誠實記為不可比。
 
-    Primary path 只做：
-      1. kill switch 檢查
-      2. route 檢查（僅 read）
-      3. 固定操作模板解析
-      4. queue put（non-blocking，～0.1ms）
+    新路徑只有三個唯讀操作，其中只有 read_file 在舊路徑有對應動作（read 路由）。
+    絕大多數真實流量在新路徑上沒有可比動作 —— 這是先天限制，不是 bug。與其
+    藏起來，不如把「可比 vs 不可比」量成數字：不可比的每一筆都記 reason code，
+    Phase 3 才能算出覆蓋率。
 
-    不等待 MCP 完成，不建立 thread。
+    Primary path 不阻塞、不等 MCP、不建 thread（queue put ～0.1ms）。
+
+    Args:
+        old_digest: 舊路徑執行輸出的摘要（gate 前快照）；None 表示舊路徑無成功輸出。
+        gate_verdict: "allow" | "deny"，由 process_entry 依 gate 前後成敗推導。
     """
     if not SHADOW_ENABLED:
         return
 
+    base = {
+        "ts": time.time(), "entry_id": entry_id,
+        "route": route_key, "gate_verdict": gate_verdict,
+    }
+
     # 動態 kill switch
     if _shadow_kill_active():
-        _shadow_write_log({
-            "ts": time.time(), "entry_id": entry_id,
-            "route": route_key, "shadow_status": "killed",
-            "skip_reason": "kill_sentinel_active",
-        })
+        _shadow_write_log({**base, "shadow_status": "killed",
+                           "skip_reason": "kill_sentinel_active"})
         return
 
-    # 唯讀 route 檢查
+    # 只有 read 路由在新路徑有對應的唯讀操作可比
     if route_key != "read":
-        _shadow_write_log({
-            "ts": time.time(), "entry_id": entry_id,
-            "route": route_key, "shadow_status": "skipped_non_readonly",
-            "skip_reason": f"route_not_readonly: {route_key}",
-        })
+        _shadow_write_log({**base, "shadow_status": "incomparable",
+                           "comparable": False,
+                           "incomparable_reason": "non_readonly_route"})
         return
 
-    # 從 task_desc 解析操作模板和路徑
-    # 格式："op_name [path]"
-    # 例如: "list_directory ." 或 "get_cwd" 或 "read_file agentos.json"
-    desc = task_desc.strip()
-    parts = desc.split(None, 1)  # 最多 split 一次
-    op_name = parts[0] if parts else ""
-    op_path = parts[1] if len(parts) > 1 else None
-
-    if op_name not in _FIXED_OPS:
-        _shadow_write_log({
-            "ts": time.time(), "entry_id": entry_id,
-            "route": route_key, "shadow_status": "skipped_non_readonly",
-            "skip_reason": f"unknown_op: {_redact(op_name)[:50]}",
-        })
+    # 用舊路徑同一個 _extract_path 解析目標，判定是否落在 workspace 內
+    rel_path, reason = _resolve_workspace_read_path(task_desc)
+    if reason is not None:
+        _shadow_write_log({**base, "op_name": "read_file",
+                           "shadow_status": "incomparable",
+                           "comparable": False, "incomparable_reason": reason})
         return
 
-    # 驗證操作模板
-    _, cmd_str = _build_command(op_name, op_path)
+    # workspace 安全再驗一道（_build_command 內含 _path_safe）
+    _, cmd_str = _build_command("read_file", rel_path)
     if cmd_str is None:
-        _shadow_write_log({
-            "ts": time.time(), "entry_id": entry_id,
-            "route": route_key, "shadow_status": "skipped_non_readonly",
-            "skip_reason": f"invalid_op_args: op={op_name} path={_redact(op_path or '')[:50]}",
-            "op_name": op_name,
-        })
+        _shadow_write_log({**base, "op_name": "read_file",
+                           "shadow_status": "incomparable",
+                           "comparable": False,
+                           "incomparable_reason": "unsafe_path"})
         return
 
-    # 提交到 bounded queue
+    # 舊路徑執行失敗（無成功輸出）→ 沒有內容可比
+    if old_digest is None:
+        _shadow_write_log({**base, "op_name": "read_file",
+                           "shadow_status": "incomparable",
+                           "comparable": False,
+                           "incomparable_reason": "old_path_error"})
+        return
+
     item = {
         "route": route_key,
-        "op_name": op_name,
-        "path": op_path,
+        "op_name": "read_file",
+        "path": rel_path,
         "entry_id": entry_id,
         "enqueued_at": time.time(),
+        "old_digest": old_digest,
+        "gate_verdict": gate_verdict,
     }
     try:
         _SHADOW_QUEUE.put(item, block=False)
         _shadow_init_worker()
-        _shadow_write_log({
-            "ts": time.time(), "entry_id": entry_id,
-            "route": route_key, "op_name": op_name,
-            "shadow_status": "enqueued",
-            "queue_wait_ms": 0,
-        })
+        _shadow_write_log({**base, "op_name": "read_file",
+                           "shadow_status": "enqueued",
+                           "comparable": True, "queue_wait_ms": 0})
     except _queue.Full:
-        _shadow_write_log({
-            "ts": time.time(), "entry_id": entry_id,
-            "route": route_key, "op_name": op_name,
-            "shadow_status": "queue_full",
-            "skip_reason": "queue_full_dropped",
-        })
+        _shadow_write_log({**base, "op_name": "read_file",
+                           "shadow_status": "queue_full",
+                           "skip_reason": "queue_full_dropped"})
     except Exception:
         pass
 
@@ -1025,14 +1118,21 @@ def process_entry(entry: dict) -> dict:
 
     # ── ③ Execute ──
     result = _execute_by_route(route_key, task_desc)
-    # Shadow call to MCP Server（非同步，不阻塞，僅記錄）
-    _shadow_call_to_mcp(route_key, task_desc, entry_id)
-    log.info(f"  ③ Execute: success={result.get('success', False)} "
+    # 快照舊路徑執行輸出（gate 之前）供 shadow 比對；不落全文，只存摘要。
+    old_success = result.get("success", False)
+    old_output = result.get("output", "")
+    old_digest = _result_digest(old_output) if (old_success and old_output) else None
+    log.info(f"  ③ Execute: success={old_success} "
              f"output={len(result.get('output', result.get('error', '')))} chars")
 
     # ── ④ Gate ──
     result = _gate_scan(result, task_desc)
-    log.info(f"  ④ Gate: passed")
+    gate_verdict = "deny" if (old_success and not result.get("success", False)) else "allow"
+    log.info(f"  ④ Gate: {gate_verdict}")
+
+    # Shadow 雙路徑比對（gate 之後入列，讓 gate_verdict 可記；非同步、不阻塞）
+    _shadow_call_to_mcp(route_key, task_desc, entry_id,
+                        old_digest=old_digest, gate_verdict=gate_verdict)
 
     # ── ⑤ Log ──
     _log_to_agentsview(entry, route_key, result)
