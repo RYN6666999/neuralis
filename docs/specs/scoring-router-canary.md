@@ -1,7 +1,7 @@
 ---
 title: 評分路由 + 沙箱 canary + 信任 ratchet — 甲的「人類最小決策」機制
 date: 2026-07-24
-status: planned (design converged 2026-07-24, unbuilt)
+status: bridge-connected (2026-07-24, neuralis bridge live, SCORING_ROUTER_ENABLED=0 default-off)
 tags: [self-evolution, safety, routing, canary, sandbox, ratchet, plan]
 ---
 
@@ -155,6 +155,25 @@ Ryan 的注意力佔比 = 還卡在「問人」的動作比例，它隨各任務
 本階段全是休眠鷹架，review 後才算數。
 
 **預設仍停在甲。** 本層不開乙門，不動 Aris 認知碼。全程 zero-LLM agency。
+
+## 10. 2026-07-24 執行層事故與修復（bridge-connected 後）
+
+### 事故 A：sandbox lane 觸發後 bridge 重試風暴
+
+- 症狀：同一 entry 持續重跑，log 重複出現 `slice(None, 120, None)`。
+- 根因：`result.error` 在 sandbox path 是 dict，failure path 直接做字串切片。
+- 修復：bridge 端新增通用字串化 helper，所有 error/audit/failure path 先 stringify 再截斷。
+
+### 事故 B：審計寫檔路徑對非字串 error 不穩定
+
+- 症狀：`result.error[:200]` 遇 dict 崩潰，導致審計與主流程互相拖累。
+- 修復：audit payload 改為 `_stringify_for_log()` 統一處理。
+
+### 現在的硬規則（新增）
+
+1. 任何進 audit/failure 的欄位都必須先 normalize 成字串。
+2. logging 失敗不得影響 lane 主流程（fail-open logging）。
+3. 測試樣本（ratchet 注入）必須與生產狀態隔離，驗證後回滾。
 
 ## 相關
 

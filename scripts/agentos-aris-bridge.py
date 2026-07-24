@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -32,7 +33,7 @@ BRAIN_DIR = Path.home() / ".scream-code" / "agentos-brain"
 AGENTOS_JSON = Path.home() / "agent-sandbox" / "agentos.json"
 ARIS_API = "http://localhost:11546/v1/chat/completions"
 AGENTOS_API = "http://localhost:8000"
-POLL_INTERVAL = 1.0
+POLL_INTERVAL = 0.1  # 100ms polling — 近即時回應，對人類無感
 LOG_FILE = "/tmp/agentos-aris-bridge.log"
 
 # ── Headroom 設定（從 headroom.toml 載入，env var 優先） ──
@@ -120,6 +121,29 @@ logging.basicConfig(
 )
 log = logging.getLogger("agentos-bridge")
 
+# ── Scoring Router Canary 橋接（功能旗標 + 惰性匯入） ─────────────────
+
+_SCORING_ROUTER_ENABLED = os.environ.get("SCORING_ROUTER_ENABLED", "0") == "1"
+_SCORING_IMPORT_OK = False
+SCORING_AUDIT_LOG = os.path.expanduser("~/agent-sandbox/logs/scoring-audit.jsonl")
+
+if _SCORING_ROUTER_ENABLED:
+    _SANDBOX_ROOT = Path.home() / "agent-sandbox"
+    if str(_SANDBOX_ROOT) not in sys.path:
+        sys.path.insert(0, str(_SANDBOX_ROOT))
+    try:
+        from contracts.verdict_v2 import ActionRequest, VerdictV2
+        from router.canary_adaptor import has_task_mapping, resolve_operation
+        from router.ratchet import load_ratchet
+        from router.scoring import score
+        from router.reversibility import classify_reversibility
+        from sandbox_canary import canary_execute
+
+        _SCORING_IMPORT_OK = True
+        log.info("Scoring Router canary bridge: enabled")
+    except ImportError as e:
+        log.warning(f"Scoring router import failed: {e} — bridge disabled")
+
 # ── AgentOS Routes（從 agentos.json 載入） ─────────────────
 
 _ROUTES: dict[str, str] = {}  # route_key → tool/toolchain description
@@ -137,41 +161,75 @@ def _load_agentos_config() -> None:
             return
         with open(AGENTOS_JSON) as f:
             cfg = json.load(f)
-        _ROUTES = cfg.get("routes", _DEFAULT_ROUTES.copy())
+        route_overrides = cfg.get("routes", {})
+        # config 只覆蓋指定 route，未指定者沿用內建預設，避免 unknown route 噪音。
+        _ROUTES = _DEFAULT_ROUTES.copy()
+        _ROUTES.update(route_overrides)
         _PIPELINE = cfg.get("pipeline", {})
         _TOOLS_META = cfg.get("tools", {})
-        log.info(f"agentos.json 載入: {len(_ROUTES)} 路由, {len(_TOOLS_META)} 工具")
+        log.info(
+            f"agentos.json 載入: routes={len(_ROUTES)} (overrides={len(route_overrides)}), "
+            f"tools={len(_TOOLS_META)}"
+        )
     except Exception as e:
         log.warning(f"載入 agentos.json 失敗: {e}，使用預設路由")
         _ROUTES = _DEFAULT_ROUTES.copy()
 
 
+# 單一真值表：route_key → {tool, task_class}
+_ROUTE_TRUTH_TABLE: dict[str, dict[str, str]] = {
+    "code": {"tool": "codebase-memory-mcp", "task_class": "refactor_local"},
+    "research": {"tool": "anysearch", "task_class": "network_call"},
+    "browser-research": {"tool": "opencli", "task_class": "network_call"},
+    "video": {"tool": "openmontage", "task_class": "costly_compute"},
+    "html-video": {"tool": "html-video", "task_class": "costly_compute"},
+    "motion": {"tool": "text-to-lottie | pixel2motion", "task_class": "compute_draft"},
+    "social-scrape": {"tool": "douyin-downloader | xhs-downloader | twscrape", "task_class": "network_call"},
+    "sports": {"tool": "football-data | nba-data | nfl-data | fastf1", "task_class": "network_call"},
+    "engineer": {"tool": "addyosmani-agent-skills (spec→plan→build→test→review→ship)", "task_class": "refactor_local"},
+    "design": {"tool": "impeccable", "task_class": "compute_draft"},
+    "plan": {"tool": "planning-with-files | planning-and-task-breakdown", "task_class": "compute_draft"},
+    "security": {"tool": "skill-security", "task_class": "compute_draft"},
+    "compression": {"tool": "caveman-ponytail", "task_class": "compute_draft"},
+    "session": {"tool": "agentsview", "task_class": "compute_draft"},
+    "branding-template": {"tool": "template-batch", "task_class": "file_write"},
+    "troubleshoot": {"tool": "troubleshooter", "task_class": "compute_draft"},
+    "spec-mgmt": {"tool": "docs/specs/ (project-level spec management)", "task_class": "compute_draft"},
+    "read": {"tool": "Read tool (file reading)", "task_class": "file_write"},
+    "write": {"tool": "Write tool (file writing)", "task_class": "file_write"},
+    "bash": {"tool": "Bash tool (shell execution)", "task_class": "compute_draft"},
+    "search-web": {"tool": "WebSearch / anysearch", "task_class": "network_call"},
+    "compile": {"tool": "build / compile (shell)", "task_class": "local_test"},
+    "aris-status": {"tool": "aris-status.py (health check)", "task_class": "gbrain_read"},
+}
+
 # 預設路由（當 agentos.json 不存在或損壞時使用）
 _DEFAULT_ROUTES: dict[str, str] = {
-    "code": "codebase-memory-mcp",
-    "research": "anysearch",
-    "browser-research": "opencli",
-    "video": "openmontage",
-    "html-video": "html-video",
-    "motion": "text-to-lottie | pixel2motion",
-    "social-scrape": "douyin-downloader | xhs-downloader | twscrape",
-    "sports": "football-data | nba-data | nfl-data | fastf1",
-    "engineer": "addyosmani-agent-skills (spec→plan→build→test→review→ship)",
-    "design": "impeccable",
-    "plan": "planning-with-files | planning-and-task-breakdown",
-    "security": "skill-security",
-    "compression": "caveman-ponytail",
-    "session": "agentsview",
-    "branding-template": "template-batch",
-    "troubleshoot": "troubleshooter",
-    "spec-mgmt": "docs/specs/ (project-level spec management)",
-    "read": "Read tool (file reading)",
-    "write": "Write tool (file writing)",
-    "bash": "Bash tool (shell execution)",
-    "search-web": "WebSearch / anysearch",
-    "compile": "build / compile (shell)",
-    "aris-status": "aris-status.py (health check)",
+    route_key: spec["tool"] for route_key, spec in _ROUTE_TRUTH_TABLE.items()
 }
+
+# ── Scoring Router: route_key → task_class 映射（由真值表導出） ─────────
+_ROUTE_TO_TASK_CLASS: dict[str, str] = {
+    route_key: spec["task_class"] for route_key, spec in _ROUTE_TRUTH_TABLE.items()
+}
+
+
+def _task_class_for_route(route_key: str) -> str:
+    """由 mapping 層解析 task_class，避免 route drift 導致 unknown 噪音。"""
+    mapped = _ROUTE_TO_TASK_CLASS.get(route_key)
+    if mapped:
+        return mapped
+
+    route_tool = _ROUTES.get(route_key, "").lower()
+    if "read tool" in route_tool or "file reading" in route_tool:
+        return "file_write"
+    if "write tool" in route_tool or "file writing" in route_tool:
+        return "file_write"
+    if "bash tool" in route_tool or "shell" in route_tool:
+        return "compute_draft"
+    if "compile" in route_tool or "build" in route_tool:
+        return "local_test"
+    return "unknown"
 
 # ── 通道鎖 ────────────────────────────────────────────────
 
@@ -628,6 +686,134 @@ def _extract_command(desc: str) -> str | None:
     return None
 
 
+def _build_action_request(entry: dict, route_key: str, task_desc: str) -> "ActionRequest | None":
+    """從通道條目建構 ActionRequest。scoring 未就緒時回傳 None。"""
+    if not _SCORING_IMPORT_OK:
+        return None
+
+    task_class = _task_class_for_route(route_key)
+    entry_id = entry.get("id", str(time.time()))
+
+    # 複用 bridge 現有 parser，讓 payload 資訊盡可能完整
+    payload = {"route": route_key}
+    path = _extract_path(task_desc) or ""
+    code = _extract_code_block(task_desc) or ""
+    cmd = _extract_command(task_desc) or ""
+    if path:
+        payload["path"] = path
+    if code:
+        payload["content"] = code
+    if cmd:
+        payload["command"] = cmd
+
+    # 從 canary registry 解析 operation（單一來源）
+    op = resolve_operation(task_class, payload)
+    if op:
+        payload["operation"] = op
+    elif classify_reversibility(task_class) == "containable":
+        log.warning(f"missing canary operation mapping for containable task_class={task_class}")
+        return None
+
+    declared_reversibility = (
+        "containable"
+        if task_class in (
+            "file_write",
+            "compute_draft",
+            "refactor_local",
+            "gbrain_read",
+            "local_test",
+        )
+        else "escaping"
+    )
+
+    return ActionRequest(
+        action_id=f"bridge-{entry_id}",
+        task_class=task_class,
+        payload=payload,
+        workspace=str(Path.home() / "agent-sandbox"),
+        declared_reversibility=declared_reversibility,
+        cost_estimate={
+            "tokens": max(10, len(task_desc.encode("utf-8")) // 3),
+            "compute": 1 if task_class == "costly_compute" else 0,
+        },
+    )
+
+
+def _get_task_signoff_state(task_class: str | None) -> dict | None:
+    """回傳 task_class 對應的 ratchet/signoff 狀態摘要。"""
+    if not _SCORING_IMPORT_OK or not task_class:
+        return None
+    try:
+        entries = load_ratchet()
+        entry = entries.get(task_class)
+        if entry is None:
+            return None
+        return {
+            "level": entry.level,
+            "needs_signoff": entry.needs_signoff,
+            "verified_count": entry.verified_count,
+            "failed_count": entry.failed_count,
+            "pass_rate": round(entry.pass_rate, 6),
+            "confidence_lower_bound": round(entry.confidence_lower_bound, 6),
+        }
+    except Exception:
+        return None
+
+
+def _validate_scoring_mappings() -> None:
+    """檢查 route→task_class 與 canary adaptor 是否一致。"""
+    if not (_SCORING_ROUTER_ENABLED and _SCORING_IMPORT_OK):
+        return
+
+    unknown_routes: list[str] = []
+    missing: list[str] = []
+    for route_key in sorted(_ROUTES.keys()):
+        task_class = _task_class_for_route(route_key)
+        if task_class == "unknown":
+            unknown_routes.append(route_key)
+            continue
+        if classify_reversibility(task_class) != "containable":
+            continue
+        if not has_task_mapping(task_class):
+            missing.append(f"{route_key}->{task_class}")
+
+    if unknown_routes:
+        log.warning(
+            "Scoring mapping unresolved routes (defaulting legacy path): "
+            + ", ".join(unknown_routes)
+        )
+
+    if missing:
+        log.warning(
+            "Scoring mapping mismatch (containable without adaptor): "
+            + ", ".join(missing)
+        )
+    else:
+        log.info("Scoring mapping check: all containable task_class entries have canary adaptors")
+
+
+def _build_response(entry: dict, route_key: str, route_tool: str,
+                    result: dict, brain_ctx: str) -> dict:
+    """統一的 bridge response 建構。"""
+    entry_id = entry.get("id", "?")
+    return {
+        "ts": time.time(),
+        "id": f"bridge-{entry_id}",
+        "direction": "scream→aris",
+        "type": "result" if entry.get("type") == "task" else "response",
+        "content": result.get("output", result.get("error", "?")),
+        "context": {
+            "request_ts": entry.get("ts", 0),
+            "request_id": entry_id,
+            "route": route_key,
+            "tool": route_tool,
+            "success": result.get("success", False),
+            "brain_context": bool(brain_ctx),
+            "headroom": result.get("_headroom") if result.get("_headroom") else None,
+        },
+    }
+
+
 def _execute_by_route(route_key: str, task_desc: str) -> dict:
     """根據 route_key 執行對應的工具鏈。"""
     # ── code: codebase-memory-mcp ──
@@ -800,6 +986,29 @@ def _log_to_agentsview(entry: dict, route_key: str, result: dict) -> None:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def _log_scoring_audit(payload: dict) -> None:
+    """寫入 scoring router 結構化審計 JSONL（觀測先於放權）。"""
+    try:
+        log_path = Path(SCORING_AUDIT_LOG)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _stringify_for_log(value: object, limit: int = 200) -> str:
+    """把任意型別轉成可截斷字串，避免 dict slice 例外。"""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value[:limit]
+    try:
+        return json.dumps(value, ensure_ascii=False)[:limit]
+    except Exception:
+        return str(value)[:limit]
 
 
 # ── 回寫 Aris API ─────────────────────────────────────────
@@ -1372,56 +1581,140 @@ def process_entry(entry: dict) -> dict:
     if brain_ctx:
         log.info(f"  ② Brain: 找到上下文 ({len(brain_ctx)} chars)")
 
-    # ── ③ Execute ──
-    result = _execute_by_route(route_key, task_desc)
-    # 快照舊路徑執行輸出（gate 之前）供 shadow 比對；不落全文，只存摘要。
-    old_success = result.get("success", False)
-    old_output = result.get("output", "")
-    old_digest = _result_digest(old_output) if (old_success and old_output) else None
-    log.info(f"  ③ Execute: success={old_success} "
-             f"output={len(result.get('output', result.get('error', '')))} chars")
+    # ── ③ Scoring Router（可選）──
+    result: dict = {}
+    executed = False
+    verdict: "VerdictV2 | None" = None
+    sandbox_verdict: "VerdictV2 | None" = None
+    request: "ActionRequest | None" = None
+    lane = "legacy_auto"
 
-    # ── ③.b Headroom Compress ──
-    result = _compress_stage(result, task_desc, route_key)
-    hr = result.get("_headroom", {})
-    if hr:
-        log.info(f"  ⓘ ③.b Compress: {hr.get('tokens_before','?')}→{hr.get('tokens_after','?')} tok "
-                 f"(saved {hr.get('tokens_saved','?')}, ccr={str(hr.get('ccr_hash','none'))[:12]})")
+    if _SCORING_ROUTER_ENABLED and _SCORING_IMPORT_OK:
+        request = _build_action_request(entry, route_key, task_desc)
+        if request is not None:
+            verdict = score(request)
+            lane = verdict.lane
+            log.info(
+                f"  ③ Scoring: lane={lane} score={verdict.score:.2f} "
+                f"class={request.task_class}"
+            )
 
-    # ── ④ Gate ──
-    result = _gate_scan(result, task_desc)
-    gate_verdict = "deny" if (old_success and not result.get("success", False)) else "allow"
-    log.info(f"  ④ Gate: {gate_verdict}")
+            if lane == "deny":
+                result = {
+                    "success": False,
+                    "output": "",
+                    "error": f"scoring-denied: {verdict.feedback}",
+                }
+                executed = True
+            elif lane == "human":
+                result = {
+                    "success": False,
+                    "output": "",
+                    "error": f"needs-human-approval: {verdict.feedback}",
+                }
+                executed = True
+            elif lane == "sandbox":
+                if verdict.reversible_actual != "containable":
+                    result = {
+                        "success": False,
+                        "output": "",
+                        "error": "escaping action misclassified as sandbox",
+                    }
+                    executed = True
+                else:
+                    sandbox_verdict = canary_execute(request)
+                    result = {
+                        "success": sandbox_verdict.outcome == "pass",
+                        "output": sandbox_verdict.feedback,
+                        "error": (
+                            sandbox_verdict.gate
+                            if sandbox_verdict.outcome != "pass"
+                            else ""
+                        ),
+                    }
+                    executed = True
+            # lane == auto：由下方既有路徑執行
 
-    # Shadow 雙路徑比對（gate 之後入列，讓 gate_verdict 可記；非同步、不阻塞）
-    _shadow_call_to_mcp(route_key, task_desc, entry_id,
-                        old_digest=old_digest, gate_verdict=gate_verdict)
+    old_digest = None
+    gate_verdict = "allow"
+    signoff_state = None
+
+    # ── auto lane（或 scoring 關閉/降級）→ 既有路徑 ──
+    if not executed:
+        lane = "auto" if lane == "auto" else "legacy_auto"
+        result = _execute_by_route(route_key, task_desc)
+        executed = True
+        old_success = result.get("success", False)
+        old_output = result.get("output", "")
+        old_digest = _result_digest(old_output) if (old_success and old_output) else None
+        log.info(f"  ③ Execute: success={old_success} "
+                 f"output={len(result.get('output', result.get('error', '')))} chars")
+
+        # ── ③.b Headroom Compress ──
+        result = _compress_stage(result, task_desc, route_key)
+        hr = result.get("_headroom", {})
+        if hr:
+            log.info(f"  ⓘ ③.b Compress: {hr.get('tokens_before','?')}→{hr.get('tokens_after','?')} tok "
+                     f"(saved {hr.get('tokens_saved','?')}, ccr={str(hr.get('ccr_hash','none'))[:12]})")
+
+        # ── ④ Gate ──
+        result = _gate_scan(result, task_desc)
+        gate_verdict = "deny" if (old_success and not result.get("success", False)) else "allow"
+        log.info(f"  ④ Gate: {gate_verdict}")
+
+        # Shadow 雙路徑比對：只在 auto lane 執行（保留既有基礎設施）
+        _shadow_call_to_mcp(route_key, task_desc, entry_id,
+                            old_digest=old_digest, gate_verdict=gate_verdict)
+
+    if request is not None:
+        signoff_state = _get_task_signoff_state(request.task_class)
+
+    _log_scoring_audit({
+        "ts": time.time(),
+        "entry_id": entry_id,
+        "route": route_key,
+        "scoring_enabled": _SCORING_ROUTER_ENABLED,
+        "scoring_import_ok": _SCORING_IMPORT_OK,
+        "executed": executed,
+        "lane": lane,
+        "task_class": request.task_class if request is not None else None,
+        "score": verdict.score if verdict is not None else None,
+        "reversible": verdict.reversible_actual if verdict is not None else None,
+        "success": result.get("success", False),
+        "gate_verdict": gate_verdict,
+        "sandbox_outcome": sandbox_verdict.outcome if sandbox_verdict is not None else None,
+        "sandbox_gate": sandbox_verdict.gate if sandbox_verdict is not None else None,
+        "sandbox_committed": sandbox_verdict.committed if sandbox_verdict is not None else None,
+        "ratchet_level": signoff_state.get("level") if signoff_state else None,
+        "needs_ryan_signoff": signoff_state.get("needs_signoff") if signoff_state else None,
+        "confidence_lower_bound": signoff_state.get("confidence_lower_bound") if signoff_state else None,
+        "error": _stringify_for_log(result.get("error"), limit=200),
+    })
 
     # ── ⑤ Log ──
     _log_to_agentsview(entry, route_key, result)
 
     # ── ⑤.b Failure Learning ──
     if not result.get("success", False):
-        reason = result.get("error", result.get("output", "unknown"))[:120]
+        reason = _stringify_for_log(result.get("error", result.get("output", "unknown")), limit=120)
         _track_failure(route_key, reason)
 
-    # 建構回應
-    response = {
-        "ts": time.time(),
-        "id": f"bridge-{entry_id}",
-        "direction": "scream→aris",
-        "type": "result" if entry_type == "task" else "response",
-        "content": result.get("output", result.get("error", "?")),
-        "context": {
-            "request_ts": entry.get("ts", 0),
-            "request_id": entry_id,
-            "route": route_key,
-            "tool": route_tool,
-            "success": result.get("success", False),
-            "brain_context": bool(brain_ctx),
-            "headroom": result.get("_headroom") if result.get("_headroom") else None,
-        },
-    }
+    # 建構回應（含 scoring metadata）
+    response = _build_response(entry, route_key, route_tool, result, brain_ctx)
+    if verdict is not None:
+        response["context"]["scoring"] = {
+            "lane": verdict.lane,
+            "score": verdict.score,
+            "reversible": verdict.reversible_actual,
+            "feedback": verdict.feedback,
+            "ratchet": signoff_state,
+        }
+    if sandbox_verdict is not None:
+        response["context"]["sandbox"] = {
+            "outcome": sandbox_verdict.outcome,
+            "gate": sandbox_verdict.gate,
+            "committed": sandbox_verdict.committed,
+        }
     return response
 
 
@@ -1432,6 +1725,7 @@ def main_loop() -> None:
     _load_agentos_config()
     _build_keyword_routes()
     _load_headroom_config()
+    _validate_scoring_mappings()
 
     # 啟動 Headroom proxy（如果未運行）
     if HEADROOM_AUTO_START:
