@@ -87,11 +87,28 @@ def _retry_call(fn, *args, max_retries: int = None, **kwargs):
             time.sleep(delay)
     raise last_err  # 不應到達這裡
 
+
+def check_health() -> bool:
+    """快速檢查 LLM API 是否在線（5s timeout）。
+
+    對 localhost Aris API 特別重要：watchdog 重啟途中 API 不可用 ~90s，
+    直接 call 會 hang 到 timeout 才報錯。提前檢查可以快速失敗。"""
+    base = _LLM_BASE_URL.rstrip("/")
+    health_url = f"{base.rstrip('/v1')}/health" if "/v1" in base else f"{base}/health"
+    try:
+        req = urllib.request.Request(health_url, method="GET")
+        urllib.request.urlopen(req, timeout=_HEALTH_TIMEOUT)
+        return True
+    except Exception:
+        return False
+
 # ── 設定 ──
 _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true")
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
+# 健康檢查 timeout（短於 LLM timeout，快速失敗不死等）
+_HEALTH_TIMEOUT = int(os.environ.get("NEURALIS_HEALTH_TIMEOUT", 5))
 
 # ── API Key 快取（省每次 subprocess call 40-100ms）──
 _API_KEY_CACHE: Optional[str] = None
@@ -112,7 +129,8 @@ _TOOL_MAX_TOKENS = int(os.environ.get("NEURALIS_TOOL_MAX_TOKENS", 8192))
 # 從 Keychain 讀 API key（與 zshrc 同一來源）
 # 依序嘗試：NEURALIS_LLM_API_KEY env → openrouter-api-key keychain → openai-api-key keychain → OPENAI_API_KEY env
 def _get_api_key() -> Optional[str]:
-    """回 API key，5 分鐘快取（省每次 subprocess 40-100ms）。"""
+    """回 API key，5 分鐘快取（省每次 subprocess 40-100ms）。
+    含 timeout guard 防止 security 命令 hang。"""
     global _API_KEY_CACHE, _API_KEY_CACHE_TS
     if _API_KEY_CACHE and (time.time() - _API_KEY_CACHE_TS) < _API_KEY_TTL:
         return _API_KEY_CACHE
@@ -277,6 +295,11 @@ def _call_llm(messages: list) -> Optional[str]:
         logger.debug("[llm_respond] 無 API key")
         return None
 
+    # 健康檢查：API 不可用時快速失敗，不等到 timeout
+    if not check_health():
+        logger.debug("[llm_respond] API 健康檢查失敗，跳過呼叫")
+        return None
+
     body = json.dumps({
         "model": _LLM_MODEL,
         "messages": messages,
@@ -293,7 +316,8 @@ def _call_llm(messages: list) -> Optional[str]:
         },
     )
     try:
-        resp = json.loads(urllib.request.urlopen(req, timeout=_LLM_TIMEOUT).read())
+        resp = _retry_call(
+            lambda: json.loads(urllib.request.urlopen(req, timeout=_LLM_TIMEOUT).read()))
         content = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
         return content.strip() if content else None
     except Exception as e:

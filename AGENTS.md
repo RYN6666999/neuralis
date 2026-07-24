@@ -116,3 +116,21 @@ event loop 阻塞在單請求測試下完全看不出來。
 ./scripts/install-watchdog-launchagent.sh # 7/24 自啟動
 ./scripts/install-support-daemons.sh      # 三隻支援 daemon
 ```
+
+## 連線 timeout 防護
+
+### 已知 timeout 來源（依頻率）
+1. OpenRouter → DeepSeek V4 Flash 網路不穩（`APIConnectionError`）
+2. Aris 本地 API（`localhost:11546`）watchdog 重啟途中 ~90s 不可用
+3. Cline API 5 小時 rate limit（429）
+4. Scream CLI 60s idle timeout（長思考無 token 輸出時觸發）
+
+### 減少發生率的規則
+- **長命令一律背景執行**：`cargo build`、`pip install`、`npm install` 等超過 10s 的命令
+  用 `run_in_background=true` + `TaskOutput` 取結果。不要讓它們卡在前景連線層。
+- **Bash 預設 timeout 設 30s**：快速查詢（`ls`、`grep`、`which`）設短 timeout。
+  需要更長時間的任務明確設 `timeout: 120` 或背景執行。
+- **LLM 重試已內建**：`llm_respond.py` 的 `_retry_call()` 對網路瞬斷自動重試
+  （`NEURALIS_RETRY_MAX=2`，`_RETRY_BASE_DELAY=1s`，exponential backoff）。
+- **健康檢查前綴**：`check_health()` 在 LLM 呼叫前快速確定 API 是否在線
+  （`NEURALIS_HEALTH_TIMEOUT=5`），不在 watchdog 重啟途中硬等 timeout。
