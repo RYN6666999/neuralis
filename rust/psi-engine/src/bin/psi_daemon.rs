@@ -8,16 +8,21 @@
 //! from ever seeing a torn file.
 //!
 //! Usage: psi-daemon --state-file PATH [--seed S] [--write-ms M] [--spin-us U]
+//!        [--event-fifo PATH] [--max-seconds N]
 //!
 //! Runs until SIGTERM/SIGKILL (Python `RustPsiBackend.stop()`), or exits
 //! after `--max-seconds N` when set (test/soak harness). B1 scope: publish
-//! only. The Python→Rust input channel (process_input / events) is B2.
+//! only. B2: `--event-fifo` enables a FIFO-based event input channel.
 
+use std::ffi::CString;
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use psi_engine::events::PsiEvent;
 use psi_engine::runtime::run_for;
 use psi_engine::statefile::{snapshot_to_json, write_atomic};
 use psi_engine::{run, PsiConfig, PsiEngine};
@@ -28,6 +33,25 @@ struct Args {
     write_ms: u64,
     spin_us: u64,
     max_seconds: u64, // 0 = run forever (daemon); >0 = test/soak cap
+    event_fifo: Option<PathBuf>,
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn mkfifo(path: *const std::ffi::c_char, mode: std::ffi::c_uint) -> std::ffi::c_int;
+}
+
+/// Create a FIFO (named pipe) at `path`. Removes stale file first, then
+/// creates a fresh FIFO. Panics on failure.
+#[cfg(unix)]
+fn create_fifo(path: &PathBuf) {
+    let _ = fs::remove_file(path);
+    let cstr = CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let ret = unsafe { mkfifo(cstr.as_ptr(), 0o600) };
+    if ret != 0 {
+        panic!("mkfifo({}) failed: {}", path.display(),
+               std::io::Error::last_os_error());
+    }
 }
 
 fn parse_args() -> Args {
@@ -37,6 +61,7 @@ fn parse_args() -> Args {
         write_ms: 100,
         spin_us: 0,
         max_seconds: 0,
+        event_fifo: None,
     };
     let argv: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -70,13 +95,17 @@ fn parse_args() -> Args {
                 a.spin_us = num(take(&argv, i), "--spin-us");
                 i += 2;
             }
+            "--event-fifo" => {
+                a.event_fifo = Some(PathBuf::from(take(&argv, i)));
+                i += 2;
+            }
             "--max-seconds" => {
                 a.max_seconds = num(take(&argv, i), "--max-seconds");
                 i += 2;
             }
             other => {
                 eprintln!("unknown arg {other}");
-                eprintln!("usage: psi-daemon --state-file PATH [--seed S] [--write-ms M] [--spin-us U] [--max-seconds N]");
+                eprintln!("usage: psi-daemon --state-file PATH [--seed S] [--write-ms M] [--spin-us U] [--event-fifo PATH] [--max-seconds N]");
                 std::process::exit(2);
             }
         }
@@ -107,12 +136,16 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let boot = Instant::now();
 
+    let fifo_desc = args.event_fifo.as_ref()
+        .map(|f| format!(" event-fifo={}", f.display()))
+        .unwrap_or_default();
     eprintln!(
-        "psi-daemon: state-file={} write={}ms seed={} max_seconds={}",
+        "psi-daemon: state-file={} write={}ms seed={} max_seconds={}{}",
         args.state_file.display(),
         args.write_ms,
         args.seed,
-        args.max_seconds
+        args.max_seconds,
+        fifo_desc,
     );
 
     std::thread::scope(|s| {
@@ -141,6 +174,56 @@ fn main() {
                 std::thread::sleep(period);
             }
         });
+
+        // Event FIFO reader — B2 input channel. Reads lines from the FIFO,
+        // parses them as "EventName,intensity" and posts to the engine.
+        if let Some(ref fifo_path) = args.event_fifo {
+            let ev_stop = Arc::clone(&stop);
+            let ev_handle = handle.clone();
+            let path = fifo_path.clone();
+            s.spawn(move || {
+                // Ensure the FIFO exists (create it).
+                let _ = fs::remove_file(&path);
+                create_fifo(&path);
+                // Open the FIFO for reading (blocks until a writer opens it).
+                // Re-open on each writer close (FIFO semantics: read returns
+                // EOF when the last writer closes; re-open for the next one).
+                while !ev_stop.load(Ordering::Relaxed) {
+                    match fs::File::open(&path) {
+                        Ok(file) => {
+                            let reader = BufReader::new(file);
+                            for line in reader.lines() {
+                                if ev_stop.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                match line {
+                                    Ok(text) => {
+                                        let text = text.trim().to_owned();
+                                        if text.is_empty() { continue; }
+                                        let (name, intensity) = match text.split_once(',') {
+                                            Some((n, i)) => (n, i.parse::<f64>().unwrap_or(1.0)),
+                                            None => (text.as_str(), 1.0),
+                                        };
+                                        if let Some(kind) = psi_engine::events::AffectiveEvent::from_name(name) {
+                                            ev_handle.post_event(PsiEvent {
+                                                kind,
+                                                intensity: intensity.clamp(0.0, 10.0),
+                                                timestamp_us: 0,
+                                            });
+                                        }
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("psi-daemon: fifo open error: {e}");
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                    }
+                }
+            });
+        }
 
         // Optional stop timer (test/soak). 0 = daemon runs until signalled.
         if args.max_seconds > 0 {

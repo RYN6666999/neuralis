@@ -32,6 +32,35 @@ pub enum AffectiveEvent {
 
 pub const AFFECTIVE_EVENT_COUNT: usize = 18;
 
+impl AffectiveEvent {
+    /// Parse an AffectiveEvent from its Debug name (e.g. "CompetenceSuccess").
+    /// Returns None for unknown names. Case-sensitive.
+    pub fn from_name(name: &str) -> Option<Self> {
+        use AffectiveEvent::*;
+        Some(match name {
+            "GoalAchieved" => GoalAchieved,
+            "GoalFailed" => GoalFailed,
+            "SurprisePositive" => SurprisePositive,
+            "SurpriseNegative" => SurpriseNegative,
+            "SocialPraise" => SocialPraise,
+            "SocialCriticism" => SocialCriticism,
+            "ThreatDetected" => ThreatDetected,
+            "ThreatResolved" => ThreatResolved,
+            "NoveltyHigh" => NoveltyHigh,
+            "NoveltyLow" => NoveltyLow,
+            "CompetenceSuccess" => CompetenceSuccess,
+            "CompetenceFailure" => CompetenceFailure,
+            "AutonomyGranted" => AutonomyGranted,
+            "AutonomyDenied" => AutonomyDenied,
+            "RelatednessRenewed" => RelatednessRenewed,
+            "RelatednessLoss" => RelatednessLoss,
+            "GrowthMilestone" => GrowthMilestone,
+            "GrowthStagnation" => GrowthStagnation,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct PsiEvent {
     pub kind: AffectiveEvent,

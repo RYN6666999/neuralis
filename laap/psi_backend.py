@@ -167,6 +167,7 @@ class RustPsiBackend:
 
     def __init__(self, state_file: str | None = None) -> None:
         self._state_file: str = state_file or self._default_state_file()
+        self._event_fifo: str = self._state_file.replace(".json", ".fifo")
         self._daemon_process: subprocess.Popen | None = None
         self._cached_state: dict[str, Any] = {}
         self._last_input: str = ""
@@ -335,7 +336,7 @@ class RustPsiBackend:
     # ── PsiBackend v1 — ten methods ───────────────────────────────────
 
     def start(self) -> None:
-        """Spawn psi-daemon if not already running."""
+        """Spawn psi-daemon with FIFO event channel."""
         if self._daemon_process is not None:
             return
         binary = self._daemon_binary()
@@ -344,6 +345,7 @@ class RustPsiBackend:
             return
         seed = os.environ.get("NEURALIS_PSI_SEED", "0")
         args = [binary, "--state-file", self._state_file,
+                "--event-fifo", self._event_fifo,
                 "--write-ms", "100", "--seed", seed]
         logger.info(f"[RustPsiBackend] spawning daemon: {' '.join(args)}")
         try:
@@ -365,9 +367,70 @@ class RustPsiBackend:
                 self._daemon_process.wait()
             self._daemon_process = None
 
+    # ── B2: keyword→AffectiveEvent mapping (mirrors PsiCore.process_input) ──
+    _NEED_EVENT_MAP: dict[str, str] = {
+        "competence": "CompetenceSuccess",
+        "autonomy": "AutonomyGranted",
+        "relatedness": "RelatednessRenewed",
+        "growth": "GrowthMilestone",
+        "certainty": "SurprisePositive",
+    }
+    # Keywords per need (same as PsiCore.NEED_KEYWORDS but flat).
+    _NEED_KEYWORDS: dict[str, list[str]] = {
+        "competence": ["知道", "理解", "會了", "學到", "懂了", "完成", "做到",
+                       "成功", "解決", "厲害", "不錯", "很好", "進步"],
+        "autonomy": ["自己", "自由", "選擇", "決定", "不想", "不要", "隨意",
+                     "隨便", "我來", "讓我"],
+        "relatedness": ["謝謝", "有你", "陪我", "一起", "朋友", "孤單",
+                        "孤獨", "寂寞", "懂我", "陪伴", "聊聊", "好想"],
+        "certainty": ["為什麼", "怎麼回事", "不懂", "不清楚", "確定",
+                      "保證", "真的嗎", "是嗎", "解釋", "說明"],
+        "growth": ["想學", "新東西", "挑戰", "更深入", "繼續", "下一步",
+                   "升級", "進階", "拓展", "探索"],
+    }
+
+    def _write_event(self, name: str, intensity: float = 1.0) -> None:
+        """Write one AffectiveEvent line to the FIFO.  Best-effort: a
+        missing FIFO (daemon not started / not ready) is silently ignored."""
+        try:
+            # Open the FIFO for each event (the daemon opens it for reading;
+            # a blocking open on a FIFO waits for the reader.  Use non-blocking
+            # open so we don't hang if the daemon hasn't opened yet.)
+            fd = os.open(self._event_fifo, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(fd, f"{name},{intensity}\n".encode("utf-8"))
+            finally:
+                os.close(fd)
+        except (FileNotFoundError, OSError):
+            pass  # daemon not ready or FIFO doesn't exist yet
+
     def process_input(self, text: str, source: str = "user") -> None:
-        """B1: no-op.  B2 will route to the daemon's event channel."""
+        """Analyse user text, map to AffectiveEvents, write to FIFO.
+
+        Mirrors PsiCore.process_input() keyword matching.  The daemon's
+        FIFO reader thread picks up the events and posts them to the Rust
+        engine's ring buffer via PsiHandle.post_event()."""
         self._last_input = text
+        text_lower = text.lower()
+
+        # 1. Keyword matching — map matched needs to AffectiveEvent names.
+        matched: set[str] = set()
+        for need, keywords in self._NEED_KEYWORDS.items():
+            count = sum(1 for kw in keywords if kw in text_lower)
+            if count > 0:
+                intensity = min(1.0, count * 0.2)  # 1 keyword = 0.2, 5 = 1.0
+                event = self._NEED_EVENT_MAP.get(need)
+                if event:
+                    self._write_event(event, intensity)
+                    matched.add(need)
+                    logger.debug(f"[RustPsiBackend] {event},{intensity} (matched {need})")
+
+        # 2. Every conversation touch boosts relatedness (same as PsiCore).
+        self._write_event("RelatednessRenewed", 0.2)
+
+        # 3. User engagement → SocialPraise (same as PsiCore
+        #    affective.post_event("user_engagement", 0.5)).
+        self._write_event("SocialPraise", 0.5)
 
     def get_state(self) -> dict[str, Any]:
         raw = self._read_raw()
@@ -389,11 +452,44 @@ class RustPsiBackend:
         return {k: v["drive"] for k, v in state.get("needs", {}).items()}
 
     def satisfy(self, need: str, amount: float, source: str) -> None:
-        """B1: no-op.  B2 will route to the daemon's event channel."""
-        pass
+        """Map need satisfaction to AffectiveEvent and write to FIFO."""
+        event = self._NEED_EVENT_MAP.get(need)
+        if event:
+            self._write_event(event, min(1.0, amount * 5.0))
 
     def post_affective_event(self, event: str, intensity: float = 1.0) -> bool:
-        """B1: no-op.  B2 will route to the daemon's event channel."""
+        """Map Python event name to AffectiveEvent and write to FIFO.
+
+        Known mappings (from affective.py EVENT_EMOTION_MAP):
+          user_positive_feedback → SocialPraise
+          user_negative_feedback → SocialCriticism
+          task_success → GoalAchieved
+          task_failure → GoalFailed
+          user_engagement → SocialPraise
+          learning_progress → GrowthMilestone
+          achievement → CompetenceSuccess
+          frustration → GoalFailed
+        Unknown events are silently ignored (returns True to match the
+        contract; no caller checks the return value meaningfully)."""
+        _map = {
+            "user_positive_feedback": "SocialPraise",
+            "user_negative_feedback": "SocialCriticism",
+            "task_success": "GoalAchieved",
+            "task_failure": "GoalFailed",
+            "user_engagement": "SocialPraise",
+            "learning_progress": "GrowthMilestone",
+            "achievement": "CompetenceSuccess",
+            "frustration": "GoalFailed",
+            "curiosity_aroused": "NoveltyHigh",
+            "surprise_positive": "SurprisePositive",
+            "surprise_negative": "SurpriseNegative",
+            "system_error": "GoalFailed",
+            "system_recovery": "GoalAchieved",
+        }
+        rust_event = _map.get(event)
+        if rust_event:
+            self._write_event(rust_event, intensity)
+            return True
         return True
 
     def get_cognitive_bias(self) -> dict[str, float]:
