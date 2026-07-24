@@ -35,6 +35,69 @@ AGENTOS_API = "http://localhost:8000"
 POLL_INTERVAL = 1.0
 LOG_FILE = "/tmp/agentos-aris-bridge.log"
 
+# ── Headroom 設定（從 headroom.toml 載入，env var 優先） ──
+
+HEADROOM_CONFIG_PATH = os.path.expanduser("~/.scream-code/headroom.toml")
+
+HEADROOM_PROXY = "http://127.0.0.1:8787"
+HEADROOM_COMPRESS_URL = "http://127.0.0.1:8787/v1/compress"
+HEADROOM_RETRIEVE_URL = "http://127.0.0.1:8787/v1/retrieve"
+HEADROOM_PROXY_PORT = 8787
+HEADROOM_MIN_COMPRESS_SIZE = 2000
+HEADROOM_AUTO_START = True
+HEADROOM_LEARN_ENABLED = True
+HEADROOM_LEARN_INTERVAL = 3600
+HEADROOM_LEARN_FAIL_THRESHOLD = 5
+HEADROOM_LEARN_TARGET = "AGENTS.md"
+HEADROOM_PROXY_PID = None
+_learn_fail_count = 0
+_learn_last_run = 0.0
+
+
+def _load_headroom_config() -> None:
+    """從 headroom.toml 載入設定，env var 優先覆蓋。
+
+    只在 startup 時呼叫一次，bridge 運行期間不重新讀取。
+    """
+    global HEADROOM_PROXY, HEADROOM_PROXY_PORT, HEADROOM_MIN_COMPRESS_SIZE
+    global HEADROOM_AUTO_START, HEADROOM_LEARN_ENABLED, HEADROOM_LEARN_INTERVAL
+    global HEADROOM_LEARN_FAIL_THRESHOLD, HEADROOM_LEARN_TARGET
+    global HEADROOM_COMPRESS_URL, HEADROOM_RETRIEVE_URL
+
+    # 1. 嘗試從 TOML 載入
+    import tomllib  # Python 3.11+
+    cfg_path = Path(HEADROOM_CONFIG_PATH)
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "rb") as f:
+                cfg = tomllib.load(f)
+            hr = cfg.get("headroom", {})
+            HEADROOM_PROXY = hr.get("proxy_url", HEADROOM_PROXY)
+            HEADROOM_PROXY_PORT = int(hr.get("proxy_port", HEADROOM_PROXY_PORT))
+            HEADROOM_MIN_COMPRESS_SIZE = int(hr.get("min_compress_size", HEADROOM_MIN_COMPRESS_SIZE))
+            HEADROOM_AUTO_START = bool(hr.get("auto_start", HEADROOM_AUTO_START))
+            HEADROOM_LEARN_ENABLED = bool(hr.get("learn_enabled", HEADROOM_LEARN_ENABLED))
+            HEADROOM_LEARN_INTERVAL = int(hr.get("learn_interval", HEADROOM_LEARN_INTERVAL))
+            HEADROOM_LEARN_FAIL_THRESHOLD = int(hr.get("learn_fail_threshold", HEADROOM_LEARN_FAIL_THRESHOLD))
+            HEADROOM_LEARN_TARGET = hr.get("learn_target", HEADROOM_LEARN_TARGET)
+            log.info(f"載入 headroom.toml: {cfg_path}")
+        except Exception as e:
+            log.warning(f"載入 headroom.toml 失敗: {e}，使用預設值")
+
+    # 2. env var 優先覆蓋
+    HEADROOM_PROXY = os.environ.get("HEADROOM_PROXY_URL", HEADROOM_PROXY)
+    HEADROOM_PROXY_PORT = int(os.environ.get("HEADROOM_PROXY_PORT", HEADROOM_PROXY_PORT))
+    HEADROOM_MIN_COMPRESS_SIZE = int(os.environ.get("HEADROOM_MIN_COMPRESS_SIZE", HEADROOM_MIN_COMPRESS_SIZE))
+    HEADROOM_AUTO_START = os.environ.get("HEADROOM_AUTO_START", "1" if HEADROOM_AUTO_START else "0") == "1"
+    HEADROOM_LEARN_ENABLED = os.environ.get("HEADROOM_LEARN_ENABLED", "1" if HEADROOM_LEARN_ENABLED else "0") == "1"
+    HEADROOM_LEARN_INTERVAL = int(os.environ.get("HEADROOM_LEARN_INTERVAL", HEADROOM_LEARN_INTERVAL))
+    HEADROOM_LEARN_FAIL_THRESHOLD = int(os.environ.get("HEADROOM_LEARN_FAIL_THRESHOLD", HEADROOM_LEARN_FAIL_THRESHOLD))
+    HEADROOM_LEARN_TARGET = os.environ.get("HEADROOM_LEARN_TARGET", HEADROOM_LEARN_TARGET)
+
+    # 衍生 URL
+    HEADROOM_COMPRESS_URL = f"{HEADROOM_PROXY}/v1/compress"
+    HEADROOM_RETRIEVE_URL = f"{HEADROOM_PROXY}/v1/retrieve"
+
 # ── MCP Shadow Call 設定 ──────────────────────────────────
 
 SHADOW_ENABLED = os.environ.get("AGENTOS_SHADOW_ENABLED", "0") == "1"
@@ -322,6 +385,199 @@ def _run_shell(cmd_str: str, limit: int = 5000, timeout: int = 30) -> dict:
         return {"success": False, "error": "timeout"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ── Headroom 壓縮層 ─────────────────────────────────────
+
+HEADROOM_CTR = 0
+HEADROOM_PROXY_LAUNCHED = False
+
+
+def _ensure_headroom_proxy() -> bool:
+    """確保 Headroom proxy 正在運行，不在則自動啟動。
+
+    Returns:
+        True if proxy is running (started or already there).
+    """
+    global HEADROOM_PROXY_LAUNCHED
+    if HEADROOM_PROXY_LAUNCHED:
+        return True
+    if not HEADROOM_AUTO_START:
+        return False
+
+    # 先檢查是否已在運行
+    try:
+        req = urllib.request.Request(f"{HEADROOM_PROXY}/health")
+        resp = urllib.request.urlopen(req, timeout=2)
+        if resp.status == 200:
+            HEADROOM_PROXY_LAUNCHED = True
+            log.info(f"  Headroom proxy already running at {HEADROOM_PROXY}")
+            return True
+    except Exception:
+        pass
+
+    # 啟動 proxy
+    try:
+        port = HEADROOM_PROXY_PORT
+        log.info(f"  Starting Headroom proxy on port {port}...")
+        subprocess.Popen(
+            ["headroom", "proxy", "--port", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # 等待啟動
+        for i in range(10):
+            time.sleep(1)
+            try:
+                req = urllib.request.Request(f"{HEADROOM_PROXY}/health")
+                resp = urllib.request.urlopen(req, timeout=2)
+                if resp.status == 200:
+                    HEADROOM_PROXY_LAUNCHED = True
+                    log.info(f"  ✅ Headroom proxy started on port {port}")
+                    return True
+            except Exception:
+                continue
+        log.warning(f"  Headroom proxy failed to start after 10s")
+        return False
+    except Exception as e:
+        log.warning(f"  Headroom proxy start failed: {e}")
+        return False
+
+
+def _headroom_learn_async() -> None:
+    """非同步執行 headroom learn，分析失敗模式並寫入 AGENTS.md。
+
+    在背景 subprocess 中執行，不阻塞 bridge 主迴圈。
+    只在累積足夠失敗次數或距離上次執行夠久時才觸發。
+    """
+    global _learn_fail_count, _learn_last_run
+    if not HEADROOM_LEARN_ENABLED:
+        return
+
+    now = time.time()
+    if _learn_fail_count < HEADROOM_LEARN_FAIL_THRESHOLD:
+        return
+    if now - _learn_last_run < HEADROOM_LEARN_INTERVAL:
+        # 時間未到但 fail 爆了 → 也跑
+        if _learn_fail_count < HEADROOM_LEARN_FAIL_THRESHOLD * 3:
+            return
+
+    _learn_last_run = now
+    _learn_fail_count = 0
+    log.info(f"  Triggering headroom learn (analyzing failures, writing to {HEADROOM_LEARN_TARGET})...")
+
+    try:
+        subprocess.Popen(
+            ["headroom", "learn", "--project", str(Path.home()),
+             "--target", HEADROOM_LEARN_TARGET, "--apply",
+             "--agent", "auto", "--main-only"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        log.info(f"  headroom learn started in background")
+    except Exception as e:
+        log.debug(f"headroom learn trigger failed: {e}")
+
+
+def _track_failure(route_key: str, reason: str) -> None:
+    """追蹤一次失敗，必要時觸發 headroom learn。"""
+    global _learn_fail_count
+    if not HEADROOM_LEARN_ENABLED:
+        return
+    _learn_fail_count += 1
+    log.info(f"  Failure #{_learn_fail_count} (route={route_key}, reason={reason[:40]})")
+    _headroom_learn_async()
+
+
+def _compress_with_headroom(text: str, content_type: str = "") -> dict:
+    """透過 Headroom proxy /v1/compress 壓縮文字內容。
+
+    只在文字超過 HEADROOM_MIN_COMPRESS_SIZE 時壓縮。
+    回傳 dict: {compressed, tokens_before, tokens_after, saved, ccr_hash, skipped}。
+    """
+    if len(text) < HEADROOM_MIN_COMPRESS_SIZE:
+        return {"compressed": text, "skipped": True, "reason": "too_small"}
+
+    global HEADROOM_CTR
+    HEADROOM_CTR += 1
+    ctr = HEADROOM_CTR
+
+    try:
+        payload = json.dumps({
+            "model": "bridge-compress",
+            "messages": [{"role": "user", "content": text}],
+        }).encode()
+        req = urllib.request.Request(
+            HEADROOM_COMPRESS_URL, data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        if resp.status != 200:
+            return {"compressed": text, "skipped": True, "reason": f"http_{resp.status}"}
+        data = json.loads(resp.read().decode())
+        compressed = data.get("messages", [{}])[0].get("content", text)
+        tb = data.get("tokens_before", 0)
+        ta = data.get("tokens_after", 0)
+        saved = tb - ta
+        ccr_hashes = data.get("ccr_hashes", [])
+        ccr_hash = ccr_hashes[0] if ccr_hashes else ""
+        ratio = data.get("compression_ratio", 1.0)
+
+        log.info(f"  \u24d8 Headroom #{ctr}: {tb}\u2192{ta} tok ({saved} saved, ratio={ratio:.2f}) ccr={ccr_hash[:12] if ccr_hash else 'none'}")
+
+        return {
+            "compressed": compressed,
+            "skipped": False,
+            "tokens_before": tb,
+            "tokens_after": ta,
+            "tokens_saved": saved,
+            "ratio": ratio,
+            "ccr_hash": ccr_hash,
+            "ctr": ctr,
+        }
+    except Exception as e:
+        log.debug(f"Headroom #{ctr} failed: {e}")
+        return {"compressed": text, "skipped": True, "reason": str(e)[:60]}
+
+
+def _compress_stage(result: dict, task_desc: str, route_key: str) -> dict:
+    """Pipeline stage: 對 _execute_by_route 結果套 Headroom 壓縮。
+
+    在 Execute 之後、Gate 之前呼叫。
+    只壓縮 success=True 且 output 夠大的結果。
+    """
+    if not result.get("success", False):
+        return result
+    output = result.get("output", "")
+    if not output or len(output) < HEADROOM_MIN_COMPRESS_SIZE:
+        return result
+
+    type_hints = {
+        "code": "json_code_search",
+        "research": "web_search_results",
+        "read": "source_code_file",
+        "bash": "shell_output",
+        "compile": "build_log",
+        "sports": "json_sports_data",
+        "social-scrape": "json_scraped_data",
+        "search-web": "html_search_results",
+    }
+    hint = type_hints.get(route_key, "")
+
+    cr = _compress_with_headroom(output, content_type=hint)
+    if cr.get("skipped"):
+        return result
+
+    result["_original_output"] = output
+    result["_original_size"] = len(output)
+    result["output"] = cr["compressed"]
+    result["_headroom"] = {
+        "tokens_before": cr["tokens_before"],
+        "tokens_after": cr["tokens_after"],
+        "tokens_saved": cr["tokens_saved"],
+        "ratio": cr["ratio"],
+        "ccr_hash": cr["ccr_hash"],
+        "ctr": cr["ctr"],
+    }
+    return result
 
 
 def _extract_path(desc: str) -> str | None:
@@ -1125,6 +1381,13 @@ def process_entry(entry: dict) -> dict:
     log.info(f"  ③ Execute: success={old_success} "
              f"output={len(result.get('output', result.get('error', '')))} chars")
 
+    # ── ③.b Headroom Compress ──
+    result = _compress_stage(result, task_desc, route_key)
+    hr = result.get("_headroom", {})
+    if hr:
+        log.info(f"  ⓘ ③.b Compress: {hr.get('tokens_before','?')}→{hr.get('tokens_after','?')} tok "
+                 f"(saved {hr.get('tokens_saved','?')}, ccr={str(hr.get('ccr_hash','none'))[:12]})")
+
     # ── ④ Gate ──
     result = _gate_scan(result, task_desc)
     gate_verdict = "deny" if (old_success and not result.get("success", False)) else "allow"
@@ -1136,6 +1399,11 @@ def process_entry(entry: dict) -> dict:
 
     # ── ⑤ Log ──
     _log_to_agentsview(entry, route_key, result)
+
+    # ── ⑤.b Failure Learning ──
+    if not result.get("success", False):
+        reason = result.get("error", result.get("output", "unknown"))[:120]
+        _track_failure(route_key, reason)
 
     # 建構回應
     response = {
@@ -1151,6 +1419,7 @@ def process_entry(entry: dict) -> dict:
             "tool": route_tool,
             "success": result.get("success", False),
             "brain_context": bool(brain_ctx),
+            "headroom": result.get("_headroom") if result.get("_headroom") else None,
         },
     }
     return response
@@ -1162,14 +1431,28 @@ def main_loop() -> None:
     """背景監聽通道，處理 aris→scream 事件。"""
     _load_agentos_config()
     _build_keyword_routes()
+    _load_headroom_config()
+
+    # 啟動 Headroom proxy（如果未運行）
+    if HEADROOM_AUTO_START:
+        _ensure_headroom_proxy()
 
     processed = _load_processed()
     log.info(f"🚀 AgentOS Aris Bridge 啟動 (已處理 {len(processed)} 個 ID)")
     log.info(f"   通道: {CHANNEL}")
     log.info(f"   路由: {len(_ROUTES)} 條")
     log.info(f"   日誌: {LOG_FILE}")
+    log.info(f"   Headroom: {HEADROOM_PROXY} (auto-start={'on' if HEADROOM_AUTO_START else 'off'}, learn={'on' if HEADROOM_LEARN_ENABLED else 'off'})")
+
+    _proxy_health_tick = 0
 
     while True:
+        # 定期檢查 Headroom proxy 健康（每 60 輪）
+        _proxy_health_tick += 1
+        if _proxy_health_tick >= 60 and HEADROOM_AUTO_START:
+            _proxy_health_tick = 0
+            _ensure_headroom_proxy()
+
         if not _acquire_lock():
             time.sleep(POLL_INTERVAL)
             continue
@@ -1234,6 +1517,7 @@ if __name__ == "__main__":
         # 先載入設定（在 fork 前完成，避免檔案描述子問題）
         _load_agentos_config()
         _build_keyword_routes()
+        _load_headroom_config()
 
         pid = os.fork()
         if pid > 0:
@@ -1264,4 +1548,5 @@ if __name__ == "__main__":
         # 前景模式：正常載入後執行
         _load_agentos_config()
         _build_keyword_routes()
+        _load_headroom_config()
         main_loop()

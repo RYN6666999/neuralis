@@ -32,6 +32,7 @@ pub mod needs;
 pub mod noise;
 pub mod snapshot;
 pub mod state;
+pub mod statefile;
 pub mod runtime;
 
 pub use attention::{AttentionGate, GateState, GatingDecision};

@@ -46,6 +46,21 @@ def ensure_psi_core():
     global _psi_core, _bus
     if _psi_core is not None:
         return _psi_core
+
+    backend = os.environ.get("NEURALIS_PSI_BACKEND", "python").lower()
+
+    if backend == "rust":
+        try:
+            from laap.psi_backend import RustPsiBackend
+            _psi_core = RustPsiBackend()
+            _psi_core.start()
+            logger.info("❤️ RustPsiBackend 啟動 — Aris 有心跳了（Rust 引擎）")
+            return _psi_core
+        except Exception as e:
+            logger.warning(f"RustPsiBackend 啟動失敗: {e}")
+            return None
+
+    # Default: Python PsiCore
     try:
         from laap.psi_core import PsiCore
         from laap.psi_backend import PythonPsiBackend

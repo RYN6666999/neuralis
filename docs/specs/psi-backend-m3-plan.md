@@ -51,17 +51,60 @@ PsiEngine
 
 1. ~~源碼歸位~~ ✅ 已完成（task-008 merge 進 main，`cargo test` + psi-bench 實測綠）。
    待補：CI 加 `cargo test --release` job。
-2. **RustPsiBackend**：實作與 `PythonPsiBackend` 同介面（`get_state` /
-   `process_input` / `post_affective_event` / `start` / `stop`）。
-   FFI 選型 — 傾向 PyO3（同行程、零序列化、snapshot cell 直讀）；
-   備案 subprocess + snapshot 檔/IPC（隔離性好，代價是延遲與一份序列化）。
-   `NEURALIS_PSI_BACKEND=python|rust` 切換，預設 python（煞車先於能力）。
+2. **RustPsiBackend**：實作與 `PythonPsiBackend` 同介面（v1 十法 + presentation +
+   B-surface）。
+
+   **裝法拍板（2026-07-24 Ryan）：subprocess + 檔案 IPC，不用 PyO3。**
+   - 理由一（原架構）：`state/latest.json` 本來就是作者設計「Rust psi core 每 100ms 寫、
+     整個 aris_brain 讀」的契約（chatflow `_write_author_state` 只是暫代寫的 workaround）。
+     subprocess/檔案 IPC = 回到原設計；PyO3 才是偏離。07-14 也已判「Rust 走檔案 IPC 解耦，
+     不需 FFI/PyO3」。
+   - 理由二（崩潰隔離）：PyO3 同行程 → Rust panic/segfault 帶走整個 Aris API
+     （event-loop 凍結那三次坑的同型風險）。subprocess → Rust 崩了 Python 不死，
+     watchdog 重啟 daemon，代價僅 ~100ms 延遲 + 一份序列化。
+   - `NEURALIS_PSI_BACKEND=python|rust` 切換，**預設 python**（煞車先於能力）。
+
+   **drift-safety 拆分（關鍵）：Rust 只服務「生理原始態」，presentation 留 Python。**
+   - Rust daemon 寫的 snapshot 只含**原始生理量**：5 needs + drives、5 affect 維
+     （P/A/D/S/St）、attention 模式、dominant_need、endorphin、tick、ts。
+   - Python `RustPsiBackend` 的 `get_state`/`get_drives`/`get_dominant_need` → 讀 snapshot。
+   - `get_state_label`/`format_state_injection`/`get_cognitive_bias` → **在 Python 端用
+     現有 presentation 碼從 snapshot 算**（保 QUIRK-1，零漂移；不讓 Rust 複製 quirk）。
+   - `process_input`/`post_affective_event`/`satisfy` → append 到 input 通道（Rust drain）。
+   - B-surface（`needs`/`emotion`/`affective`）production 呼叫點極少（實測多在 core 內部），
+     用 snapshot 唯讀代理頂；若有 live-mutation 呼叫點先遷移到 v1 方法。
+
+   **state/latest.json schema（與現行 `_write_author_state` 一致）：**
+   `{cycle, needs:{name:current}, attention, emotion, daemon_uptime, ts, source}`
+   （Rust 版 `source="neuralis-rust-psi"`；原子寫 tmp→replace 同現行）。
 3. **狀態檔契約**：讓 Rust `SnapshotPublisher` 直接每 100ms 原子寫
    `state/latest.json`（schema 與 `_write_author_state` 現行輸出一致）。
    切 rust backend 後 chatflow workaround 退役（偵測檔案新鮮度 < 1s 就不代寫）。
 4. **對拍驗證**：同輸入序列餵兩個 backend，需求/情緒軌跡差異在容忍帶內
    （OU 過程有噪聲 — 對拍比分佈不比逐點）。`scripts/check-psi-backend.py`。
 5. **效能閘**：切預設前跑 60min soak + 目標硬體閾值校準。
+
+## Schema 決策 + 進度（2026-07-24）
+
+**A/B 拍板：B 路（Ryan「信任一下」）。** Rust 寫**原生** schema
+（`neuralis-rust-psi/v1`），Python readers 遷移去讀它，不做 A 路的「模擬 Python 舊
+schema + 複製 attention 邏輯」。理由：兩引擎詞彙本就不同（attention：Rust
+Idle/Task/Learning/Planning + 遲滯 vs Python IDLE/SOCIAL/TASK + 需求映射；emotion/affect
+結構亦異），A 路要 Rust 旁路自己的模型去假裝 Python，不誠實且脆。B 路 blast radius 大
+（aris_brain / cognitive_bus / integration / status.py readers 要跟），但長期乾淨，
+attention 差異用對拍容忍帶（比分佈不比逐點）接受。
+
+**進度：**
+- ✅ **B1 daemon publish**：`rust/psi-engine/src/statefile.rs`（純序列化 + 原子寫，
+  5 單元測試）+ `src/bin/psi_daemon.rs`（2000Hz loop + 每 100ms 原子寫 latest.json）。
+  `cargo test --release` 50 passed（45→50）。端到端煙測：2s → tick 3960（2000Hz 實跑）、
+  原生 schema 合法、miss=0 drift=0。B1 scope 只 publish；Python→Rust input 通道 = B2。
+- ⬜ B2 input 通道（daemon drain input.jsonl：process_input / event / satisfy）
+- ⬜ B3 RustPsiBackend（Python 讀 snapshot + presentation 在 Python 算 + 寫 input +
+  spawn/stop daemon；`NEURALIS_PSI_BACKEND` 切換，預設 python）
+- ⬜ B3.5 Python readers 遷移到原生 schema（B 路 blast radius）
+- ⬜ B4 退役 chatflow workaround（新鮮度閘）
+- ⬜ B5 驗收：對拍（OU baseline 分佈）+ 60min soak（跑中）+ CI cargo job
 
 ## 不做（邊界）
 

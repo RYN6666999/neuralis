@@ -73,6 +73,21 @@ tags: [self-evolution, safety, roadmap, spine, plan]
 - 唯讀/淺委派可自動；**write-capable 委派每次過 4b 批准閘**（不自動）。
 - path-DENY（Stage 0）+ 成本閘（Stage 2）+ 快照（Stage 0）此時全在位。
 
+### Stage 3.5 — 評分路由 + 沙箱 canary（讓 Ryan 佔比可控下降）
+
+**能力：** 每個動作先打分 → 四條路（硬拒 / 問人 / 沙箱跑 / 自動）。一類任務在沙箱被
+客觀驗證做對夠多次，門檻才往下移一格（問人→沙箱→自動）。Ryan 注意力佔比 = 還卡在
+「問人」的比例，隨各任務類畢業自然下降。
+
+**防護欄：** 裁判/評分規則/門檻物理隔離在 Aris 碰不到處（柱①）；可回退性是硬地板
+（「潑得出去」的動作永遠封頂在問人）；鑰匙永遠在 Ryan（一鍵停 + 信任歸零）。
+🔴 不准把「降低 Ryan 佔比」設成 Aris 的優化目標（衝數字 = 通往不安全，同 len/500 坑）。
+
+**這站解掉 stub 死結：** executor 在沙箱**真跑**（真結果非假數據）→ 合法落地、非法撤回。
+「預判」= 真跑可撤，不是用猜的。詳見 `scoring-router-canary.md`。
+
+---
+
 ### Stage 4 — 分工學習 + 前瞻（甲的核心，走 §4 路 C）
 
 **能力：** Aris 學會「什麼時候委派 Scream 划算」+ 有界前瞻。光錐 §4 已拍板 **路 C**
@@ -110,6 +125,7 @@ Weco AIDE² 的教訓（`rpe-evaluation-integrity.md` §3）：連手工調兩�
 |---|---|---|
 | Stage 0-2（防護欄） | 通過 pytest 的實作 | 每個 TaskSpec 收斂後的 □通過 |
 | Stage 3 委派通道 | 唯讀/淺委派 | **每次 write-capable 委派**（4b） |
+| Stage 3.5 評分路由 | 沙箱可回退類（已畢業） | 潑得出去的類 + 未畢業類 + 首次畢業到自動(policy b) |
 | Stage 4 分工學習 | RPE 權重調整（可回退） | 動 agency 核心（_ANGLE/psi_core）= 獨立審批 |
 | Stage 5 乙門 | 無 | **全部**（一次性人類授權，不可自動） |
 
@@ -126,6 +142,9 @@ Stage 2 成本閘（E2）───────────┤ 前提於委派通
    │                          │
    ▼                          │
 Stage 3 委派通道（4b 每次）◄────┘
+   │
+   ▼
+Stage 3.5 評分路由 + 沙箱 canary + 信任 ratchet（哪些自動、哪些問人）
    │
    ▼
 Stage 4 分工學習（S1 + E3）= 甲的終點，預設停這
@@ -146,3 +165,4 @@ Stage 5 乙門（備而不用）
 - `cognitive-light-cone-plan.md` — S1/S2/S3 + zero-LLM §4 分岔（Stage 4 主體）
 - `rpe-evaluation-integrity.md` — E1-E4 + AIDE² 反作弊（Stage 1-2 主體）
 - `line-private-terminal-plan.md` — 獨立 I/O 擴展，不在本脊椎依賴鏈上，隨時可做
+- `scoring-router-canary.md` — 評分路由 + 沙箱 canary + 信任 ratchet（Stage 3.5 主體）

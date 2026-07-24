@@ -21,3 +21,7 @@ crossbeam-utils = "0.8"
 [[bin]]
 name = "psi-bench"
 path = "src/bin/psi_bench.rs"
+
+[[bin]]
+name = "psi-daemon"
+path = "src/bin/psi_daemon.rs"
