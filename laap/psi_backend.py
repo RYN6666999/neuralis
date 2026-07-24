@@ -356,6 +356,17 @@ class RustPsiBackend:
             logger.warning(f"[RustPsiBackend] failed to spawn daemon")
             self._daemon_process = None
 
+    def healthy(self) -> bool:
+        """Daemon 正在執行且 state 檔可讀。"""
+        if self._daemon_process is None:
+            return False
+        if self._daemon_process.poll() is not None:
+            # Daemon 已退出
+            return False
+        # 快速檢查 state 檔存在且新鮮
+        raw = self._read_raw()
+        return raw is not None
+
     def stop(self) -> None:
         if self._daemon_process is not None:
             logger.info("[RustPsiBackend] stopping daemon")

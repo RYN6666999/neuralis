@@ -54,11 +54,16 @@ def ensure_psi_core():
             from laap.psi_backend import RustPsiBackend
             _psi_core = RustPsiBackend()
             _psi_core.start()
-            logger.info("❤️ RustPsiBackend 啟動 — Aris 有心跳了（Rust 引擎）")
-            return _psi_core
+            if _psi_core.healthy():
+                logger.info("❤️ RustPsiBackend 啟動 — Aris 有心跳了（Rust 引擎）")
+                return _psi_core
+            else:
+                logger.warning("RustPsiBackend daemon 未就緒，回退 Python")
+                _psi_core = None
         except Exception as e:
-            logger.warning(f"RustPsiBackend 啟動失敗: {e}")
-            return None
+            logger.warning(f"RustPsiBackend 啟動失敗，回退 Python: {e}")
+            _psi_core = None
+        # fallthrough to Python path
 
     # Default: Python PsiCore
     try:
