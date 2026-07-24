@@ -125,6 +125,7 @@ log = logging.getLogger("agentos-bridge")
 
 _SCORING_ROUTER_ENABLED = os.environ.get("SCORING_ROUTER_ENABLED", "0") == "1"
 _SCORING_IMPORT_OK = False
+_SCORING_YOLO = os.environ.get("SCORING_YOLO_MODE", "0") == "1"
 SCORING_AUDIT_LOG = os.path.expanduser("~/agent-sandbox/logs/scoring-audit.jsonl")
 
 if _SCORING_ROUTER_ENABLED:
@@ -1607,11 +1608,26 @@ def process_entry(entry: dict) -> dict:
                 }
                 executed = True
             elif lane == "human":
-                result = {
-                    "success": False,
-                    "output": "",
-                    "error": f"needs-human-approval: {verdict.feedback}",
-                }
+                # Yolo mode：containable 類跳過 human，直接沙箱跑
+                if _SCORING_YOLO and verdict.reversible_actual == "containable":
+                    lane = "sandbox"
+                    log.info(f"  ⚡ YOLO: {request.task_class} containable → sandbox")
+                    sandbox_verdict = canary_execute(request)
+                    result = {
+                        "success": sandbox_verdict.outcome == "pass",
+                        "output": sandbox_verdict.feedback,
+                        "error": (
+                            sandbox_verdict.gate
+                            if sandbox_verdict.outcome != "pass"
+                            else ""
+                        ),
+                    }
+                else:
+                    result = {
+                        "success": False,
+                        "output": "",
+                        "error": f"needs-human-approval: {verdict.feedback}",
+                    }
                 executed = True
             elif lane == "sandbox":
                 if verdict.reversible_actual != "containable":
