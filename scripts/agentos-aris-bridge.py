@@ -126,6 +126,9 @@ log = logging.getLogger("agentos-bridge")
 _SCORING_ROUTER_ENABLED = os.environ.get("SCORING_ROUTER_ENABLED", "0") == "1"
 _SCORING_IMPORT_OK = False
 _SCORING_YOLO = os.environ.get("SCORING_YOLO_MODE", "0") == "1"
+_AGENCY_DELEGATE_ENABLED = os.environ.get("NEURALIS_AGENCY_DELEGATE", "off").lower() in {
+    "1", "true", "on", "yes"
+}
 SCORING_AUDIT_LOG = os.path.expanduser("~/agent-sandbox/logs/scoring-audit.jsonl")
 
 if _SCORING_ROUTER_ENABLED:
@@ -1012,6 +1015,18 @@ def _stringify_for_log(value: object, limit: int = 200) -> str:
         return str(value)[:limit]
 
 
+def _decision_source_for_entry(entry: dict) -> str:
+    """Normalize decision source for audit analytics.
+
+    This is observation-only in Phase A; no policy enforcement here.
+    """
+    raw = str(entry.get("decision_source") or entry.get("source") or entry.get("origin") or "").strip().lower()
+    if raw in {"agency", "passive", "human_manual", "system_replay"}:
+        return raw
+    # task/request entries from channel are currently treated as passive by default.
+    return "passive"
+
+
 # ── 回寫 Aris API ─────────────────────────────────────────
 
 def _post_to_aris(result: dict, entry: dict) -> None:
@@ -1589,12 +1604,20 @@ def process_entry(entry: dict) -> dict:
     sandbox_verdict: "VerdictV2 | None" = None
     request: "ActionRequest | None" = None
     lane = "legacy_auto"
+    lane_before_override = lane
+    lane_after_override = lane
+    override_applied = False
+    override_policy_id: str | None = None
+    human_gate_bypassed = False
+    decision_source = _decision_source_for_entry(entry)
 
     if _SCORING_ROUTER_ENABLED and _SCORING_IMPORT_OK:
         request = _build_action_request(entry, route_key, task_desc)
         if request is not None:
             verdict = score(request)
             lane = verdict.lane
+            lane_before_override = lane
+            lane_after_override = lane
             log.info(
                 f"  ③ Scoring: lane={lane} score={verdict.score:.2f} "
                 f"class={request.task_class}"
@@ -1611,6 +1634,10 @@ def process_entry(entry: dict) -> dict:
                 # Yolo mode：containable 類跳過 human，直接沙箱跑
                 if _SCORING_YOLO and verdict.reversible_actual == "containable":
                     lane = "sandbox"
+                    lane_after_override = lane
+                    override_applied = True
+                    override_policy_id = "yolo-containable-v1"
+                    human_gate_bypassed = True
                     log.info(f"  ⚡ YOLO: {request.task_class} containable → sandbox")
                     sandbox_verdict = canary_execute(request)
                     result = {
@@ -1623,6 +1650,7 @@ def process_entry(entry: dict) -> dict:
                         ),
                     }
                 else:
+                    lane_after_override = lane
                     result = {
                         "success": False,
                         "output": "",
@@ -1649,6 +1677,7 @@ def process_entry(entry: dict) -> dict:
                         ),
                     }
                     executed = True
+                    lane_after_override = lane
             # lane == auto：由下方既有路徑執行
 
     old_digest = None
@@ -1658,6 +1687,8 @@ def process_entry(entry: dict) -> dict:
     # ── auto lane（或 scoring 關閉/降級）→ 既有路徑 ──
     if not executed:
         lane = "auto" if lane == "auto" else "legacy_auto"
+        lane_before_override = lane
+        lane_after_override = lane
         result = _execute_by_route(route_key, task_desc)
         executed = True
         old_success = result.get("success", False)
@@ -1688,11 +1719,20 @@ def process_entry(entry: dict) -> dict:
     _log_scoring_audit({
         "ts": time.time(),
         "entry_id": entry_id,
+        "event_id": f"{entry_id}:{int(time.time() * 1000)}",
         "route": route_key,
+        "decision_source": decision_source,
         "scoring_enabled": _SCORING_ROUTER_ENABLED,
         "scoring_import_ok": _SCORING_IMPORT_OK,
+        "yolo_enabled": _SCORING_YOLO,
+        "agency_delegate_enabled": _AGENCY_DELEGATE_ENABLED,
         "executed": executed,
         "lane": lane,
+        "lane_before_override": lane_before_override,
+        "lane_after_override": lane_after_override,
+        "override_applied": override_applied,
+        "override_policy_id": override_policy_id,
+        "human_gate_bypassed": human_gate_bypassed,
         "task_class": request.task_class if request is not None else None,
         "score": verdict.score if verdict is not None else None,
         "reversible": verdict.reversible_actual if verdict is not None else None,
