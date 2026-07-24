@@ -21,6 +21,9 @@ _SANDBOX_ROOT = Path.home() / "agent-sandbox"
 if str(_SANDBOX_ROOT) not in sys.path:
     sys.path.insert(0, str(_SANDBOX_ROOT))
 
+# P1-B: 測試隔離 — 測試樣本走 ratchet.test.json，不碰 production
+os.environ.setdefault("AGENTOS_RATCHET_NAMESPACE", "test")
+
 CHANNEL = Path("/tmp/aris-scream-channel.jsonl")
 AUDIT_LOG = Path(os.path.expanduser("~/agent-sandbox/logs/scoring-audit.jsonl"))
 RATCHET_PATH = _SANDBOX_ROOT / "data" / "ratchet.json"
