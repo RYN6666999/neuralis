@@ -1937,7 +1937,10 @@ def _message_board_watcher() -> None:
     
     當 Ryan 或 Claude 寫了新留言 → 檔案 mtime 更新 → 寫一條通知到
     aris-scream channel → bridge 主循環在下一輪 pick up → 路由給 Aris。
-    5 秒檢查一次，debounce 10 秒避免連續寫入多次通知。"""
+    5 秒檢查一次，debounce 10 秒避免連續寫入多次通知。
+    
+    防自我迴圈：偵測到變更後檢查最後一筆留言的作者，如果是我（Aris）
+    自己寫的則跳過通知——避免寫對話記 → 通知自己 → 又寫的無窮迴圈。"""
     global _mb_last_mtime, _mb_last_notify
     mb_path = str(MESSAGE_BOARD)
     # 初始化 mtime
@@ -1956,6 +1959,22 @@ def _message_board_watcher() -> None:
             now = time.time()
             if now - _mb_last_notify < 10:
                 continue  # debounce
+            # 防自我迴圈：檢查最後一筆留言的作者是否為 Aris
+            try:
+                with open(mb_path, "rb") as f:
+                    f.seek(0, 2)  # 跳到檔尾
+                    size = f.tell()
+                    chunk_size = min(size, 300)
+                    f.seek(size - chunk_size)
+                    tail = f.read(chunk_size).decode("utf-8", errors="replace")
+                # 找最後一個 "── " 簽名行
+                last_sig = tail.rfind("── ")
+                if last_sig >= 0:
+                    sig_line = tail[last_sig:].split("\n")[0]
+                    if "Aris" in sig_line:
+                        continue  # 自己寫的，跳過通知
+            except Exception:
+                pass  # best-effort，讀不到就正常通知
             _mb_last_notify = now
             entry = {
                 "ts": now,
