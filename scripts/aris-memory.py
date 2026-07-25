@@ -114,6 +114,19 @@ class ArisMemory:
         """最近 N 條記憶，無論來源。"""
         return self.query("", "", limit)
 
+    def wake_context(self, limit=5):
+        """乙的種子 / P2-b：回最近 N 筆非空 attention_line，組成『上一刻的你』暖啟動塊。
+        醒來時前置注入，讓 Aris 第一句帶著前一刻，而不是重讀日記。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT attention_line FROM memories WHERE attention_line != '' "
+                "ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        if not rows:
+            return ""
+        lines = "\n".join(f"- {r[0]}" for r in rows)
+        return f"【上一刻的你（醒來線索，你自己留的）】\n{lines}"
+
     def by_source(self, source, limit=50):
         """依來源查詢。"""
         return self.query("", source, limit)
@@ -156,6 +169,12 @@ def _serve(port=PORT):
                 except ValueError:
                     limit = 10
                 self._send(200, {"results": mem.recent(limit)})
+            elif u.path == "/wake":
+                try:
+                    limit = int(first("limit", "5") or 5)
+                except ValueError:
+                    limit = 5
+                self._send(200, {"context": mem.wake_context(limit)})
             else:
                 self._send(404, {"error": "not_found"})
 

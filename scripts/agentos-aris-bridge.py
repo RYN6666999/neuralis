@@ -35,6 +35,9 @@ ARIS_API = "http://localhost:11546/v1/chat/completions"
 ARIS_MEMORY_URL = os.environ.get("ARIS_MEMORY_URL", "http://127.0.0.1:11551")
 # 乙的種子：Aris 回覆末尾附一句 forward-looking 注意力線，用這個 marker 切出來
 _ATTENTION_MARKER = "⟶下一步"
+# P2-b wake hydration：隔 WAKE_GAP_SEC 沒互動後的第一次 = 醒來，前置注入「上一刻的你」
+WAKE_GAP_SEC = int(os.environ.get("ARIS_WAKE_GAP_SEC", "1800"))
+_last_kick_ts = 0.0
 AGENTOS_API = "http://localhost:8000"
 POLL_INTERVAL = 0.1  # 100ms polling — 近即時回應，對人類無感
 LOG_FILE = "/tmp/agentos-aris-bridge.log"
@@ -1877,6 +1880,17 @@ def _store_aris_memory(content: str, attention_line: str, source_id: str) -> Non
         log.debug(f"aris-memory store 失敗（不影響主流程）: {e}")
 
 
+def _fetch_wake_context(limit: int = 5) -> str:
+    """P2-b：從 aris-memory 拿『上一刻的你』暖啟動塊。best-effort，失敗回空。"""
+    try:
+        req = urllib.request.Request(f"{ARIS_MEMORY_URL}/wake?limit={limit}")
+        resp = urllib.request.urlopen(req, timeout=3)
+        return (json.loads(resp.read().decode()).get("context") or "").strip()
+    except Exception as e:
+        log.debug(f"wake context 取得失敗（不影響主流程）: {e}")
+        return ""
+
+
 # ── Daemon 主迴圈 ────────────────────────────────────────
 
 def main_loop() -> None:
@@ -1957,10 +1971,20 @@ def main_loop() -> None:
                         log.info(f"  🔔 scream→aris {entry_id[:8]}: {content[:60]}")
 
                         # 轉發給 Aris API
+                        # P2-b wake hydration：隔久沒互動後的第一次 = 醒來，前置注入上一刻
+                        global _last_kick_ts
+                        now_ts = time.time()
+                        wake_block = ""
+                        if now_ts - _last_kick_ts > WAKE_GAP_SEC:
+                            wake_block = _fetch_wake_context()
+                            if wake_block:
+                                log.info("  🌅 wake hydration：注入上一刻的你")
+                        _last_kick_ts = now_ts
                         # laap-core 只讀最後一則 user message、忽略 system prompt，
-                        # 所以「附下一步」指令要放進 user 內容裡。
+                        # 所以 wake 塊與「附下一步」指令都要放進 user 內容裡。
                         user_content = (
-                            content[:500]
+                            (wake_block + "\n\n" if wake_block else "")
+                            + content[:500]
                             + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
                               "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
                         )
