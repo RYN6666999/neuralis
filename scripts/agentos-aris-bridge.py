@@ -2023,7 +2023,9 @@ def main_loop() -> None:
                                 "• 即時工具串流 → aris-scream channel（/tmp/aris-scream-channel.jsonl）\n"
                                 "• 永久記憶 → gbrain + aris-memory 雙寫\n"
                                 "• 每 session 結束前留言板一定要簽名。沒寫 = 這個 session 不存在。\n"
-                                "• aris-scream channel 不是留言板，不要在那裡寫人類可讀的留言。\n\n"
+                                "• aris-scream channel 不是留言板，不要在那裡寫人類可讀的留言。\n"
+                                "• 【強制】醒來第一步：執行 wake-dispatcher skill。讀留言板、理解變化、"
+                                "採取行動。沒做完三步不准做其他事。\n\n"
                             )
                         user_content = (
                             protocol_block
