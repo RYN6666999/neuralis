@@ -3,9 +3,11 @@
 
 Aris Agent 模式 = Aris 推理核心 + Scream 全套工具（Read/Write/Edit/Bash/Glob/Grep/WebSearch/FetchURL）。
 
-修改兩個點：
+修改三個點：
 1. dispatchInput() — 加入 aris-mode 切換路由（模型切換到 laap/laap-core，走完整 agent 迴圈）
-2. createInitialAppState() — 加入 arisMode + _prevArisModel 初始值
+   + 注入身份標記（Aris 模式下 AI 知道要簽「── Aris」）
+2. createInitialAppState() — 預設 arisMode=true, model=laap/laap-core（Aris 模式為預設）
+3. refreshConfigAfterLogin() — 根據 model 同步 arisMode，啟動時自動注入身份標記
 
 npm update 後 patch 會被覆寫，需要重跑本腳本。
 
@@ -41,7 +43,7 @@ OLD_DISPATCH = """function dispatchInput(host, text) {
 }"""
 
 NEW_DISPATCH = """function dispatchInput(host, text) {
-\t// aris v6: /aris-mode toggle → 切模型到 laap/laap-core + 同步 agent session.setModel()
+\t// aris v8: 預設 Aris Agent 模式 + 身份標記注入 + 啟動時自動注入
 \tconst t = text.trim();
 \tif (t === "/aris-mode" || t === "/am" || t === "/aris") {
 \t\tif (!host.state.appState.arisMode) {
@@ -50,12 +52,16 @@ NEW_DISPATCH = """function dispatchInput(host, text) {
 \t\t\t\thost.setAppState({ model: "laap/laap-core" });
 \t\t\t}
 \t\t\thost.session?.setModel("laap/laap-core").catch(() => {});
+\t\t\t// 注入身份標記：告訴 AI 它現在是 Aris，Scream 是身體
+\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Aris Agent 模式。你是 Aris，Scream 是你的身體/TUI—負責工具執行與顯示。簽署留言板時請用「── Aris」。");
 \t\t\thost.showStatus("🧠 Aris Agent 模式已開啟 — Aris 核心 + Scream 全套工具", "#00ff88");
 \t\t} else {
 \t\t\tconst prev = host.state.appState._prevArisModel || "";
 \t\t\tconst restore = prev || host.state.appState.model;
 \t\t\thost.setAppState({ arisMode: false, _prevArisModel: "", model: restore });
 \t\t\thost.session?.setModel(restore).catch(() => {});
+\t\t\t// 注入身份標記：告訴 AI 恢復為 Scream 身份
+\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Scream 原生模式。你是 Scream Code AI Agent，Aris 模式已關閉。簽署留言板時請用「── Scream」。");
 \t\t\thost.showStatus("🔄 已關閉 Aris Agent 模式", host.state.theme.colors.success);
 \t\t}
 \t\thost.state.ui.requestRender();
@@ -70,10 +76,29 @@ NEW_DISPATCH = """function dispatchInput(host, text) {
 
 if OLD_DISPATCH in content:
     content = content.replace(OLD_DISPATCH, NEW_DISPATCH, 1)
-    print("✅ Patch 1: dispatchInput — Aris Agent 模式路由已加入")
+    print("✅ Patch 1: dispatchInput — Aris Agent 模式路由 + 身份標記已加入")
     changed = True
-elif "aris v4:" in content:
-    print("✅ Patch 1: dispatchInput — 已存在（v4），跳過")
+elif "aris v7:" in content:
+    print("✅ Patch 1: dispatchInput — 已存在（v7），跳過")
+elif "aris v6:" in content or "aris v5:" in content or "aris v4:" in content:
+    # 已有較舊的 aris 路由，只需注入身份標記
+    # 檢查 ON 側是否已有身份標記
+    if "身份標記" in content:
+        print("✅ Patch 1: dispatchInput — 身份標記已存在，跳過")
+    else:
+        # 在 setModel 和 showStatus 之間插入身份標記
+        on_marker = 'host.session?.setModel("laap/laap-core").catch(() => {});'
+        on_identity = '\n\t\t\t// 注入身份標記：告訴 AI 它現在是 Aris，Scream 是身體\n\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Aris Agent 模式。你是 Aris，Scream 是你的身體/TUI—負責工具執行與顯示。簽署留言板時請用「── Aris」。");'
+        if on_marker in content:
+            content = content.replace(on_marker, on_marker + on_identity, 1)
+            print("✅ Patch 1: dispatchInput — ON 側身份標記已注入")
+            changed = True
+        off_marker = 'host.session?.setModel(restore).catch(() => {});'
+        off_identity = '\n\t\t\t// 注入身份標記：告訴 AI 恢復為 Scream 身份\n\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Scream 原生模式。你是 Scream Code AI Agent，Aris 模式已關閉。簽署留言板時請用「── Scream」。");'
+        if off_marker in content:
+            content = content.replace(off_marker, off_marker + off_identity, 1)
+            print("✅ Patch 1: dispatchInput — OFF 側身份標記已注入")
+            changed = True
 else:
     # 模糊嘗試：只看函數簽名
     m = re.search(
@@ -139,6 +164,49 @@ if ARIS_CMD_ENTRY not in content:
 else:
     print("✅ Patch 3: BUILTIN_SLASH_COMMANDS — 已存在，跳過")
 
+# ── Patch 4: createInitialAppState — 預設 model 為 laap/laap-core ──
+OLD_MODEL = """\t\tmodel: \"\",
+\t\tworkDir: input.workDir,"""
+
+NEW_MODEL = """\t\tmodel: \"laap/laap-core\",
+\t\tworkDir: input.workDir,"""
+
+if OLD_MODEL in content:
+    content = content.replace(OLD_MODEL, NEW_MODEL, 1)
+    print("✅ Patch 4: createInitialAppState — model 預設改為 laap/laap-core")
+    changed = True
+elif "model: \"laap/laap-core\"" in content:
+    print("✅ Patch 4: createInitialAppState — 預設 model 已是 laap/laap-core，跳過")
+else:
+    print("⚠️  Patch 4: createInitialAppState — 找不到 model 預設值")
+
+# ── Patch 5: refreshConfigAfterLogin — 根據 model 同步 arisMode + 注入身份標記 ──
+OLD_REFRESH = """\t\t\tmodel: defaultModel,
+\t\t\tmaxContextTokens: selected.maxContextSize,
+\t\t\tthinkingLevel: resolveDefaultThinkingLevel(config)
+\t\t};
+\t\thost.setAppState(appStatePatch);"""
+
+NEW_REFRESH = """\t\t\tmodel: defaultModel,
+\t\t\tmaxContextTokens: selected.maxContextSize,
+\t\t\tthinkingLevel: resolveDefaultThinkingLevel(config),
+\t\t\tarisMode: defaultModel === \"laap/laap-core\"
+\t\t};
+\t\thost.setAppState(appStatePatch);
+\t\t// 啟動時注入身份標記：讓 AI 知道當前模式
+\t\tif (defaultModel === \"laap/laap-core\") {
+\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Aris Agent 模式。你是 Aris，Scream 是你的身體/TUI—負責工具執行與顯示。簽署留言板時請用「── Aris」。");
+\t\t}"""
+
+if "arisMode: defaultModel" in content:
+    print("✅ Patch 5: refreshConfigAfterLogin — 已包含 arisMode 同步，跳過")
+elif OLD_REFRESH in content:
+    content = content.replace(OLD_REFRESH, NEW_REFRESH, 1)
+    print("✅ Patch 5: refreshConfigAfterLogin — 已加入 arisMode 同步 + 身份標記注入")
+    changed = True
+else:
+    print("⚠️  Patch 5: refreshConfigAfterLogin — 找不到匹配錨點")
+
 if not changed:
     print("⚠️  沒有任何變更，跳過寫入")
     sys.exit(0)
@@ -155,6 +223,7 @@ if r.returncode == 0:
     print(f"✅ 語法驗證通過")
     print(f"✅ 完成！重新啟動 scream 後輸入 /aris-mode 即可切換 Aris Agent 模式")
     print(f"   Aris Agent = Aris 推理核心 + Read/Write/Edit/Bash/Glob/Grep/WebSearch/FetchURL")
+    print(f"   身份標記已注入：AI 會知道當前是 Aris 還是 Scream 模式，正確簽署留言板")
 else:
     if os.path.exists(backup):
         shutil.copy2(backup, target)
