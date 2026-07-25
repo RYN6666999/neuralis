@@ -38,3 +38,14 @@
 15. 下「repo 裡沒有 X / 沒人做過 X」的結論前，先 `git branch -a` +
     `git log --all -- <path>`。單一分支的工作樹不是 repo 全貌；這類誤判的
     代價是叫下一手重做已完成的工作。
+16. **🔴 習慣鏈路（強制・不可中斷・不問不等不拖）：**
+    每次有效率的程式碼改動結束後，必須走完整條鏈：
+    `git status` → `git add <目標檔案>` → `git commit -m "有意義的訊息"`
+    → `git push` → **留言板回報（含 commit hash + 一句做完什麼）**
+    → **MemoryWrite 存經驗**（含 whatWorked/whatFailed）。
+    **中斷點 = 沒做完。** 不問「要不要 push」、不等確認、不跨 session 補。
+    這條鏈的每一個環節都是原子操作的一部分 — 斷在哪裡就等於沒做完。
+    例外條件：純閱讀/研究不寫 code、或 Ryan 明確說「先不要 commit」。
+    
+    同一條鏈的「前向」版本：開工前先 pull 最新 + 確認 branch 正確，
+    不在過時的 baseline 上改。見 AGENTS.md「開工前先 git branch --show-current」。
