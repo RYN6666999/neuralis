@@ -36,6 +36,8 @@ class ToolExecutor:
         self._registry = agentos_registry  # AgentOS executor_registry 模組
         self._tools: Dict[str, dict] = {}  # 本機註冊的 tools
         self._tool_start_time: float = 0.0
+        self._last_status_emit_ts: float = 0.0
+        self._last_status_key: tuple[str, str, str, str] | None = None
 
         bus.register_module("tool_executor", "1.0",
                             ["web_search", "file_search", "gbrain", "qmd", "shell", "http"])
@@ -62,10 +64,17 @@ class ToolExecutor:
                           tool: str = "", elapsed: float = 0):
         """寫 LAAP 工具狀態到檔案 + channel，供 Scream TUI 即時消費。"""
         import time, uuid
+        # 狀態節流：避免高頻重複事件把 TUI 推進重繪抖動。
+        desc = (desc or "").replace("\n", " ")[:96]
+        status_key = (icon, status, tool, desc)
+        now = time.time()
+        if self._last_status_key == status_key and (now - self._last_status_emit_ts) < 0.35:
+            return
+
         payload = {
             "icon": icon, "status": status, "description": desc,
             "tool": tool, "elapsed": round(elapsed, 1),
-            "ts": time.time(),
+            "ts": now,
         }
         try:
             with open(self.TOOL_STATUS_FILE, "w") as f:
@@ -80,8 +89,8 @@ class ToolExecutor:
             }
             with open(self.CHANNEL_PATH, "a") as f:
                 f.write(json.dumps(channel_event, ensure_ascii=False) + "\n")
-            # 也輸出 stdout 標記（給直接 tail 的使用者）
-            print(f"\n[LAAP-TOOL] {icon} {status} | {desc}", flush=True)
+            self._last_status_emit_ts = now
+            self._last_status_key = status_key
         except Exception:
             pass
 

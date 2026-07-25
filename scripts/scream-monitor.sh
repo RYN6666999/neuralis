@@ -7,14 +7,34 @@ CURSOR="/tmp/aris-scream-cursor.json"
 TOOL_LOG="/tmp/aris-tool-execution.log"
 BRIDGE_SCRIPT="$HOME/Developer/neuralis/scripts/agentos-aris-bridge.py"
 BRIDGE_PID_FILE="/tmp/agentos-aris-bridge.pid"
+MONITOR_LOCK_DIR="/tmp/scream-monitor.lock"
+BRIDGE_LAUNCHD_LABEL="com.neuralis.task-executor"
+
+# 單例鎖：避免多個 monitor 同時 tail 同一通道，造成重複記錄/噪音。
+if ! mkdir "$MONITOR_LOCK_DIR" 2>/dev/null; then
+  echo "[MONITOR] 已有 scream-monitor 在跑，退出" >> /tmp/aris-scream-monitor.log
+  exit 0
+fi
+trap 'rmdir "$MONITOR_LOCK_DIR" 2>/dev/null' EXIT
+
+bridge_running() {
+  LC_ALL=C pgrep -f "agentos-aris-bridge.py" >/dev/null 2>&1
+}
+
+launchd_manages_bridge() {
+  local domain="gui/$(id -u)"
+  launchctl print "$domain/$BRIDGE_LAUNCHD_LABEL" >/dev/null 2>&1
+}
 
 # 自動啟動 AgentOS Aris Bridge（如果未運行）
 if [ -f "$BRIDGE_SCRIPT" ]; then
-  if ! ps aux | grep -q "[a]gentos-aris-bridge"; then
+  if launchd_manages_bridge; then
+    echo "[MONITOR] 跳過 bridge 自啟動：launchd 已接管 $BRIDGE_LAUNCHD_LABEL" >> /tmp/aris-scream-monitor.log
+  elif ! bridge_running; then
     python3 "$BRIDGE_SCRIPT" --daemon 2>/dev/null
     for i in 1 2 3; do
       sleep 1
-      pid=$(ps aux | grep "agentos-aris-bridge" | grep -v grep | awk '{print $2}' | head -1)
+      pid=$(LC_ALL=C pgrep -f "agentos-aris-bridge.py" | head -1)
       if [ -n "$pid" ]; then
         echo "$pid" > "$BRIDGE_PID_FILE"
         echo "[MONITOR] AgentOS Aris Bridge 已自動啟動 (PID $pid)" >> /tmp/aris-scream-monitor.log

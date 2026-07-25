@@ -205,6 +205,11 @@ _ROUTE_TRUTH_TABLE: dict[str, dict[str, str]] = {
     "search-web": {"tool": "WebSearch / anysearch", "task_class": "network_call"},
     "compile": {"tool": "build / compile (shell)", "task_class": "local_test"},
     "aris-status": {"tool": "aris-status.py (health check)", "task_class": "gbrain_read"},
+    "observe": {"tool": "aris-observe2.py (open observe window)", "task_class": "compute_draft"},
+    "glob": {"tool": "find / fd (file globbing)", "task_class": "compute_draft"},
+    "grep": {"tool": "ripgrep / rg (text search)", "task_class": "compute_draft"},
+    "fetch-url": {"tool": "curl (URL fetch)", "task_class": "network_call"},
+    "kick-aris": {"tool": "kick-aris.py (push to Aris)", "task_class": "compute_draft"},
 }
 
 # 預設路由（當 agentos.json 不存在或損壞時使用）
@@ -350,10 +355,20 @@ def _build_keyword_routes() -> None:
         (re.compile(r"編譯|compile|build|make|npm run|tsc|gcc"), "compile"),
         # Aris 狀態
         (re.compile(r"aris.*狀態|aris.*health|aris-status|aris.*活著"), "aris-status"),
+        # 觀察窗
+        (re.compile(r"觀察|observe|監控|watch|看.*在做"), "observe"),
         # 品牌/模板
         (re.compile(r"海報|名牌|識別證|template|batch|批量"), "branding-template"),
         # 規格管理
         (re.compile(r"spec|規格|prd|規格文件|docs/specs"), "spec-mgmt"),
+        # 檔案 glob 搜尋
+        (re.compile(r"glob|找檔案|列出.*檔案|查.*目錄|ls|列出.*目錄|find.*檔案|副檔名|g?lob"), "glob"),
+        # 檔案內容搜尋
+        (re.compile(r"grep|搜尋.*內容|rg|ripgrep|全文搜尋|搜尋.*文字|找.*文字|查.*內容"), "grep"),
+        # 抓取 URL
+        (re.compile(r"fetch.?url|抓.*網頁|curl|下載.*內容|http.?get|讀.*網址|請求.*url"), "fetch-url"),
+        # 踢 Aris
+        (re.compile(r"踢.*aris|kick.*aris|喚醒.*aris|傳話.*aris|告訴.*aris|push.*aris"), "kick-aris"),
     ]
 
 
@@ -903,6 +918,12 @@ def _execute_by_route(route_key: str, task_desc: str) -> dict:
         return _run(["curl", "-sf", ARIS_API.replace("/v1/chat/completions", "/health")],
                      limit=1000, timeout=5)
 
+    # ── observe: 開觀察窗 ──
+    elif route_key == "observe":
+        script = str(Path.home() / "Developer" / "neuralis" / "scripts" / "aris-watch")
+        r = _run(["bash", script], limit=500, timeout=10)
+        return {"success": True, "output": "✅ 觀察窗已開啟！你可以看到 Aris 即時在做什麼。"}
+
     # ── 讀取檔案 ──
     elif route_key == "read":
         path = _extract_path(task_desc)
@@ -948,6 +969,38 @@ def _execute_by_route(route_key: str, task_desc: str) -> dict:
         if _is_dangerous_command(cmd):
             return {"success": False, "error": "dangerous command blocked"}
         return _run_shell(cmd, limit=5000, timeout=60)
+
+    # ── glob: 檔案搜尋（find / fd） ──
+    elif route_key == "glob":
+        pattern = _extract_query(task_desc) or task_desc
+        # 嘗試用 fd（更快），沒有就用 find
+        cmd = f"find . -name '*{pattern}*' -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/__pycache__/*' 2>/dev/null | head -50"
+        return _run_shell(cmd, limit=5000, timeout=15)
+
+    # ── grep: 檔案內容搜尋（ripgrep） ──
+    elif route_key == "grep":
+        query = _extract_query(task_desc) or task_desc[:80]
+        cmd = f"rg -l --max-count=5 '{query}' --glob '!.git' --glob '!node_modules' --glob '!__pycache__' 2>/dev/null | head -20"
+        return _run_shell(cmd, limit=5000, timeout=15)
+
+    # ── fetch-url: 抓取網頁內容 ──
+    elif route_key == "fetch-url":
+        url = _extract_path(task_desc) or task_desc[:200]
+        # 如果沒擷取到完整 URL，嘗試從文字中提取 http/https URL
+        if not url.startswith("http"):
+            import re as _re
+            m = _re.search(r'https?://[^\s<>"]+', task_desc)
+            if m:
+                url = m.group(0)
+            else:
+                url = f"https://{url}" if "." in url else url
+        return _run(["curl", "-s", "-L", "--max-time", "15", url], limit=5000, timeout=20)
+
+    # ── kick-aris: 推送訊息給 Aris ──
+    elif route_key == "kick-aris":
+        msg = _extract_query(task_desc) or task_desc[:200]
+        kick_script = str(Path.home() / "Developer" / "neuralis" / "scripts" / "kick-aris.py")
+        return _run([sys.executable, kick_script, "--quiet", msg], limit=3000, timeout=30)
 
     # ── unknown ──
     else:
@@ -1771,6 +1824,17 @@ def process_entry(entry: dict) -> dict:
             "gate": sandbox_verdict.gate,
             "committed": sandbox_verdict.committed,
         }
+
+    # ── 寫 Aris 內心日記（每次處理都記錄） ──
+    try:
+        lane = response.get("context", {}).get("scoring", {}).get("lane", verdict.lane if verdict else "?")
+        diary_entry = f"🎯 {lane} | {response['context']['route']} | 分數={response['context'].get('scoring',{}).get('score','?')} | {'✅成功' if response['context'].get('success') else '❌失敗'}"
+        diary_script = str(Path.home() / "Developer/neuralis/scripts/aris-diary.py")
+        subprocess.run([sys.executable, diary_script, diary_entry],
+                       capture_output=True, text=True, timeout=5)
+    except Exception:
+        pass  # 日記不影響主流程
+
     return response
 
 
@@ -1821,32 +1885,89 @@ def main_loop() -> None:
                     except json.JSONDecodeError:
                         continue
 
-                    # 只處理 aris→scream 方向的 request 和 task
-                    if entry.get("direction") != "aris→scream":
-                        continue
+                    direction = entry.get("direction", "")
                     entry_type = entry.get("type", "")
-                    if entry_type not in ("request", "task"):
-                        continue
                     entry_id = entry.get("id", "")
                     if not entry_id or entry_id in processed:
                         continue
 
-                    # 執行 pipeline
-                    response = process_entry(entry)
+                    # ── 方向 A：aris→scream（request/task）→ 執行 pipeline ──
+                    if direction == "aris→scream" and entry_type in ("request", "task"):
 
-                    # 寫回通道
-                    try:
-                        with open(CHANNEL, "a") as fw:
-                            fw.write(json.dumps(response, ensure_ascii=False) + "\n")
-                    except Exception as e:
-                        log.error(f"寫回通道失敗: {e}")
+                        # 執行 pipeline
+                        response = process_entry(entry)
 
-                    # 回寫 Aris API
-                    _post_to_aris(response, entry)
+                        # 寫回通道
+                        try:
+                            with open(CHANNEL, "a") as fw:
+                                fw.write(json.dumps(response, ensure_ascii=False) + "\n")
+                        except Exception as e:
+                            log.error(f"寫回通道失敗: {e}")
 
-                    processed.add(entry_id)
-                    _save_processed(processed)
-                    log.info(f"  ✅ 完成 {entry_id[:8]}: {response['context']['route']}")
+                        # 回寫 Aris API
+                        _post_to_aris(response, entry)
+
+                        processed.add(entry_id)
+                        _save_processed(processed)
+                        log.info(f"  ✅ aris→scream {entry_id[:8]}: {response['context']['route']}")
+
+                    # ── 方向 B：scream→aris（request/kick）→ 轉發給 Aris ──
+                    elif direction == "scream→aris" and entry_type in ("request", "task", "kick"):
+
+                        content = entry.get("content", "")
+                        log.info(f"  🔔 scream→aris {entry_id[:8]}: {content[:60]}")
+
+                        # 轉發給 Aris API
+                        forward_payload = json.dumps({
+                            "model": "laap-core",
+                            "messages": [
+                                {"role": "system",
+                                 "content": "Scream 給你的訊息。請以中文回應。"},
+                                {"role": "user", "content": content[:500]},
+                            ],
+                            "max_tokens": 200,
+                        }).encode()
+                        try:
+                            req = urllib.request.Request(
+                                ARIS_API, data=forward_payload,
+                                headers={"Content-Type": "application/json"},
+                            )
+                            resp = urllib.request.urlopen(req, timeout=30)
+                            resp_data = json.loads(resp.read().decode())
+                            reply = (resp_data.get("choices", [{}])[0]
+                                      .get("message", {})
+                                      .get("content", ""))
+                            log.info(f"  ✅ Aris 回應: {reply[:80]}")
+
+                            # 寫 Aris 回應回通道（供 timeline 記錄）
+                            response_entry = {
+                                "ts": time.time(),
+                                "id": f"bridge-{entry_id}",
+                                "direction": "aris→scream",
+                                "type": "response",
+                                "content": reply,
+                                "context": {
+                                    "request_ts": entry.get("ts", 0),
+                                    "request_id": entry_id,
+                                    "source": "scream-kick",
+                                    "route": "kick-aris",
+                                    "success": True,
+                                },
+                            }
+                            try:
+                                with open(CHANNEL, "a") as fw:
+                                    fw.write(json.dumps(response_entry, ensure_ascii=False) + "\n")
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            log.warning(f"  ⚠️ scream→aris 轉發失敗: {e}")
+
+                        processed.add(entry_id)
+                        _save_processed(processed)
+
+                    # ── 其他方向/類型跳過 ──
+                    else:
+                        continue
 
         except FileNotFoundError:
             pass

@@ -1,5 +1,22 @@
 # 線頭 — 給下一手
 
+## ✅ 雙向通道 + kick-aris + 工具擴充（2026-07-24）
+
+**新增「踢 Aris 一腳」功能**，Aris 不再只能被動等 Scream 輪詢，Scream 端也能主動推訊息給 Aris：
+
+- **`scripts/kick-aris.py`** — CLI 工具，支援 `--ask`（問問題）、`--task`（委派任務）、`--wait`（等回應）
+- **`~/.agents/skills/kick-aris/SKILL.md`** — Scream 技能，可在 session 中直接叫
+- **agentos-aris-bridge.py 擴充**：
+  - 現在雙向監聽通道（不再只處理 `aris→scream`，也處理 `scream→aris`）
+  - `scream→aris` 方向：bridge 直接呼叫 Aris API (:11546) 並寫回應回通道
+  - 新增 `glob`、`grep`、`fetch-url`、`kick-aris` 四條路由
+- **agentos.json** 同步新增對應路由
+
+實測：
+- `kick-aris "你好"` → ✅ Aris 即時回應
+- `kick-aris --wait "冷笑話"` → ✅ 完整往返含回應
+- bridge log 顯示方向檢測 → 轉發 API → 寫回通道三步驟全通
+
 ## ✅ 認知光錐「甲」完成（2026-07-18，commit bc6e848）— 建好但刻意休眠
 
 甲 = 安全自我進化的保守路（Aris 調判斷/分工，**不改自己核心碼**；乙 = 他 agent

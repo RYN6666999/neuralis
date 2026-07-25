@@ -183,6 +183,70 @@ def _take_pending_memories() -> list:
     return []
 
 
+# ── 跨 session 開機記憶（任務-跨對話記憶）──────────────────────────
+# 新 session 醒來自動載入跨對話脈絡，免使用者手動說「去讀留言板」。
+# 純唯讀：gbrain get_page + 讀留言板檔。無寫入、無 delegate、無工具執行。
+# 任何錯誤靜默降級回 []（絕不擋啟動）。NEURALIS_SESSION_BOOTSTRAP=off 可關。
+_ONTOLOGY_SLUG = "aris-memory-ontology"
+_BOARD_PATH = os.path.expanduser(
+    "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md")
+_BOOTSTRAP_TTL = 300.0        # 同 process 內快取，避免每次 session-start 重讀
+_BOOTSTRAP_MIN_GAP = 1800.0   # 兩次注入最小間隔（web 是無狀態通道，防每則訊息重打）
+_bootstrap_cache: dict = {"ts": 0.0, "lines": []}
+_last_bootstrap_ts: float = 0.0
+
+
+def _session_bootstrap_memories() -> list:
+    """組跨 session 脈絡：gbrain ontology 一行 + 留言板最新一則。純唯讀 + 快取。"""
+    now = time.time()
+    if _bootstrap_cache["lines"] and now - _bootstrap_cache["ts"] < _BOOTSTRAP_TTL:
+        return list(_bootstrap_cache["lines"])
+    lines: list[str] = []
+    try:
+        from gbrain_client import get_client
+        client = get_client()
+        if client is not None:
+            page = client.call("get_page", {"slug": _ONTOLOGY_SLUG}, timeout=8)
+            body = (page or {}).get("compiled_truth") or ""
+            head = " ".join(body.replace("#", " ").split())[:120]
+            if head:
+                lines.append(f"系統索引（gbrain {_ONTOLOGY_SLUG}）：{head}")
+    except Exception:
+        pass
+    try:
+        import re
+        with open(_BOARD_PATH, encoding="utf-8") as f:
+            raw = f.read()
+        blocks = re.split(r"\n(?=\[\d{4}-\d{2}-\d{2})", raw)
+        last = " ".join(blocks[-1].split()) if blocks else ""
+        if len(last) > 12:
+            lines.append(f"上次醒著時（留言板）：{last[:180]}")
+    except Exception:
+        pass
+    _bootstrap_cache["ts"] = now
+    _bootstrap_cache["lines"] = list(lines)
+    return lines
+
+
+def _maybe_session_bootstrap(messages: list, user_turn: bool, user_msg: str) -> list:
+    """新 session 首輪才注入（history 只有這句 = 剛醒）。有最小間隔閘防重複。"""
+    global _last_bootstrap_ts
+    if not (user_turn and user_msg):
+        return []
+    if os.environ.get("NEURALIS_SESSION_BOOTSTRAP", "on").lower() in ("off", "0", "false"):
+        return []
+    prior = [m for m in (messages or []) if m.get("role") in ("user", "assistant")]
+    if len(prior) > 1:
+        return []  # 對話進行中，不是新 session 醒來
+    now = time.time()
+    if now - _last_bootstrap_ts < _BOOTSTRAP_MIN_GAP:
+        return []
+    lines = _session_bootstrap_memories()
+    if lines:
+        _last_bootstrap_ts = now
+    return lines
+
+
 def _psi_memories_sync(query: str) -> list[str]:
     """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。
     去重：近 6 輪引用過的段落不再引（不然同話題每句都想起同一件事，穿幫）。
@@ -433,7 +497,8 @@ def _make_chat_handler(orig_handler):
         engine = None
 
         # 收集記憶（平行記憶最慢，但我們不 blocking 等它）
-        memories = _collect_memories(mem_task) + _take_pending_memories()
+        memories = (_maybe_session_bootstrap(messages, user_turn, user_msg)
+                    + _collect_memories(mem_task) + _take_pending_memories())
         if mem_task and not mem_task.done():
             mem_task.add_done_callback(_stash_late_memories)
 
@@ -837,7 +902,8 @@ async def _stream_live(request, web, fed, user_msg: str, messages: list, model: 
         logger.debug(f"[chatflow] respond_stream 不可用: {e}")
         return None
 
-    memories = _take_pending_memories()   # 零等待：只拿上一輪遲到的召回
+    memories = (_maybe_session_bootstrap(messages, True, user_msg)
+                + _take_pending_memories())   # 新 session 開機脈絡 + 上一輪遲到召回
     hist = [m for m in messages if m.get("role") in ("user", "assistant")][:-1]
     import threading
     cancel = threading.Event()
@@ -888,7 +954,8 @@ async def _stream_tool_test(request, web, model: str):
 
 
 def install() -> bool:
-    """patch aiohttp add_post，包住 chat completions handler。冪等。回是否安裝。"""
+    """patch aiohttp add_post，包住 chat completions handler。冪等。回是否安裝。
+    同步註冊 HEAD handler — 讓 Worker tunnel probe（HEAD /v1/chat/completions）不卡死。"""
     if os.environ.get("NEURALIS_CHATFLOW", "on").lower() in ("off", "0", "false"):
         return False
     try:
@@ -900,10 +967,24 @@ def install() -> bool:
         return True  # 已裝
     orig = UrlDispatcher.add_post
 
+    async def _head_ok(request):
+        """HEAD 用 handler：簡單回 200，讓 probe 不卡死。"""
+        from aiohttp import web
+        return web.Response(body=b"", status=200, content_type="application/json")
+
     def patched(self, path, handler, **kw):
         if path == _CHAT_PATH:
             handler = _make_chat_handler(handler)
             logger.info(f"[chatflow] 已包住 {path} — 餵 psi + executor 卸載（防 event loop 阻塞）")
+            # 同步註冊 HEAD handler（aiohttp 沒 GET handler 時 HEAD 會卡住）
+            try:
+                # 用實例呼叫 add_head（避免 class-level 遞迴）
+                head_method = getattr(self, "add_head", None)
+                if head_method is not None:
+                    head_method(path, _head_ok)
+                    logger.info(f"[chatflow] 已註冊 HEAD {path} — tunnel probe 不卡死")
+            except Exception as e:
+                logger.debug(f"[chatflow] HEAD 註冊跳過: {e}")
         return orig(self, path, handler, **kw)
 
     patched._laap_chatflow = True

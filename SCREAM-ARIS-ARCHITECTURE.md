@@ -72,6 +72,7 @@ Scream Code 是一個 AI 輔助編程 CLI。Aris（LAAP/neuralis）是一個數�
 | `patch-scream-tui.py` | 注入 TUI bundle：讀取 laap-tool-status.json 顯示在狀態列 |
 | `reload-aris.sh` | 重載 Aris API（kill + restart） |
 | `aris-status.py` | 一頁式 Aris 狀態儀表 |
+| `kick-aris.py` | 從 Scream/terminal 推送訊息/任務給 Aris（踢一腳） |
 | `check-*.py` | 各 phase 自檢腳本 |
 
 ### AgentOS（~/agent-sandbox/scripts/）
@@ -101,7 +102,9 @@ Scream Code 是一個 AI 輔助編程 CLI。Aris（LAAP/neuralis）是一個數�
 
 | 檔案 | 角色 | 方向 |
 |------|------|------|
-| `aris-scream-channel.jsonl` | Aris→Scream 主通道（request/task/tool_execution） | Aris 寫, Scream 讀 |
+| `aris-scream-channel.jsonl` | 雙向主通道：request/task/tool_execution + kick-aris 反向推送 | Aris↔Scream 雙向 |
+|  | 方向 A：`aris→scream` — Aris 發起請求，bridge 執行並回應 |  |
+|  | 方向 B：`scream→aris` — Scream/kick-aris 推訊息給 Aris，bridge 轉發 |  |
 | `scream-phase.json` | Scream 工具階段事件（start/done/thinking） | 我寫, phase-logger 讀 |
 | `laap-tool-status.json` | TUI 狀態列即時工具狀態 | Aris 寫, TUI 讀 |
 | `aris-latest-tool.json` | 最新工具執行事件 | monitor 寫 |
@@ -145,9 +148,9 @@ Scream TUI                     Aris API
 ### 2. 工具執行時間軸（雙源合一）
 
 ```
-Aris ToolExecutor           Scream agent
+Aris ToolExecutor           Scream agent (/kick-aris)
     │                           │
-    │ tool_execution event      │ tool phase event
+    │ tool_execution event      │ tool phase event / kick
     ▼                           ▼
 aris-scream-channel.jsonl    scream-phase.json
     │                           │
@@ -164,6 +167,38 @@ aris-scream-channel.jsonl    scream-phase.json
     • 統計（工具頻率、累計時間、平均時間）
     • 目前狀態（--status）
 ```
+
+### 2b. 雙向通道（2026-07-24 擴充）
+
+原架構只支援單向 `aris→scream`（Aris 發起請求，bridge 執行）。2026-07-24 新增反向通道：
+
+```
+Scream（你 / kick-aris.py）           AgentOS Aris Bridge（背景精靈）
+    │                                      │
+    │ kick-aris.py "你好嗎"                 │
+    │─────────────────────────────────────►│
+    │                                      │
+    │ 寫入通道 (scream→aris)                │
+    │─────────────────────────────────────►│  方向檢測
+    │                                      ├── ① 辨識 scream→aris
+    │                                      ├── ② 呼叫 Aris API (:11546)
+    │                                      ├── ③ 取得回應
+    │ ◄────────────────────────────────────│  ④ 寫回應回通道 (aris→scream)
+    │                                      │
+    │ 顯示 Aris 回應                        │
+    ▼                                      ▼
+```
+
+三種觸發方式：
+- **CLI**：`kick-aris "訊息"` / `kick-aris --ask "問題"` / `kick-aris --task "任務"`
+- **Scream 技能**：在 Scream session 中直接說「踢 Aris 一腳，說…」
+- **AgentOS 路由**：bridge 偵測 `kick-aris` 關鍵字自動執行
+
+新支援的路由（bridge 直接實作）：
+- `glob` → `find` 命令搜尋檔案
+- `grep` → `rg` 命令全文搜尋
+- `fetch-url` → `curl` 抓取網頁
+- `kick-aris` → 推訊息給 Aris
 
 ### 3. 目標驅動任務序列
 

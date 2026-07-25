@@ -1,0 +1,5 @@
+#!/bin/bash
+# aris-watch — 一鍵開啟 Aris 即時監控終端
+# 安裝：echo 'alias aris-watch="bash ~/Developer/neuralis/scripts/aris-watch"' >> ~/.zshrc
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python3 "$SCRIPT_DIR/aris-observe2.py"
