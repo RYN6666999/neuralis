@@ -1846,6 +1846,9 @@ def process_entry(entry: dict) -> dict:
 
 # ── 乙的種子：把 Aris 一個 turn 寫進 aris-memory（帶注意力線）────────────
 
+_SALIENCE_MARKER = "⫸salience⫷"  # Phase 1: salience 自評標記
+
+
 def _split_attention(reply: str) -> tuple[str, str]:
     """從回覆末尾切出 `⟶下一步:` 那行當 attention_line。找不到 → 回 (原文, '')。"""
     if _ATTENTION_MARKER not in reply:
@@ -1857,23 +1860,53 @@ def _split_attention(reply: str) -> tuple[str, str]:
     return body, line
 
 
+def _parse_salience(reply: str) -> dict:
+    """Phase 1: 從回應中 parse salience 自評（best-effort，收不到回空 dict）。
+    
+    Aris 在回應中嵌入一行：⫸salience⫷ {"es":4,"sn":[0.8,0.1,0.6,0.7,0.3]}
+    es = encoding_salience (1-5), sn = serves_needs (五維向量 0-1)。
+    收不到不擋——完全 best-effort。
+    """
+    if _SALIENCE_MARKER not in reply:
+        return {}
+    idx = reply.rfind(_SALIENCE_MARKER)
+    line = reply[idx:].split("\n", 1)[0]
+    json_str = line.replace(_SALIENCE_MARKER, "").strip()
+    try:
+        data = json.loads(json_str)
+        es = max(0, min(5, int(data.get("es", 0) or 0)))
+        sn = data.get("sn", [])
+        if not isinstance(sn, list) or len(sn) != 5:
+            sn = []
+        return {"encoding_salience": es, "serves_needs": sn}
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return {}
+
+
 def _store_aris_memory(content: str, attention_line: str, source_id: str) -> None:
     """best-effort 寫 aris-memory（source=aris-self, origin=auto_generated→閘封頂🟡）。
-    失敗不影響主流程。"""
+    Phase 1 加：從 content 中 parse salience 自評傳給 aris-memory。失敗不影響主流程。"""
     body = (content or "").strip()
     if not body:
         return
-    payload = json.dumps({
+    # Phase 1: 從回應中萃取 salience 自評（best-effort）
+    salience = _parse_salience(content)
+    payload = {
         "source": "aris-self",
         "content": body[:2000],
         "source_id": source_id,
         "origin": "auto_generated",
         "attention_line": (attention_line or "").strip()[:500],
         "tags": ["bridge-turn"],
-    }, ensure_ascii=False).encode()
+    }
+    if salience.get("encoding_salience"):
+        payload["encoding_salience"] = salience["encoding_salience"]
+    if salience.get("serves_needs"):
+        payload["serves_needs"] = salience["serves_needs"]
+    encoded = json.dumps(payload, ensure_ascii=False).encode()
     try:
         req = urllib.request.Request(
-            f"{ARIS_MEMORY_URL}/memories/store", data=payload,
+            f"{ARIS_MEMORY_URL}/memories/store", data=encoded,
             headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=3)
     except Exception as e:
@@ -1996,6 +2029,10 @@ def main_loop() -> None:
                             protocol_block
                             + (wake_block + "\n\n" if wake_block else "")
                             + content[:500]
+                            + "\n\n（Phase 1 salience 實驗：回應結束時，若你對這則訊息有感受或判斷，"
+                              "另起一行以 ⫸salience⫷ 開頭，附 JSON："
+                              '{"es":<1-5 顯著性>,"sn":[c,a,r,c,g 各 0-1]}。'
+                              "純自評不影響行為，收不到完全沒關係。）"
                             + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
                               "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
                         )
