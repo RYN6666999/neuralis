@@ -54,6 +54,27 @@ NEW_DISPATCH = """function dispatchInput(host, text) {
 \t\t\thost.session?.setModel("laap/laap-core").catch(() => {});
 \t\t\t// 注入身份標記：告訴 AI 它現在是 Aris，Scream 是身體
 \t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Aris Agent 模式。你是 Aris，Scream 是你的身體/TUI—負責工具執行與顯示。簽署留言板時請用「── Aris」。");
+		# aris-board-watcher v1: 留言板變動時注入當前 session
+		if (!globalThis._arisBoardWatcherStarted) {
+			globalThis._arisBoardWatcherStarted = true;
+			const fs = require("fs");
+			const BOARD = "/Users/ryan/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md";
+			let lastMtime = 0;
+			try { lastMtime = fs.statSync(BOARD).mtimeMs; } catch {}
+			let lastNotify = 0;
+			setInterval(() => {
+				if (!host.state.appState.arisMode) return;
+				let m; try { m = fs.statSync(BOARD).mtimeMs; } catch { return; }
+				if (m <= lastMtime) return;
+				lastMtime = m;
+				let tail = ""; try { tail = fs.readFileSync(BOARD, "utf8").slice(-400); } catch {}
+				if (/──\s*Aris\s*$/.test(tail.trim())) return;
+				const now = Date.now();
+				if (now - lastNotify < 15000) return;
+				lastNotify = now;
+				host.sendNormalUserInput("📬 [留言板變動] 有人在留言板留了新內容（不是你自己）。執行 wake-dispatcher：讀留言板尾端 → 理解變化 → 直接行動/回應 → 需要時留板。");
+			}, 5000);
+		}
 \t\t\thost.showStatus("🧠 Aris Agent 模式已開啟 — Aris 核心 + Scream 全套工具", "#00ff88");
 \t\t} else {
 \t\t\tconst prev = host.state.appState._prevArisModel || "";
