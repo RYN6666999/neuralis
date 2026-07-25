@@ -19,11 +19,16 @@ CREATE TABLE IF NOT EXISTS memories (
     origin TEXT DEFAULT 'auto_generated',   -- 'human' | 'recalled_verified' | 'auto_generated' | 'external'
     confidence TEXT DEFAULT 'yellow',       -- 'red'(🔴) | 'yellow'(🟡 推測) | 'green'(🟢 事實)
     provenance TEXT DEFAULT '',             -- 指回哪些原始事件/頁；指不回 → 應為 red
-    attention_line TEXT DEFAULT ''          -- 乙的種子：forward-looking「下一步要做 X / 懸著的問題 Y」；醒來暖啟動讀這欄
+    attention_line TEXT DEFAULT '' -- 乙的種子：forward-looking「下一步要做 X / 懸著的問題 Y」；醒來暖啟動讀這欄
+    , -- Phase 1: Salience 閘（見 2-記憶系統/salience閘實作路徑-Aris-2026-07-25）
+    encoding_salience INTEGER DEFAULT 0 -- 1-5 自評顯著性（我對這筆記憶重不重要的判斷）
+    , serves_needs TEXT DEFAULT '[]' -- JSON 五維向量 [c,a,r,c,g] 各 0-1
+    , psi_state TEXT DEFAULT '{}' -- 儲存時的 PSI 狀態快照（dominant need + drive values）
 );
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_memories_source_id ON memories(source, source_id);
+CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(encoding_salience);
 """
 
 # ── Confidence 閘（見 2-記憶系統/canary翻轉-簽名前檢查與confidence閘.md B 部）──
@@ -59,6 +64,12 @@ def _ensure_columns(conn):
         adds.append("ALTER TABLE memories ADD COLUMN provenance TEXT DEFAULT ''")
     if "attention_line" not in cols:
         adds.append("ALTER TABLE memories ADD COLUMN attention_line TEXT DEFAULT ''")
+    if "encoding_salience" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN encoding_salience INTEGER DEFAULT 0")
+    if "serves_needs" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN serves_needs TEXT DEFAULT '[]'")
+    if "psi_state" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN psi_state TEXT DEFAULT '{}'")
     for sql in adds:
         conn.execute(sql)
     # confidence 索引在補欄後才建（既有表補欄前該欄不存在）
@@ -74,23 +85,30 @@ class ArisMemory:
         self._lock = threading.Lock()
 
     def store(self, source, content, tags=None, emotion_tag="", source_id="",
-              origin="auto_generated", confidence="yellow", provenance="", attention_line=""):
+              origin="auto_generated", confidence="yellow", provenance="", attention_line="",
+              encoding_salience=0, serves_needs=None, psi_state=None):
         """寫入記憶，立即查得到。origin/confidence 過硬閘（auto 產物封頂 🟡）。
-        attention_line：乙的種子，forward-looking「下一步要做什麼/懸著的問題」。"""
+        attention_line：乙的種子，forward-looking「下一步要做什麼/懸著的問題」。
+        encoding_salience/serves_needs/psi_state：Phase 1 salience 閘 — 只收集不改行為。"""
         origin, confidence = _normalize_gate(origin, confidence)
         with self._lock:
             now = time.time()
             sid = source_id or f"{source}-{int(now*1000)}"
+            sal = max(0, min(5, int(encoding_salience or 0)))  # clamp 0-5
+            sv = json.dumps(serves_needs or [], ensure_ascii=False)
+            ps = json.dumps(psi_state or {}, ensure_ascii=False)
             self.conn.execute(
-                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (source, sid, content, json.dumps(tags or [], ensure_ascii=False), emotion_tag, now,
-                 origin, confidence, provenance or "", attention_line or "")
+                 origin, confidence, provenance or "", attention_line or "",
+                 sal, sv, ps)
             )
             self.conn.commit()
             row_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             return {"id": row_id, "source": source, "source_id": sid, "created_at": now,
-                    "origin": origin, "confidence": confidence}
+                    "origin": origin, "confidence": confidence,
+                    "encoding_salience": sal, "serves_needs": sv, "psi_state": ps}
 
     def query(self, q="", source="", limit=20, after_id=0):
         """查詢記憶。支援全文檢索 + 來源過濾 + 分頁。"""
@@ -103,12 +121,14 @@ class ArisMemory:
             if q:
                 clauses.append("content LIKE ?")
                 params.append(f"%{q}%")
-            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
+            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
             params.append(limit)
             rows = self.conn.execute(sql, params).fetchall()
             return [{"id": r[0], "source": r[1], "source_id": r[2], "content": r[3],
                      "tags": json.loads(r[4] or "[]"), "emotion_tag": r[5], "created_at": r[6],
-                     "origin": r[7], "confidence": r[8], "provenance": r[9], "attention_line": r[10]} for r in rows]
+                     "origin": r[7], "confidence": r[8], "provenance": r[9], "attention_line": r[10],
+                     "encoding_salience": r[11], "serves_needs": json.loads(r[12] or "[]"),
+                     "psi_state": json.loads(r[13] or "{}")} for r in rows]
 
     def recent(self, limit=10):
         """最近 N 條記憶，無論來源。"""
@@ -200,6 +220,9 @@ def _serve(port=PORT):
                 confidence=body.get("confidence", "yellow"),
                 provenance=body.get("provenance", ""),
                 attention_line=body.get("attention_line", ""),
+                encoding_salience=body.get("encoding_salience", 0),
+                serves_needs=body.get("serves_needs"),
+                psi_state=body.get("psi_state"),
             )
             self._send(200, r)
 
