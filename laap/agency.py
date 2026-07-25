@@ -30,6 +30,13 @@ from typing import Optional
 
 from laap.safety_gate import AGENTOS_READONLY, classify
 
+# ── 事件標準化（Phase 1 里程碑）：events.py 不存在時安全 fallback
+try:
+    from laap.events import emit as _emit_event, AGENCY_TURN_START, AGENCY_TOOL_RESULT, AGENCY_TURN_END
+except Exception:
+    def _emit_event(*args, **kwargs): pass
+    AGENCY_TURN_START = AGENCY_TOOL_RESULT = AGENCY_TURN_END = ""
+
 logger = logging.getLogger("laap.agency")
 
 READONLY_WHITELIST = frozenset({"gbrain", "qmd", "file-search", "scream-ask"}) | AGENTOS_READONLY
@@ -586,6 +593,7 @@ class AgencyLoop:
         if self._cycle_guard:
             self._last_was_self_initiated = (tool in READONLY_WHITELIST)
         now = time.time()
+        _emit_event(AGENCY_TURN_START, need=need, drive=drive, tool=tool, prompt=prompt[:40])
         result = self.tools.execute(tool, prompt, timeout=30)
 
         # SafetyGate 阻擋
@@ -600,6 +608,7 @@ class AgencyLoop:
 
         ok = bool(result) and not result.startswith(("[錯誤]", "[未知工具]", "[AgentOS 錯誤]", "[安全閘]")) \
             and result != "無結果"
+        _emit_event(AGENCY_TOOL_RESULT, tool=tool, ok=ok, result_len=len(result or ""))
 
         # ── RPE 計算 ──
         outcome = self._score_result(result, tool=tool) if ok else 0.0
@@ -691,6 +700,12 @@ class AgencyLoop:
         logger.info(f"[Agency] 行動#{self.actions_total} {need}(drive={drive:.2f}) "
                     f"{tool}({prompt[:40]}) ok={ok} rpe={rpe:+.3f} "
                     f"exp={self._exploration_rate:.2f} → mem={mem_id or '-'}")
+        _emit_event(AGENCY_TURN_END, entry={
+            "ts": now, "need": need, "drive": round(drive, 3),
+            "tool": tool, "prompt": prompt, "ok": ok,
+            "result_len": len(result or ""), "mem_id": mem_id,
+            "outcome": round(outcome, 3), "expected": round(expected, 3),
+            "rpe": round(rpe, 3), "exploration": round(self._exploration_rate, 3)})
 
     @staticmethod
     def _audit(entry: dict) -> None:
