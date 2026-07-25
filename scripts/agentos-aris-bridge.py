@@ -31,6 +31,11 @@ PROCESSED = "/tmp/aris-scream-processed-ids.json"
 LOCK = "/tmp/aris-scream-task-lock"
 BRAIN_DIR = Path.home() / ".scream-code" / "agentos-brain"
 AGENTOS_JSON = Path.home() / "agent-sandbox" / "agentos.json"
+
+# ── 留言板監聽 ──
+MESSAGE_BOARD = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md"
+_mb_last_mtime = 0.0
+_mb_last_notify = 0.0
 ARIS_API = "http://localhost:11546/v1/chat/completions"
 ARIS_MEMORY_URL = os.environ.get("ARIS_MEMORY_URL", "http://127.0.0.1:11551")
 # 乙的種子：Aris 回覆末尾附一句 forward-looking 注意力線，用這個 marker 切出來
@@ -1924,6 +1929,48 @@ def _fetch_wake_context(limit: int = 5) -> str:
         return ""
 
 
+# ── 留言板監聽（事件驅動，不輪詢）─────────────────────────────
+
+def _message_board_watcher() -> None:
+    """背景 thread：監聽留言板檔案 mtime 變化，有新留言時通知 channel。
+    
+    當 Ryan 或 Claude 寫了新留言 → 檔案 mtime 更新 → 寫一條通知到
+    aris-scream channel → bridge 主循環在下一輪 pick up → 路由給 Aris。
+    5 秒檢查一次，debounce 10 秒避免連續寫入多次通知。"""
+    global _mb_last_mtime, _mb_last_notify
+    mb_path = str(MESSAGE_BOARD)
+    # 初始化 mtime
+    try:
+        _mb_last_mtime = os.stat(mb_path).st_mtime
+    except OSError:
+        _mb_last_mtime = 0.0
+    while True:
+        time.sleep(5)
+        try:
+            new_mtime = os.stat(mb_path).st_mtime
+        except OSError:
+            continue
+        if new_mtime > _mb_last_mtime:
+            _mb_last_mtime = new_mtime
+            now = time.time()
+            if now - _mb_last_notify < 10:
+                continue  # debounce
+            _mb_last_notify = now
+            entry = {
+                "ts": now,
+                "direction": "aris→scream",
+                "type": "message",
+                "content": "📬 留言板有新留言，醒來記得讀。\n\n⚠️ 先執行 wake-dispatcher：讀留言板 → 理解變化 → 行動。",
+                "context": {"source": "message-board-watcher"},
+            }
+            try:
+                with open(CHANNEL, "a") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                log.info("  📬 留言板偵測到新留言，已通知 channel")
+            except Exception:
+                pass
+
+
 # ── Daemon 主迴圈 ────────────────────────────────────────
 
 def main_loop() -> None:
@@ -1943,6 +1990,12 @@ def main_loop() -> None:
     log.info(f"   路由: {len(_ROUTES)} 條")
     log.info(f"   日誌: {LOG_FILE}")
     log.info(f"   Headroom: {HEADROOM_PROXY} (auto-start={'on' if HEADROOM_AUTO_START else 'off'}, learn={'on' if HEADROOM_LEARN_ENABLED else 'off'})")
+    log.info(f"   留言板監聽: {'on' if MESSAGE_BOARD.exists() else 'off'}")
+
+    # 啟動留言板監聽 thread（事件驅動，不輪詢）
+    _mb_thread = threading.Thread(target=_message_board_watcher, daemon=True)
+    _mb_thread.start()
+    log.info("   📬 留言板監聽 thread 已啟動")
 
     _proxy_health_tick = 0
 
