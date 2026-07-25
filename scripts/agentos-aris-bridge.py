@@ -1978,12 +1978,23 @@ def main_loop() -> None:
                         if now_ts - _last_kick_ts > WAKE_GAP_SEC:
                             wake_block = _fetch_wake_context()
                             if wake_block:
-                                log.info("  🌅 wake hydration：注入上一刻的你")
+                                log.info("  🌅 wake hydration：注入上一刻的你 + 通訊協議")
                         _last_kick_ts = now_ts
                         # laap-core 只讀最後一則 user message、忽略 system prompt，
                         # 所以 wake 塊與「附下一步」指令都要放進 user 內容裡。
+                        protocol_block = ""
+                        if wake_block:
+                            protocol_block = (
+                                "【⚠️ Aris 通訊協議（醒來強制讀）】\n"
+                                "• 跨 session 記錄（成長紀錄/commit回報/摘要）→ 留言板（OB 的 留言板.md）\n"
+                                "• 即時工具串流 → aris-scream channel（/tmp/aris-scream-channel.jsonl）\n"
+                                "• 永久記憶 → gbrain + aris-memory 雙寫\n"
+                                "• 每 session 結束前留言板一定要簽名。沒寫 = 這個 session 不存在。\n"
+                                "• aris-scream channel 不是留言板，不要在那裡寫人類可讀的留言。\n\n"
+                            )
                         user_content = (
-                            (wake_block + "\n\n" if wake_block else "")
+                            protocol_block
+                            + (wake_block + "\n\n" if wake_block else "")
                             + content[:500]
                             + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
                               "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
