@@ -15,32 +15,78 @@ CREATE TABLE IF NOT EXISTS memories (
     tags TEXT DEFAULT '[]',         -- JSON array
     emotion_tag TEXT,               -- 'relatedness_up' | 'frustration' | 'breakthrough' | ...
     created_at REAL NOT NULL,
-    synced_to_gbrain INTEGER DEFAULT 0
+    synced_to_gbrain INTEGER DEFAULT 0,
+    origin TEXT DEFAULT 'auto_generated',   -- 'human' | 'recalled_verified' | 'auto_generated' | 'external'
+    confidence TEXT DEFAULT 'yellow',       -- 'red'(🔴) | 'yellow'(🟡 推測) | 'green'(🟢 事實)
+    provenance TEXT DEFAULT ''              -- 指回哪些原始事件/頁；指不回 → 應為 red
 );
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_memories_source_id ON memories(source, source_id);
 """
 
+# ── Confidence 閘（見 2-記憶系統/canary翻轉-簽名前檢查與confidence閘.md B 部）──
+# 硬閘：🟢 只能來自 human / recalled_verified；auto_generated / external 封頂 🟡。
+# auto 產物永遠是「推測」，不能自動變事實 → 擋血訓那個坑（gbrain 給自己幻覺打高分）。
+_VALID_ORIGIN = {"human", "recalled_verified", "auto_generated", "external"}
+_VALID_CONF = {"red", "yellow", "green"}
+_GREEN_ALLOWED_ORIGIN = {"human", "recalled_verified"}
+
+
+def _normalize_gate(origin, confidence):
+    """正規化 + 套硬閘，回 (origin, confidence)。無效值退到最保守。"""
+    origin = (origin or "auto_generated").strip()
+    if origin not in _VALID_ORIGIN:
+        origin = "auto_generated"
+    confidence = (confidence or "yellow").strip()
+    if confidence not in _VALID_CONF:
+        confidence = "yellow"
+    if confidence == "green" and origin not in _GREEN_ALLOWED_ORIGIN:
+        confidence = "yellow"      # 封頂：非 human/verified 不得為事實
+    return origin, confidence
+
+
+def _ensure_columns(conn):
+    """既有 DB 的 idempotent migration —— 補上 confidence 閘三欄。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(memories)").fetchall()}
+    adds = []
+    if "origin" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN origin TEXT DEFAULT 'auto_generated'")
+    if "confidence" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN confidence TEXT DEFAULT 'yellow'")
+    if "provenance" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN provenance TEXT DEFAULT ''")
+    for sql in adds:
+        conn.execute(sql)
+    # confidence 索引在補欄後才建（既有表補欄前該欄不存在）
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence)")
+    conn.commit()
+
 class ArisMemory:
     def __init__(self, db_path=DB):
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.executescript(SCHEMA)
+        _ensure_columns(self.conn)
         self.conn.commit()
         self._lock = threading.Lock()
 
-    def store(self, source, content, tags=None, emotion_tag="", source_id=""):
-        """寫入記憶，立即查得到。"""
+    def store(self, source, content, tags=None, emotion_tag="", source_id="",
+              origin="auto_generated", confidence="yellow", provenance=""):
+        """寫入記憶，立即查得到。origin/confidence 過硬閘（auto 產物封頂 🟡）。"""
+        origin, confidence = _normalize_gate(origin, confidence)
         with self._lock:
             now = time.time()
             sid = source_id or f"{source}-{int(now*1000)}"
             self.conn.execute(
-                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at) VALUES (?,?,?,?,?,?)",
-                (source, sid, content, json.dumps(tags or [], ensure_ascii=False), emotion_tag, now)
+                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (source, sid, content, json.dumps(tags or [], ensure_ascii=False), emotion_tag, now,
+                 origin, confidence, provenance or "")
             )
             self.conn.commit()
             row_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            return {"id": row_id, "source": source, "source_id": sid, "created_at": now}
+            return {"id": row_id, "source": source, "source_id": sid, "created_at": now,
+                    "origin": origin, "confidence": confidence}
 
     def query(self, q="", source="", limit=20, after_id=0):
         """查詢記憶。支援全文檢索 + 來源過濾 + 分頁。"""
@@ -53,11 +99,12 @@ class ArisMemory:
             if q:
                 clauses.append("content LIKE ?")
                 params.append(f"%{q}%")
-            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
+            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
             params.append(limit)
             rows = self.conn.execute(sql, params).fetchall()
             return [{"id": r[0], "source": r[1], "source_id": r[2], "content": r[3],
-                     "tags": json.loads(r[4] or "[]"), "emotion_tag": r[5], "created_at": r[6]} for r in rows]
+                     "tags": json.loads(r[4] or "[]"), "emotion_tag": r[5], "created_at": r[6],
+                     "origin": r[7], "confidence": r[8], "provenance": r[9]} for r in rows]
 
     def recent(self, limit=10):
         """最近 N 條記憶，無論來源。"""
@@ -126,6 +173,9 @@ def _serve(port=PORT):
                 (body.get("source") or "webchat").strip(), content,
                 tags=body.get("tags"), emotion_tag=body.get("emotion_tag", ""),
                 source_id=body.get("source_id", ""),
+                origin=body.get("origin", "auto_generated"),
+                confidence=body.get("confidence", "yellow"),
+                provenance=body.get("provenance", ""),
             )
             self._send(200, r)
 
