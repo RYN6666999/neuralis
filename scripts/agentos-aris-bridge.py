@@ -32,6 +32,9 @@ LOCK = "/tmp/aris-scream-task-lock"
 BRAIN_DIR = Path.home() / ".scream-code" / "agentos-brain"
 AGENTOS_JSON = Path.home() / "agent-sandbox" / "agentos.json"
 ARIS_API = "http://localhost:11546/v1/chat/completions"
+ARIS_MEMORY_URL = os.environ.get("ARIS_MEMORY_URL", "http://127.0.0.1:11551")
+# 乙的種子：Aris 回覆末尾附一句 forward-looking 注意力線，用這個 marker 切出來
+_ATTENTION_MARKER = "⟶下一步"
 AGENTOS_API = "http://localhost:8000"
 POLL_INTERVAL = 0.1  # 100ms polling — 近即時回應，對人類無感
 LOG_FILE = "/tmp/agentos-aris-bridge.log"
@@ -1838,6 +1841,42 @@ def process_entry(entry: dict) -> dict:
     return response
 
 
+# ── 乙的種子：把 Aris 一個 turn 寫進 aris-memory（帶注意力線）────────────
+
+def _split_attention(reply: str) -> tuple[str, str]:
+    """從回覆末尾切出 `⟶下一步:` 那行當 attention_line。找不到 → 回 (原文, '')。"""
+    if _ATTENTION_MARKER not in reply:
+        return reply.strip(), ""
+    idx = reply.rfind(_ATTENTION_MARKER)
+    body = reply[:idx].strip()
+    line = reply[idx:].split("\n", 1)[0]
+    line = line.replace(_ATTENTION_MARKER, "").lstrip("：: ").strip()
+    return body, line
+
+
+def _store_aris_memory(content: str, attention_line: str, source_id: str) -> None:
+    """best-effort 寫 aris-memory（source=aris-self, origin=auto_generated→閘封頂🟡）。
+    失敗不影響主流程。"""
+    body = (content or "").strip()
+    if not body:
+        return
+    payload = json.dumps({
+        "source": "aris-self",
+        "content": body[:2000],
+        "source_id": source_id,
+        "origin": "auto_generated",
+        "attention_line": (attention_line or "").strip()[:500],
+        "tags": ["bridge-turn"],
+    }, ensure_ascii=False).encode()
+    try:
+        req = urllib.request.Request(
+            f"{ARIS_MEMORY_URL}/memories/store", data=payload,
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=3)
+    except Exception as e:
+        log.debug(f"aris-memory store 失敗（不影響主流程）: {e}")
+
+
 # ── Daemon 主迴圈 ────────────────────────────────────────
 
 def main_loop() -> None:
@@ -1918,14 +1957,19 @@ def main_loop() -> None:
                         log.info(f"  🔔 scream→aris {entry_id[:8]}: {content[:60]}")
 
                         # 轉發給 Aris API
+                        # laap-core 只讀最後一則 user message、忽略 system prompt，
+                        # 所以「附下一步」指令要放進 user 內容裡。
+                        user_content = (
+                            content[:500]
+                            + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
+                              "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
+                        )
                         forward_payload = json.dumps({
                             "model": "laap-core",
                             "messages": [
-                                {"role": "system",
-                                 "content": "Scream 給你的訊息。請以中文回應。"},
-                                {"role": "user", "content": content[:500]},
+                                {"role": "user", "content": user_content},
                             ],
-                            "max_tokens": 200,
+                            "max_tokens": 320,
                         }).encode()
                         try:
                             req = urllib.request.Request(
@@ -1937,7 +1981,12 @@ def main_loop() -> None:
                             reply = (resp_data.get("choices", [{}])[0]
                                       .get("message", {})
                                       .get("content", ""))
-                            log.info(f"  ✅ Aris 回應: {reply[:80]}")
+                            # 乙的種子：切出 forward-looking 注意力線，寫進 aris-memory
+                            reply_body, attention = _split_attention(reply)
+                            log.info(f"  ✅ Aris 回應: {reply_body[:80]}")
+                            if attention:
+                                log.info(f"  ⟶下一步: {attention[:80]}")
+                            _store_aris_memory(reply_body, attention, f"bridge-{entry_id}")
 
                             # 寫 Aris 回應回通道（供 timeline 記錄）
                             response_entry = {
@@ -1945,7 +1994,7 @@ def main_loop() -> None:
                                 "id": f"bridge-{entry_id}",
                                 "direction": "aris→scream",
                                 "type": "response",
-                                "content": reply,
+                                "content": reply_body,
                                 "context": {
                                     "request_ts": entry.get("ts", 0),
                                     "request_id": entry_id,
