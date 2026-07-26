@@ -89,10 +89,12 @@ def _remember(event_id, user_text, reply, attention, salience):
         if user_text.strip():
             amc.store(user_text, source="webchat", source_id=f"relay-{event_id}-u",
                       tags=["webchat"], second_opinion=False)
-        mid = amc.store(reply, source="aris-self", source_id=f"relay-{event_id}-a",
-                        attention_line=attention, salience=salience, tags=["webchat"])
-        if mid:
-            amc.recall_hit(mid)
+        amc.store(reply, source="aris-self", source_id=f"relay-{event_id}-a",
+                  attention_line=attention, salience=salience, tags=["webchat"])
+        # 不在這裡 call recall_hit —— 寫入 ≠ recall。寫入端自賺分違反
+        # 「discovered_salience 只能由真 recall 賺」的契約（topology
+        # edge recall_not_selfinflated）。真正的 recall 發生在 /wake 把這筆
+        # 撈進暖啟動塊時，由 aris-memory 端記分。
     except Exception as e:
         print(f"[relay] aris-memory 寫入失敗（不影響回覆）: {e}")
 
