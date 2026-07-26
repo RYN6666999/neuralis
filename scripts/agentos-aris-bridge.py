@@ -1889,9 +1889,43 @@ def _parse_salience(reply: str) -> dict:
         return {}
 
 
+def _hest_screams_salience(content: str) -> int:
+    """Phase 2 v0 heuristic: Scream 側的快速 salience 評估（第二意見）。
+    不收即時 LLM 成本，純 heuristic。做兩件事：
+    1. 關鍵字 + 長度估分。
+    2. 回 1-5 整數，跟 Aris 自評比對。
+    收不到不報錯、不擋主流程。完全 best-effort。"""
+    text = (content or "").strip()
+    if not text:
+        return 0
+    length = len(text)
+    high_markers = ["重要", "關鍵", "核心", "痛點", "根本", "啟動", "上線", "拍板",
+                    "突破", "milestone", "認知", "架構", "改革", "啟動",
+                    "記住", "記起來", "覺察", "情感", "情緒"]
+    low_markers = ["沒差", "無所謂", "隨便", "小事", "例行", "普通"]
+    base = 3  # 中性
+    # 長度加分（長回應通常更投入）
+    if length > 800:
+        base += 1
+    if length > 1500:
+        base += 1
+    # 高顯著性關鍵字
+    for m in high_markers:
+        if m in text:
+            base += 1
+            break
+    # 低顯著性關鍵字
+    for m in low_markers:
+        if m in text:
+            base -= 1
+            break
+    return max(1, min(5, base))
+
+
 def _store_aris_memory(content: str, attention_line: str, source_id: str) -> None:
     """best-effort 寫 aris-memory（source=aris-self, origin=auto_generated→閘封頂🟡）。
-    Phase 1 加：從 content 中 parse salience 自評傳給 aris-memory。失敗不影響主流程。"""
+    Phase 1: parse salience 自評傳給 aris-memory。
+    Phase 2: 第二意見比對 + 分歧標記；寫入後自動 call recall_hit。"""
     body = (content or "").strip()
     if not body:
         return
@@ -1909,12 +1943,30 @@ def _store_aris_memory(content: str, attention_line: str, source_id: str) -> Non
         payload["encoding_salience"] = salience["encoding_salience"]
     if salience.get("serves_needs"):
         payload["serves_needs"] = salience["serves_needs"]
+    # Phase 2: 第二意見—Scream heuristic 評估
+    aris_es = salience.get("encoding_salience", 0)
+    scream_es = _hest_screams_salience(content)
+    if aris_es and scream_es and abs(aris_es - scream_es) > 2:
+        payload["flagged"] = 1
+        log.info(f"  ⚠️ salience 分歧 |Aris={aris_es} ↔ Scream={scream_es}| >2 → flagged")
     encoded = json.dumps(payload, ensure_ascii=False).encode()
     try:
         req = urllib.request.Request(
             f"{ARIS_MEMORY_URL}/memories/store", data=encoded,
             headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=3)
+        resp = urllib.request.urlopen(req, timeout=3)
+        stored = json.loads(resp.read().decode())
+        # Phase 2: 儲存成功後自動 call recall_hit（累積 discovered_salience）
+        mem_id = stored.get("id")
+        if mem_id and "... 等一下，我先" not in body:
+            try:
+                hit = urllib.request.Request(
+                    f"{ARIS_MEMORY_URL}/memories/recall_hit",
+                    data=json.dumps({"id": mem_id}).encode(),
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(hit, timeout=2)
+            except Exception:
+                pass  # recall_hit best-effort
     except Exception as e:
         log.debug(f"aris-memory store 失敗（不影響主流程）: {e}")
 
@@ -1976,10 +2028,15 @@ def _message_board_watcher() -> None:
             except Exception:
                 pass  # best-effort，讀不到就正常通知
             _mb_last_notify = now
+            # direction/type 必須落在主迴圈分支 B（scream→aris + kick），
+            # 且一定要帶 id——沒 id 會在 `if not entry_id` 被直接 skip。
+            # 舊版寫 aris→scream/message 且無 id = 三重死路，通知從沒被讀過，
+            # 連帶 _store_aris_memory 從未執行（DB 空的根因）。
             entry = {
                 "ts": now,
-                "direction": "aris→scream",
-                "type": "message",
+                "id": f"mb-{int(now * 1000):x}",
+                "direction": "scream→aris",
+                "type": "kick",
                 "content": "📬 留言板有新留言，醒來記得讀。\n\n⚠️ 先執行 wake-dispatcher：讀留言板 → 理解變化 → 行動。",
                 "context": {"source": "message-board-watcher"},
             }
