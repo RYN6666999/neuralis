@@ -3,6 +3,7 @@
 envelope + idempotency + 狀態機 + 收訊/推理拆分。
 """
 import json, os, uuid, time, hashlib, sqlite3, threading, queue as q
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -18,6 +19,7 @@ PORT = int(os.environ.get("PORT", "11550"))
 # 因此從來沒進過記憶 —— 只有留言板 kick 那條路有。這裡補上。
 # 寫入規則跟 bridge 共用 aris_memory_client，避免兩邊的 marker 規則漂移。
 MEMORY_ON = os.environ.get("ARIS_RELAY_MEMORY", "on").lower() not in ("off", "0", "false")
+SENTINEL_DIR = "/tmp/aris-sentinels"
 try:
     import aris_memory_client as amc
 except Exception:                      # 進不來就降級成原本行為，不擋 relay 啟動
@@ -97,6 +99,9 @@ def _remember(event_id, user_text, reply, attention, salience):
         # 撈進暖啟動塊時，由 aris-memory 端記分。
     except Exception as e:
         print(f"[relay] aris-memory 寫入失敗（不影響回覆）: {e}")
+        # 機械化靜默失敗偵測：touch 哨兵檔
+        os.makedirs(SENTINEL_DIR, exist_ok=True)
+        Path(os.path.join(SENTINEL_DIR, f"relay-memory-{int(time.time())}")).touch()
 
 
 # ── 處理佇列 ──

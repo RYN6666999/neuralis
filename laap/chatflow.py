@@ -191,7 +191,7 @@ _ONTOLOGY_SLUG = "aris-memory-ontology"
 _BOARD_PATH = os.path.expanduser(
     "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md")
 _BOOTSTRAP_TTL = 300.0        # 同 process 內快取，避免每次 session-start 重讀
-_BOOTSTRAP_MIN_GAP = 1800.0   # 兩次注入最小間隔（web 是無狀態通道，防每則訊息重打）
+_BOOTSTRAP_MIN_GAP = 120.0    # 兩次注入最小間隔（web 是無狀態通道，防每則訊息重打；壓低讓 probe 可測）
 _bootstrap_cache: dict = {"ts": 0.0, "lines": []}
 _last_bootstrap_ts: float = 0.0
 
@@ -221,6 +221,16 @@ def _session_bootstrap_memories() -> list:
         last = " ".join(blocks[-1].split()) if blocks else ""
         if len(last) > 12:
             lines.append(f"上次醒著時（留言板）：{last[:180]}")
+    except Exception:
+        pass
+    # 乙的種子：從 aris-memory 拿『上一刻的你』注意力線
+    try:
+        import urllib.request, json
+        req = urllib.request.Request("http://127.0.0.1:11551/wake?limit=5")
+        resp = urllib.request.urlopen(req, timeout=3)
+        wake = json.loads(resp.read().decode()).get("context") or ""
+        if wake.strip():
+            lines.append(f"【上一刻的你（注意力線索）】{wake[:300]}")
     except Exception:
         pass
     _bootstrap_cache["ts"] = now
@@ -333,6 +343,11 @@ def _compose_psi_reply(st: dict, delta: dict, memories: list[str] = None) -> str
 def _psi_respond(fed, user_msg: str, memories: list[str] = None,
                  history: list = None) -> str:
     """PsiCore 回應生成：LLM 優先 → delta 模板（含記憶聯想）→ psi_response 通用模板。"""
+    # 乙的種子：培植注意力線習慣。每則 user_msg 都附 marker 指令。
+    marker = ("\n\n（回覆結束時另起一行以 ⟶下一步: 開頭，"
+              "寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+    if marker not in user_msg:
+        user_msg = user_msg + marker
     try:
         use_psi = os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
         if use_psi in ("off", "0", "false"):
@@ -466,6 +481,15 @@ def _make_chat_handler(orig_handler):
         # RACE：誰先出可用內容就用誰，取消慢的那路。
         model = body.get("model", "laap-core")
         messages = body.get("messages", [])
+        # 乙的種子：培植注意力線習慣——每則 user message 都附 marker 指令
+        if messages:
+            marker = ("\n\n（回覆結束時另起一行以 ⟶下一步: 開頭，"
+                      "寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user" and marker not in messages[i].get("content", ""):
+                    messages[i] = {**messages[i],
+                                   "content": messages[i].get("content", "") + marker}
+                    break
         prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
 
         loop = asyncio.get_event_loop()
@@ -485,8 +509,35 @@ def _make_chat_handler(orig_handler):
                 loop.run_in_executor(None, api.process_with_laap, messages, model),
                 timeout=_CHAT_TIMEOUT_S)
 
-        # 同時啟動 A、B，收集記憶
-        llm_task = loop.run_in_executor(None, _llm_respond_path) if fed else None
+        # 乙的種子：在任務啟動前收集記憶，注入最後一則 user message
+        boot_lines = _maybe_session_bootstrap(messages, user_turn, user_msg)
+        if boot_lines and messages:
+            last_user = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    last_user = i
+                    break
+            if last_user is not None:
+                prefix = "\n\n".join(boot_lines)
+                old = messages[last_user].get("content", "")
+                messages[last_user] = {**messages[last_user], "content": f"{prefix}\n\n{old}"}
+
+        # 培植：每次對話都在尾巴附 marker 指令，讓 Aris 習慣產出注意力線
+        if messages:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    marker = ("\n\n（回覆結束時另起一行以 ⟶下一步: 開頭，"
+                              "寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+                    messages[i] = {**messages[i],
+                                   "content": messages[i].get("content", "") + marker}
+                    break
+
+        # 任何使用者對話走 Path B（laap-core 完整管線），跳過 Path A 模板
+        # Path A 不讀 messages，注意力線會遺失
+        if user_turn:
+            llm_task = None
+        else:
+            llm_task = loop.run_in_executor(None, _llm_respond_path) if fed else None
         author_task = asyncio.create_task(_author_path())
 
         done, pending = await asyncio.wait(
@@ -497,7 +548,7 @@ def _make_chat_handler(orig_handler):
         engine = None
 
         # 收集記憶（平行記憶最慢，但我們不 blocking 等它）
-        memories = (_maybe_session_bootstrap(messages, user_turn, user_msg)
+        memories = (boot_lines
                     + _collect_memories(mem_task) + _take_pending_memories())
         if mem_task and not mem_task.done():
             mem_task.add_done_callback(_stash_late_memories)
@@ -518,9 +569,7 @@ def _make_chat_handler(orig_handler):
                 result = author_task.result()
                 auth_content = result.get("content", "")
                 auth_engine = result.get("engine", "laap-core")
-                # 非 fallback 才用；fallback 則進入下面最後手段
-                if not (auth_engine == "laap-fallback"
-                        or (auth_engine.startswith("rules:") and re.match(r'^\[.*\]', auth_content.strip()))):
+                if auth_content:
                     content = auth_content
                     engine = auth_engine
             except asyncio.TimeoutError:
@@ -902,7 +951,17 @@ async def _stream_live(request, web, fed, user_msg: str, messages: list, model: 
         logger.debug(f"[chatflow] respond_stream 不可用: {e}")
         return None
 
-    memories = (_maybe_session_bootstrap(messages, True, user_msg)
+    # 乙的種子：注入記憶（含注意力線）到最後一則 user message
+    boot_lines = _maybe_session_bootstrap(messages, True, user_msg)
+    # 注：若已在 respond() RACE 路注入過，這裡 _BOOTSTRAP_MIN_GAP=120 會擋掉第二次
+    if boot_lines and messages:
+        for i in range(len(messages)-1, -1, -1):
+            if messages[i].get("role") == "user":
+                prefix = "\n\n".join(boot_lines)
+                old = messages[i].get("content", "")
+                messages[i] = {**messages[i], "content": f"{prefix}\n\n{old}"}
+                break
+    memories = (boot_lines
                 + _take_pending_memories())   # 新 session 開機脈絡 + 上一輪遲到召回
     hist = [m for m in messages if m.get("role") in ("user", "assistant")][:-1]
     import threading
