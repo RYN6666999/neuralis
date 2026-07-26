@@ -1894,7 +1894,7 @@ def _parse_salience(reply: str) -> dict:
         except (json.JSONDecodeError, ValueError, TypeError):
             return {}
     # 試 v2 中文格式
-    result = {"encoding_salience": 0, "serves_needs": [], "emotion_label": ""}
+    result = {"encoding_salience": 0, "serves_needs": [], "emotion_label": "", "mood_note": ""}
     parts = [p.strip() for p in raw.split("|")]
     for part in parts:
         if part.startswith("重要:") or part.startswith("重要："):
@@ -1908,7 +1908,6 @@ def _parse_salience(reply: str) -> dict:
             try:
                 nums = []
                 for token in part[3:].strip().split():
-                    # 提取每個 token 中的數字（如「勝任0.8」→ 0.8）
                     import re as _re
                     m = _re.search(r'[\d.]+', token)
                     if m:
@@ -1918,7 +1917,9 @@ def _parse_salience(reply: str) -> dict:
                     result["serves_needs"] = nums
             except (ValueError, TypeError):
                 pass
-    if result["encoding_salience"] or result["emotion_label"]:
+        elif part.startswith("內心:") or part.startswith("內心："):
+            result["mood_note"] = part.split(":", 1)[-1].split("：", 1)[-1].strip()[:500]
+    if result["encoding_salience"] or result["emotion_label"] or result["mood_note"]:
         return result
     return {}
 
@@ -1987,6 +1988,9 @@ def _store_aris_memory(content: str, attention_line: str, source_id: str) -> Non
     # v2: 情緒標籤
     if salience.get("emotion_label"):
         payload["emotion_tag"] = salience["emotion_label"]
+    # v2: 內心戳記
+    if salience.get("mood_note"):
+        payload["mood_note"] = salience["mood_note"]
     # Phase 2: 第二意見—Scream heuristic 評估
     aris_es = salience.get("encoding_salience", 0)
     scream_es = _hest_screams_salience(content)
@@ -2206,8 +2210,8 @@ def main_loop() -> None:
                             + (wake_block + "\n\n" if wake_block else "")
                             + content[:500]
                             + "\n\n（salience 標記：回應結束時，另起一行以 ⫸salience⫷ 開頭，"
-                              "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | sn:勝任0.x 自主0.x 連結0.x 確定0.x 成長0.x\n"
-                              "例：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9\n"
+                              "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | sn:勝任0.x 自主0.x 連結0.x 確定0.x 成長0.x | 內心:自由描述此刻感受\n"
+                              "例：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9 | 內心:覺得這條管線終於通了，像學走路突然站起來的踏實感\n"
                               "純自評不影響行為，收不到完全沒關係。）"
                             + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
                               "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"

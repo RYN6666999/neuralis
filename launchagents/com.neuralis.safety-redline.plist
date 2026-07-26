@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.neuralis.safety-redline</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>source ~/.zshrc 2>/dev/null; export SAFETY_REDLINE_STATUS_PATH="/tmp/neuralis-safety-redlines-status.json"; exec python3 "/Users/ryan/Developer/neuralis/scripts/safety-redline-alerts.py" &gt;&gt; "/Users/ryan/Developer/neuralis/safety-redline.log" 2&gt;&amp;1</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>StandardOutPath</key><string>/Users/ryan/Developer/neuralis/safety-redline.log</string>
+  <key>StandardErrPath</key><string>/Users/ryan/Developer/neuralis/safety-redline.log</string>
+</dict>
+</plist>

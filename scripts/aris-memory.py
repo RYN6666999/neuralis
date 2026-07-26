@@ -143,6 +143,8 @@ def _ensure_columns(conn):
         adds.append("ALTER TABLE memories ADD COLUMN last_recalled_at REAL DEFAULT 0")
     if "flagged" not in cols:
         adds.append("ALTER TABLE memories ADD COLUMN flagged INTEGER DEFAULT 0")
+    if "mood_note" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN mood_note TEXT DEFAULT ''")
     for sql in adds:
         conn.execute(sql)
     # confidence 索引在補欄後才建（既有表補欄前該欄不存在）
@@ -160,11 +162,13 @@ class ArisMemory:
     def store(self, source, content, tags=None, emotion_tag="", source_id="",
               origin="auto_generated", confidence="yellow", provenance="", attention_line="",
               encoding_salience=0, serves_needs=None, psi_state=None,
-              discovered_salience=0.0, total_recalls=0, last_recalled_at=0, flagged=0):
+              discovered_salience=0.0, total_recalls=0, last_recalled_at=0, flagged=0,
+              mood_note=""):
         """寫入記憶，立即查得到。origin/confidence 過硬閘（auto 產物封頂 🟡）。
         attention_line：乙的種子，forward-looking「下一步要做什麼/懸著的問題」。
         encoding_salience/serves_needs/psi_state：Phase 1 salience 閘 — 只收集不改行為。
-        discovered_salience/total_recalls/flagged：Phase 2 — recall 追蹤 + 第二意見分歧。"""
+        discovered_salience/total_recalls/flagged：Phase 2 — recall 追蹤 + 第二意見分歧。
+        mood_note：Aris 的自由內心戳記（v2 中文格式）。"""
         origin, confidence = _normalize_gate(origin, confidence)
         with self._lock:
             now = time.time()
@@ -176,19 +180,21 @@ class ArisMemory:
             tr = max(0, int(total_recalls or 0))
             lr = float(last_recalled_at or now)
             fl = 1 if flagged else 0
+            mn = (mood_note or "").strip()[:500]
             self.conn.execute(
-                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged, mood_note) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (source, sid, content, json.dumps(tags or [], ensure_ascii=False), emotion_tag, now,
                  origin, confidence, provenance or "", attention_line or "",
-                 sal, sv, ps, ds, tr, lr, fl)
+                 sal, sv, ps, ds, tr, lr, fl, mn)
             )
             self.conn.commit()
             row_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             return {"id": row_id, "source": source, "source_id": sid, "created_at": now,
                     "origin": origin, "confidence": confidence,
                     "encoding_salience": sal, "serves_needs": sv, "psi_state": ps,
-                    "discovered_salience": ds, "total_recalls": tr, "flagged": fl}
+                    "discovered_salience": ds, "total_recalls": tr, "flagged": fl,
+                    "mood_note": mn}
 
     def recall_hit(self, mem_id):
         """Phase 2: 被 query 命中 + 實際被用到 → discovered_salience += 0.1 (cap 1.0), total_recalls += 1。
@@ -221,7 +227,7 @@ class ArisMemory:
             if q:
                 clauses.append("content LIKE ?")
                 params.append(f"%{q}%")
-            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
+            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged, mood_note FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
             params.append(limit)
             rows = self.conn.execute(sql, params).fetchall()
             return [{"id": r[0], "source": r[1], "source_id": r[2], "content": r[3],
@@ -230,7 +236,8 @@ class ArisMemory:
                      "encoding_salience": r[11], "serves_needs": json.loads(r[12] or "[]"),
                      "psi_state": json.loads(r[13] or "{}"),
                      "discovered_salience": r[14] or 0.0, "total_recalls": r[15] or 0,
-                     "last_recalled_at": r[16] or 0, "flagged": r[17] or 0} for r in rows]
+                     "last_recalled_at": r[16] or 0, "flagged": r[17] or 0,
+                     "mood_note": r[18] or ""} for r in rows]
 
     def recent(self, limit=10):
         """最近 N 條記憶，無論來源。"""
@@ -387,6 +394,7 @@ def _serve(port=PORT):
                 encoding_salience=body.get("encoding_salience", 0),
                 serves_needs=body.get("serves_needs"),
                 psi_state=body.get("psi_state"),
+                mood_note=body.get("mood_note", ""),
             )
             self._send(200, r)
 

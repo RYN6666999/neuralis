@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.neuralis.task-executor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>source ~/.zshrc 2>/dev/null; cd /Users/ryan/Developer/neuralis &amp;&amp; SCORING_ROUTER_ENABLED=1 SCORING_YOLO_MODE=0 PYTHONPATH=.:../laap-AGI exec /Users/ryan/Developer/laapenv/bin/python scripts/agentos-aris-bridge.py</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/tmp/com.neuralis.task-executor.log</string>
+  <key>StandardErrorPath</key><string>/tmp/com.neuralis.task-executor.log</string>
+</dict>
+</plist>
