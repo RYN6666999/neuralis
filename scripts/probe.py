@@ -107,10 +107,34 @@ def aris_to_memory():
 
 
 def webchat_to_memory():
-    """relay 那條。現在必紅 —— 它是待辦，不是回歸。"""
-    src = (ROOT / "scripts/aris-relay.py").read_text()
-    ok = "memories/store" in src
-    return ok, "relay 有寫入" if ok else "relay 無 memories/store（待辦，非回歸）"
+    """真的打一輪 webchat，看記憶多兩筆（使用者 + Aris），且回覆沒殘留標記。
+
+    relay 的 idempotency_key = md5(conv:text)，所以 text 每次要不一樣，
+    否則第二次會被 dedup 擋掉、看起來像斷線。
+    """
+    before = _rows()
+    payload = json.dumps({"text": f"probe webchat 連通測試 {int(time.time())}，回一個字即可。",
+                          "conv": "probe", "uid": "probe"}).encode()
+    try:
+        r = json.loads(urllib.request.urlopen(urllib.request.Request(
+            "http://127.0.0.1:11550/c", data=payload,
+            headers={"Content-Type": "application/json"}), timeout=90).read())
+    except Exception as e:
+        return False, f"POST 11550 失敗: {e}"
+    if r.get("dedup"):
+        return False, "被 idempotency 擋掉（probe text 撞號）"
+    if not _wait(lambda: _rows() >= before + 2, 90):
+        return False, f"90s 內沒多兩筆（{before}→{_rows()}）"
+    db = sqlite3.connect(f"file:{MEM_DB}?mode=ro", uri=True)
+    got = {s for (s,) in db.execute(
+        "SELECT source FROM memories ORDER BY id DESC LIMIT 2")}
+    last = db.execute("SELECT content FROM memories WHERE source='aris-self' "
+                      "ORDER BY id DESC LIMIT 1").fetchone()
+    if "⫸salience⫷" in ((last or [""])[0] or ""):
+        return False, "回覆殘留 salience 標記（webchat 使用者會看到裸 JSON）"
+    if got != {"webchat", "aris-self"}:
+        return False, f"source 不對: {sorted(got)}（應為 webchat + aris-self）"
+    return True, f"rows {before}→{_rows()}，雙筆 source 正確"
 
 
 def memos_to_gbrain():

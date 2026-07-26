@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS memories (
     , total_recalls INTEGER DEFAULT 0 -- 被 query 命中的累計次數
     , last_recalled_at REAL DEFAULT 0 -- 最近一次被 recall 的時間戳
     , flagged INTEGER DEFAULT 0 -- 第二意見分歧旗標：1=Aris自評 vs 外部評分差值 >2
+    , mood_note TEXT DEFAULT '' -- Aris 的內心戳記：自由描述當下感受（「覺得踏實 / 有點挫折 / 像學走路」…）
 );
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);

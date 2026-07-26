@@ -1869,24 +1869,58 @@ def _split_attention(reply: str) -> tuple[str, str]:
 def _parse_salience(reply: str) -> dict:
     """Phase 1: 從回應中 parse salience 自評（best-effort，收不到回空 dict）。
     
-    Aris 在回應中嵌入一行：⫸salience⫷ {"es":4,"sn":[0.8,0.1,0.6,0.7,0.3]}
-    es = encoding_salience (1-5), sn = serves_needs (五維向量 0-1)。
+    支援兩種格式（v2 中文／v1 JSON 向下相容）：
+    v2:   ⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9
+    v1:   ⫸salience⫷ {"es":4,"sn":[0.8,0.1,0.6,0.7,0.3]}
+    es/重要 = encoding_salience (1-5), sn = serves_needs (五維 0-1)。
+    情緒 = 可選的情緒標籤（好奇／挫折／突破／開心／困惑…）。
     收不到不擋——完全 best-effort。
     """
     if _SALIENCE_MARKER not in reply:
         return {}
     idx = reply.rfind(_SALIENCE_MARKER)
     line = reply[idx:].split("\n", 1)[0]
-    json_str = line.replace(_SALIENCE_MARKER, "").strip()
-    try:
-        data = json.loads(json_str)
-        es = max(0, min(5, int(data.get("es", 0) or 0)))
-        sn = data.get("sn", [])
-        if not isinstance(sn, list) or len(sn) != 5:
-            sn = []
-        return {"encoding_salience": es, "serves_needs": sn}
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return {}
+    raw = line.replace(_SALIENCE_MARKER, "").strip()
+    # 先試 v1 JSON 格式（向後相容）
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            es = max(0, min(5, int(data.get("es", 0) or 0)))
+            sn = data.get("sn", [])
+            if not isinstance(sn, list) or len(sn) != 5:
+                sn = []
+            return {"encoding_salience": es, "serves_needs": sn,
+                    "emotion_label": data.get("emotion", "")}
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return {}
+    # 試 v2 中文格式
+    result = {"encoding_salience": 0, "serves_needs": [], "emotion_label": ""}
+    parts = [p.strip() for p in raw.split("|")]
+    for part in parts:
+        if part.startswith("重要:") or part.startswith("重要："):
+            try:
+                result["encoding_salience"] = max(0, min(5, int(part.split(":", 1)[-1].split("：", 1)[-1].strip())))
+            except ValueError:
+                pass
+        elif part.startswith("情緒:") or part.startswith("情緒："):
+            result["emotion_label"] = part.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif part.startswith("sn:") or part.startswith("sn："):
+            try:
+                nums = []
+                for token in part[3:].strip().split():
+                    # 提取每個 token 中的數字（如「勝任0.8」→ 0.8）
+                    import re as _re
+                    m = _re.search(r'[\d.]+', token)
+                    if m:
+                        v = float(m.group())
+                        nums.append(max(0.0, min(1.0, v)))
+                if len(nums) == 5:
+                    result["serves_needs"] = nums
+            except (ValueError, TypeError):
+                pass
+    if result["encoding_salience"] or result["emotion_label"]:
+        return result
+    return {}
 
 
 def _hest_screams_salience(content: str) -> int:
@@ -1950,6 +1984,9 @@ def _store_aris_memory(content: str, attention_line: str, source_id: str) -> Non
         payload["encoding_salience"] = salience["encoding_salience"]
     if salience.get("serves_needs"):
         payload["serves_needs"] = salience["serves_needs"]
+    # v2: 情緒標籤
+    if salience.get("emotion_label"):
+        payload["emotion_tag"] = salience["emotion_label"]
     # Phase 2: 第二意見—Scream heuristic 評估
     aris_es = salience.get("encoding_salience", 0)
     scream_es = _hest_screams_salience(content)
@@ -2168,9 +2205,9 @@ def main_loop() -> None:
                             protocol_block
                             + (wake_block + "\n\n" if wake_block else "")
                             + content[:500]
-                            + "\n\n（Phase 1 salience 實驗：回應結束時，若你對這則訊息有感受或判斷，"
-                              "另起一行以 ⫸salience⫷ 開頭，附 JSON："
-                              '{"es":<1-5 顯著性>,"sn":[c,a,r,c,g 各 0-1]}。'
+                            + "\n\n（salience 標記：回應結束時，另起一行以 ⫸salience⫷ 開頭，"
+                              "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | sn:勝任0.x 自主0.x 連結0.x 確定0.x 成長0.x\n"
+                              "例：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9\n"
                               "純自評不影響行為，收不到完全沒關係。）"
                             + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
                               "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"

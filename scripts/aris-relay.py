@@ -12,6 +12,17 @@ from datetime import datetime, timezone
 ARIS_API = os.environ.get("ARIS_API", "http://localhost:11546/v1/chat/completions")
 PORT = int(os.environ.get("PORT", "11550"))
 
+# ── webchat → aris-memory（topology edge: webchat_to_memory）──────────
+# 這條邊 _現況.md 宣稱 2026-07-25 上線（commit 3b966ae），實查為假：該 hash
+# 不在 neuralis，aris-relay.py 歷史上從沒出現過 memories/store。webchat 對話
+# 因此從來沒進過記憶 —— 只有留言板 kick 那條路有。這裡補上。
+# 寫入規則跟 bridge 共用 aris_memory_client，避免兩邊的 marker 規則漂移。
+MEMORY_ON = os.environ.get("ARIS_RELAY_MEMORY", "on").lower() not in ("off", "0", "false")
+try:
+    import aris_memory_client as amc
+except Exception:                      # 進不來就降級成原本行為，不擋 relay 啟動
+    amc, MEMORY_ON = None, False
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _FALLBACK_HTML = "<!DOCTYPE html><meta charset=utf-8><title>Aris</title><body style='font-family:sans-serif;background:#0b0b12;color:#eee;padding:2rem'>aris-chat.html 未找到。</body>"
 
@@ -67,6 +78,25 @@ def make_envelope(source, conv_id, user_id, msg_type, payload, msg_id=""):
         "schema_version": "v1"
     }
 
+def _remember(event_id, user_text, reply, attention, salience):
+    """webchat 一輪存兩筆：使用者說的（webchat）+ Aris 回的（aris-self）。
+
+    兩筆分開存是刻意的：source 不同、日後要分別加權，混成一筆就分不開了。
+    attention_line 只掛在 aris-self 那筆 —— 那是 Aris 留給下次醒來的線索。
+    全程 best-effort，aris-memory 掛了不影響 webchat 回覆。
+    """
+    try:
+        if user_text.strip():
+            amc.store(user_text, source="webchat", source_id=f"relay-{event_id}-u",
+                      tags=["webchat"], second_opinion=False)
+        mid = amc.store(reply, source="aris-self", source_id=f"relay-{event_id}-a",
+                        attention_line=attention, salience=salience, tags=["webchat"])
+        if mid:
+            amc.recall_hit(mid)
+    except Exception as e:
+        print(f"[relay] aris-memory 寫入失敗（不影響回覆）: {e}")
+
+
 # ── 處理佇列 ──
 process_queue = q.Queue()
 
@@ -80,7 +110,11 @@ def process_worker():
                      ("processing", time.time(), event_id))
         conn.commit()
         try:
-            messages = [{"role":"user","content": env["payload"].get("text","")}]
+            user_text = env["payload"].get("text", "")
+            # laap-core 只讀最後一則 user message、忽略 system prompt，
+            # 所以 salience / ⟶下一步 的指令要附在 user 內容裡。
+            ask = user_text + (amc.MARKER_INSTRUCTIONS if MEMORY_ON else "")
+            messages = [{"role":"user","content": ask}]
             body = json.dumps({"model":"laap-core","messages":messages}).encode()
             req = Request(ARIS_API, data=body, headers={"Content-Type":"application/json"})
             resp = urlopen(req, timeout=120)
@@ -89,6 +123,11 @@ def process_worker():
                 (result.get("choices") or [{}])[0].get("message",{}).get("content","")
                 or result.get("response","")
             )
+            # 標記是給 parser 讀的，**必須在回給 webchat 之前剝掉**，
+            # 否則使用者會在聊天視窗看到裸 JSON。
+            attention, salience = "", {}
+            if MEMORY_ON:
+                reply_text, attention, salience = amc.clean_reply(reply_text)
             # 回寫 reply 到 payload（順序：先改 payload，再更新 DB）
             env["payload"]["reply"] = reply_text
             # 如果回覆為空，補 fallback
@@ -98,6 +137,11 @@ def process_worker():
             conn.execute("UPDATE events SET status=?, deliver_ts=?, error=?, payload=? WHERE event_id=?",
                          ("delivered", time.time(), None, json.dumps(env["payload"]), event_id))
             conn.commit()
+            # 記憶寫入放在 delivered 之後：POST /c 是同步等 delivered 才回，
+            # 擺前面會讓每次 webchat 回覆多等兩趟 11551。記憶是 best-effort，
+            # 不該擋使用者看到回覆。
+            if MEMORY_ON:
+                _remember(event_id, user_text, reply_text, attention, salience)
             print(f"[relay] {event_id} → delivered ({len(reply_text)} chars)")
         except Exception as e:
             retry = env.get("_retry_count", 0)

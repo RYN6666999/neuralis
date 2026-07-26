@@ -67,14 +67,15 @@ edges:
   - id: webchat_to_memory
     from: relay
     to: aris-memory
-    via: ⚠️ 不存在
-    contract: webchat 每輪雙筆（webchat + aris-self）
+    via: aris-relay._remember（共用 aris_memory_client，與 bridge 同一套 marker 規則）
+    contract: |
+      webchat 每輪雙筆：使用者說的（source=webchat）+ Aris 回的（source=aris-self）。
+      attention_line 只掛 aris-self 那筆。標記必須在回給前端之前剝掉。
     note: |
-      _現況.md 宣稱這條 2026-07-25 上線（commit 3b966ae），實查為假：
+      _現況.md 曾宣稱這條 2026-07-25 上線（commit 3b966ae），實查為假：
       該 hash 不在 neuralis，且 aris-relay.py 歷史上從沒出現過 memories/store。
-      這條 probe 現在會紅，紅是對的 —— 它是待辦，不是回歸。
-    check: POST 11550 一輪 → DB rows +2
-    expect: fail
+      2026-07-26 真的接上。probe 是端到端的（真打一輪），不是 grep 原始碼。
+    check: POST 11550 /c 一輪 → DB rows +2 且 source = webchat + aris-self
 
   - id: memos_to_gbrain
     from: memos
