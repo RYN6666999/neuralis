@@ -1931,6 +1931,13 @@ def _store_aris_memory(content: str, attention_line: str, source_id: str) -> Non
         return
     # Phase 1: 從回應中萃取 salience 自評（best-effort）
     salience = _parse_salience(content)
+    # 標記是給 parser 讀的，不是記憶內容。留著會讓 /wake 把裸 JSON 餵回給 Aris。
+    if _SALIENCE_MARKER in body:
+        idx = body.rfind(_SALIENCE_MARKER)
+        rest = body[idx:].split("\n", 1)
+        body = (body[:idx] + (rest[1] if len(rest) > 1 else "")).strip()
+    if not body:
+        return
     payload = {
         "source": "aris-self",
         "content": body[:2000],
