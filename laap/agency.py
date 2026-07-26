@@ -69,7 +69,7 @@ class AgencyLoop:
     """
 
     _STATE_SLUG = "_internal/agency-state"
-    _CHECKPOINT_INTERVAL = 5  # 每 N 次行動 checkpoint
+    _CHECKPOINT_INTERVAL = 1  # 每次動作 checkpoint；throttle 上限 6/hr，單次存檔 ~1.26s 佔 60s tick 的 2%
 
     def __init__(self, psi, tools, bus=None,
                  interval: Optional[float] = None,
@@ -269,7 +269,7 @@ class AgencyLoop:
             body = f"---\nversion: 1\n---\n{content}"
             client.call("put_page", {"slug": self._STATE_SLUG, "content": body}, timeout=10.0)
         except Exception as e:
-            logger.debug(f"[Agency] 狀態存檔失敗: {e}")
+            logger.warning(f"[Agency] 狀態存檔失敗: {e}")
 
     def _load_state(self) -> None:
         """開機從 gbrain 讀回 RPE 學習狀態。retry 最多 3 次（embedding 冷啟動 ~3s）。
