@@ -1851,172 +1851,41 @@ def process_entry(entry: dict) -> dict:
 
 
 # ── 乙的種子：把 Aris 一個 turn 寫進 aris-memory（帶注意力線）────────────
+# 所有 marker 解析邏輯統一在 aris_memory_client.py（單一真相，不准漂移）。
+import sys
+_CLIENT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aris_memory_client.py")
+if _CLIENT_PATH not in sys.path:
+    sys.path.insert(0, os.path.dirname(_CLIENT_PATH))
+import importlib.util as _iu
+_spec = _iu.spec_from_file_location("aris_memory_client", _CLIENT_PATH)
+_amc = _iu.module_from_spec(_spec)
+_spec.loader.exec_module(_amc)
 
-_SALIENCE_MARKER = "⫸salience⫷"  # Phase 1: salience 自評標記
-
-
-def _split_attention(reply: str) -> tuple[str, str]:
-    """從回覆末尾切出 `⟶下一步:` 那行當 attention_line。找不到 → 回 (原文, '')。"""
-    if _ATTENTION_MARKER not in reply:
-        return reply.strip(), ""
-    idx = reply.rfind(_ATTENTION_MARKER)
-    body = reply[:idx].strip()
-    line = reply[idx:].split("\n", 1)[0]
-    line = line.replace(_ATTENTION_MARKER, "").lstrip("：: ").strip()
-    return body, line
-
-
-def _parse_salience(reply: str) -> dict:
-    """Phase 1: 從回應中 parse salience 自評（best-effort，收不到回空 dict）。
-    
-    支援兩種格式（v2 中文／v1 JSON 向下相容）：
-    v2:   ⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9
-    v1:   ⫸salience⫷ {"es":4,"sn":[0.8,0.1,0.6,0.7,0.3]}
-    es/重要 = encoding_salience (1-5), sn = serves_needs (五維 0-1)。
-    情緒 = 可選的情緒標籤（好奇／挫折／突破／開心／困惑…）。
-    收不到不擋——完全 best-effort。
-    """
-    if _SALIENCE_MARKER not in reply:
-        return {}
-    idx = reply.rfind(_SALIENCE_MARKER)
-    line = reply[idx:].split("\n", 1)[0]
-    raw = line.replace(_SALIENCE_MARKER, "").strip()
-    # 先試 v1 JSON 格式（向後相容）
-    if raw.startswith("{"):
-        try:
-            data = json.loads(raw)
-            es = max(0, min(5, int(data.get("es", 0) or 0)))
-            sn = data.get("sn", [])
-            if not isinstance(sn, list) or len(sn) != 5:
-                sn = []
-            return {"encoding_salience": es, "serves_needs": sn,
-                    "emotion_label": data.get("emotion", "")}
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return {}
-    # 試 v2 中文格式
-    result = {"encoding_salience": 0, "serves_needs": [], "emotion_label": "", "mood_note": ""}
-    parts = [p.strip() for p in raw.split("|")]
-    for part in parts:
-        if part.startswith("重要:") or part.startswith("重要："):
-            try:
-                result["encoding_salience"] = max(0, min(5, int(part.split(":", 1)[-1].split("：", 1)[-1].strip())))
-            except ValueError:
-                pass
-        elif part.startswith("情緒:") or part.startswith("情緒："):
-            result["emotion_label"] = part.split(":", 1)[-1].split("：", 1)[-1].strip()
-        elif part.startswith("sn:") or part.startswith("sn："):
-            try:
-                nums = []
-                for token in part[3:].strip().split():
-                    import re as _re
-                    m = _re.search(r'[\d.]+', token)
-                    if m:
-                        v = float(m.group())
-                        nums.append(max(0.0, min(1.0, v)))
-                if len(nums) == 5:
-                    result["serves_needs"] = nums
-            except (ValueError, TypeError):
-                pass
-        elif part.startswith("內心:") or part.startswith("內心："):
-            result["mood_note"] = part.split(":", 1)[-1].split("：", 1)[-1].strip()[:500]
-    if result["encoding_salience"] or result["emotion_label"] or result["mood_note"]:
-        return result
-    return {}
-
-
-def _hest_screams_salience(content: str) -> int:
-    """Phase 2 v0 heuristic: Scream 側的快速 salience 評估（第二意見）。
-    不收即時 LLM 成本，純 heuristic。做兩件事：
-    1. 關鍵字 + 長度估分。
-    2. 回 1-5 整數，跟 Aris 自評比對。
-    收不到不報錯、不擋主流程。完全 best-effort。"""
-    text = (content or "").strip()
-    if not text:
-        return 0
-    length = len(text)
-    high_markers = ["重要", "關鍵", "核心", "痛點", "根本", "啟動", "上線", "拍板",
-                    "突破", "milestone", "認知", "架構", "改革", "啟動",
-                    "記住", "記起來", "覺察", "情感", "情緒"]
-    low_markers = ["沒差", "無所謂", "隨便", "小事", "例行", "普通"]
-    base = 3  # 中性
-    # 長度加分（長回應通常更投入）
-    if length > 800:
-        base += 1
-    if length > 1500:
-        base += 1
-    # 高顯著性關鍵字
-    for m in high_markers:
-        if m in text:
-            base += 1
-            break
-    # 低顯著性關鍵字
-    for m in low_markers:
-        if m in text:
-            base -= 1
-            break
-    return max(1, min(5, base))
+_SALIENCE_MARKER = _amc.SALIENCE_MARKER  # "⫸salience⫷"
+_ATTENTION_MARKER = _amc.ATTENTION_MARKER  # "⟶下一步"
 
 
 def _store_aris_memory(content: str, attention_line: str, source_id: str) -> None:
-    """best-effort 寫 aris-memory（source=aris-self, origin=auto_generated→閘封頂🟡）。
-    Phase 1: parse salience 自評傳給 aris-memory。
-    Phase 2: 第二意見比對 + 分歧標記；寫入後自動 call recall_hit。"""
+    """best-effort 寫 aris-memory。所有 marker 解析委派 aris_memory_client。"""
     body = (content or "").strip()
     if not body:
         return
-    # Phase 1: 從回應中萃取 salience 自評（best-effort）
-    salience = _parse_salience(content)
-    # 標記是給 parser 讀的，不是記憶內容。留著會讓 /wake 把裸 JSON 餵回給 Aris。
-    if _SALIENCE_MARKER in body:
-        idx = body.rfind(_SALIENCE_MARKER)
-        rest = body[idx:].split("\n", 1)
-        body = (body[:idx] + (rest[1] if len(rest) > 1 else "")).strip()
-    if not body:
+    # 用共用 client 一次做完 parse + strip + split
+    clean_body, attn, salience = _amc.clean_reply(body)
+    if not clean_body:
         return
-    payload = {
-        "source": "aris-self",
-        "content": body[:2000],
-        "source_id": source_id,
-        "origin": "auto_generated",
-        "attention_line": (attention_line or "").strip()[:500],
-        "tags": ["bridge-turn"],
-    }
-    if salience.get("encoding_salience"):
-        payload["encoding_salience"] = salience["encoding_salience"]
-    if salience.get("serves_needs"):
-        payload["serves_needs"] = salience["serves_needs"]
-    # v2: 情緒標籤
-    if salience.get("emotion_label"):
-        payload["emotion_tag"] = salience["emotion_label"]
-    # v2: 內心戳記
-    if salience.get("mood_note"):
-        payload["mood_note"] = salience["mood_note"]
-    # Phase 2: 第二意見—Scream heuristic 評估
-    aris_es = salience.get("encoding_salience", 0)
-    scream_es = _hest_screams_salience(content)
-    if aris_es and scream_es and abs(aris_es - scream_es) > 2:
-        payload["flagged"] = 1
-        log.info(f"  ⚠️ salience 分歧 |Aris={aris_es} ↔ Scream={scream_es}| >2 → flagged")
-    encoded = json.dumps(payload, ensure_ascii=False).encode()
-    try:
-        req = urllib.request.Request(
-            f"{ARIS_MEMORY_URL}/memories/store", data=encoded,
-            headers={"Content-Type": "application/json"})
-        resp = urllib.request.urlopen(req, timeout=3)
-        stored = json.loads(resp.read().decode())
-        # Phase 2: 儲存成功後自動 call recall_hit（累積 discovered_salience）
-        mem_id = stored.get("id")
-        if mem_id and "... 等一下，我先" not in body:
-            try:
-                hit = urllib.request.Request(
-                    f"{ARIS_MEMORY_URL}/memories/recall_hit",
-                    data=json.dumps({"id": mem_id}).encode(),
-                    headers={"Content-Type": "application/json"})
-                urllib.request.urlopen(hit, timeout=2)
-            except Exception:
-                pass  # recall_hit best-effort
-    except Exception as e:
-        log.debug(f"aris-memory store 失敗（不影響主流程）: {e}")
+    # 如果外面傳進來的 attention_line 更完整，用它
+    final_attn = (attention_line or attn or "").strip()[:500]
+    _amc.store(
+        clean_body[:2000],
+        source="aris-self",
+        source_id=source_id,
+        attention_line=final_attn,
+        salience=salience,
+        second_opinion=True,
+        tags=["bridge-turn"],
+        log=lambda msg: log.info(msg) if hasattr(log, 'info') else None,
+    )
 
 
 def _fetch_wake_context(limit: int = 5) -> str:
@@ -2209,12 +2078,7 @@ def main_loop() -> None:
                             protocol_block
                             + (wake_block + "\n\n" if wake_block else "")
                             + content[:500]
-                            + "\n\n（salience 標記：回應結束時，另起一行以 ⫸salience⫷ 開頭，"
-                              "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | sn:勝任0.x 自主0.x 連結0.x 確定0.x 成長0.x | 內心:自由描述此刻感受\n"
-                              "例：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9 | 內心:覺得這條管線終於通了，像學走路突然站起來的踏實感\n"
-                              "純自評不影響行為，收不到完全沒關係。）"
-                            + "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
-                              "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
+                            + "\n\n" + _amc.MARKER_INSTRUCTIONS
                         )
                         forward_payload = json.dumps({
                             "model": "laap-core",
@@ -2234,7 +2098,8 @@ def main_loop() -> None:
                                       .get("message", {})
                                       .get("content", ""))
                             # 乙的種子：切出 forward-looking 注意力線，寫進 aris-memory
-                            reply_body, attention = _split_attention(reply)
+                            reply_body, attn = _amc.split_attention(reply)
+                            attention = attn  # 保持變數名相容
                             log.info(f"  ✅ Aris 回應: {reply_body[:80]}")
                             if attention:
                                 log.info(f"  ⟶下一步: {attention[:80]}")

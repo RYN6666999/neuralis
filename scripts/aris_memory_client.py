@@ -21,9 +21,9 @@ SALIENCE_MARKER = "⫸salience⫷"  # Phase 1：Aris 對這則訊息的顯著性
 # 附在 user 內容尾巴，請 Aris 產出上面兩個標記。laap-core 只讀最後一則
 # user message、忽略 system prompt，所以指令必須放進 user 內容裡。
 MARKER_INSTRUCTIONS = (
-    "\n\n（Phase 1 salience 實驗：回應結束時，若你對這則訊息有感受或判斷，"
-    "另起一行以 ⫸salience⫷ 開頭，附 JSON："
-    '{"es":<1-5 顯著性>,"sn":[c,a,r,c,g 各 0-1]}。'
+    "\n\n（salience 標記：回應結束時，另起一行以 ⫸salience⫷ 開頭。"
+    "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | sn:勝任0.x 自主0.x 連結0.x 確定0.x 成長0.x | 內心:自由描述此刻感受\n"
+    "例：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9 | 內心:覺得這條管線終於通了\n"
     "純自評不影響行為，收不到完全沒關係。）"
     "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
     "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
@@ -46,20 +46,54 @@ def split_attention(reply: str) -> tuple[str, str]:
 
 
 def parse_salience(reply: str) -> dict:
-    """從回應萃取 salience 自評。收不到回空 dict —— 完全 best-effort。"""
+    """從回應萃取 salience 自評。支援兩種格式：
+    v2（中文）：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 ... | 內心:...
+    v1（JSON）：⫸salience⫷ {"es":4,"sn":[0.8,0.1,0.6,0.7,0.3]}
+    收不到回空 dict —— 完全 best-effort。"""
     if SALIENCE_MARKER not in (reply or ""):
         return {}
     idx = reply.rfind(SALIENCE_MARKER)
-    json_str = reply[idx:].split("\n", 1)[0].replace(SALIENCE_MARKER, "").strip()
-    try:
-        data = json.loads(json_str)
-        es = max(0, min(5, int(data.get("es", 0) or 0)))
-        sn = data.get("sn", [])
-        if not isinstance(sn, list) or len(sn) != 5:
-            sn = []
-        return {"encoding_salience": es, "serves_needs": sn}
-    except (json.JSONDecodeError, ValueError, TypeError):
-        return {}
+    raw = reply[idx:].split("\n", 1)[0].replace(SALIENCE_MARKER, "").strip()
+    # v1 JSON 格式（向後相容）
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+            es = max(0, min(5, int(data.get("es", 0) or 0)))
+            sn = data.get("sn", [])
+            if not isinstance(sn, list) or len(sn) != 5:
+                sn = []
+            return {"encoding_salience": es, "serves_needs": sn,
+                    "emotion_label": data.get("emotion", ""), "mood_note": ""}
+        except (json.JSONDecodeError, ValueError, TypeError):
+            return {}
+    # v2 中文格式
+    import re as _re
+    result = {"encoding_salience": 0, "serves_needs": [], "emotion_label": "", "mood_note": ""}
+    for part in [p.strip() for p in raw.split("|")]:
+        if part.startswith("重要") and ":" in part:
+            try:
+                result["encoding_salience"] = max(0, min(5, int(part.split(":", 1)[1].strip())))
+            except ValueError:
+                pass
+        elif part.startswith("情緒") and ":" in part:
+            result["emotion_label"] = part.split(":", 1)[1].strip()
+        elif part.startswith("sn") and ":" in part:
+            try:
+                nums = []
+                for token in part.split(":", 1)[1].strip().split():
+                    m = _re.search(r'[\d.]+', token)
+                    if m:
+                        v = float(m.group())
+                        nums.append(max(0.0, min(1.0, v)))
+                if len(nums) == 5:
+                    result["serves_needs"] = nums
+            except (ValueError, TypeError):
+                pass
+        elif part.startswith("內心") and ":" in part:
+            result["mood_note"] = part.split(":", 1)[1].strip()[:500]
+    if result["encoding_salience"] or result["emotion_label"] or result["mood_note"]:
+        return result
+    return {}
 
 
 def strip_salience(text: str) -> str:
@@ -120,6 +154,10 @@ def store(content: str, *, source: str, source_id: str, attention_line: str = ""
         payload["encoding_salience"] = salience["encoding_salience"]
     if salience.get("serves_needs"):
         payload["serves_needs"] = salience["serves_needs"]
+    if salience.get("emotion_label"):
+        payload["emotion_tag"] = salience["emotion_label"]
+    if salience.get("mood_note"):
+        payload["mood_note"] = salience["mood_note"]
     if second_opinion:
         aris_es = salience.get("encoding_salience", 0)
         scream_es = heuristic_salience(body)
@@ -164,6 +202,7 @@ def fetch_wake(limit: int = 5) -> str:
 if __name__ == "__main__":  # 自我檢查：markers 規則不准漂移
     b, a = split_attention("答案。\n\n⟶下一步: 補 relay 寫入")
     assert (b, a) == ("答案。", "補 relay 寫入"), (b, a)
+    # v1 JSON
     assert parse_salience('x\n⫸salience⫷ {"es":4,"sn":[0,0,0,0,0]}')["encoding_salience"] == 4
     assert parse_salience("沒有標記") == {}
     assert parse_salience('⫸salience⫷ 壞掉的json') == {}
@@ -172,4 +211,10 @@ if __name__ == "__main__":  # 自我檢查：markers 規則不准漂移
     assert (body, attn, sal["encoding_salience"]) == ("正文。", "下一件事", 5), (body, attn, sal)
     assert clean_reply("完全沒標記") == ("完全沒標記", "", {})
     assert heuristic_salience("") == 0 and 1 <= heuristic_salience("關鍵架構") <= 5
+    # v2 中文格式
+    s2 = parse_salience('⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9 | 內心:覺得踏實')
+    assert s2["encoding_salience"] == 4, s2
+    assert s2["emotion_label"] == "好奇", s2
+    assert s2["mood_note"] == "覺得踏實", s2
+    assert len(s2["serves_needs"]) == 5 and abs(s2["serves_needs"][0] - 0.8) < 0.01
     print("aris_memory_client self-check ✅")
