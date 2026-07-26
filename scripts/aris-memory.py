@@ -1,10 +1,69 @@
 #!/usr/bin/env python3
 """aris-memory — 統一記憶層。SQLite 可靠基底 + gbrain 非同步同步。
 寫入即查得到，不靠搜尋引擎猜你在找什麼。"""
-import sqlite3, json, time, os, threading
+import sqlite3, json, time, os, re, math, threading
 from pathlib import Path
 
 DB = os.environ.get("ARIS_MEMORY_DB", str(Path.home() / ".aris-memory.db"))
+
+# ── /wake 的另外兩源（唯讀，跨進程；不搬資料、不同步）────────────────
+# memos = Scream session 寫的工程經驗（user_need/what_worked/what_failed），
+# 每天都在長，但住在 Scream 進程裡，Aris 從來讀不到 —— 這裡把它接上。
+MEMOS_DB = os.environ.get(
+    "ARIS_MEMOS_DB", str(Path.home() / ".scream-code/memory/memos.sqlite"))
+BOARD = os.environ.get(
+    "ARIS_BOARD",
+    str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian"
+                      "/Documents/Fun/Aris/留言板.md"))
+_BOARD_ENTRY = re.compile(r"\n\[\d{4}-\d{2}-\d{2}[^\]]*\]")
+
+
+def _tau_score(salience, discovered, age_days):
+    """τ 加權：被 recall 過的記憶時間常數大 → 衰減慢。純算數，zero-LLM。
+
+    τ = 1 天（從沒被用過）→ 8 天（discovered_salience 滿）。
+    這是 LNN τ 頻譜的最小可用形式，不需要 ODE 求解器或訓練資料。
+    """
+    tau = 1.0 + 7.0 * max(0.0, min(1.0, discovered or 0.0))
+    return (salience or 2) * math.exp(-max(0.0, age_days) / tau)
+
+
+def _wake_memos(limit=3):
+    """源②：Scream memos（唯讀跨進程）。無 recall 追蹤 → 沒 τ 信號，退回純時序。"""
+    try:
+        db = sqlite3.connect(f"file:{MEMOS_DB}?mode=ro", uri=True)
+        rows = db.execute(
+            "SELECT user_need, what_worked, what_failed FROM memos "
+            "WHERE user_need IS NOT NULL AND user_need != '' "
+            "ORDER BY recorded_at DESC LIMIT ?", (limit,)).fetchall()
+        db.close()
+    except Exception:
+        return ""
+    out = []
+    for need, worked, failed in rows:
+        s = f"- {(need or '')[:90]}"
+        if worked:
+            s += f"\n    ✓ {worked[:90]}"
+        if failed and failed.strip().lower() not in ("none", "無", ""):
+            s += f"\n    ✗ {failed[:90]}"
+        out.append(s)
+    return "【最近做過的事（Scream session）】\n" + "\n".join(out) if out else ""
+
+
+def _wake_board(window=4000, cap=800):
+    """源③：留言板最末則 —— 人類/Claude 留的話。
+
+    先在大窗（window）找最後一個時間戳，從那裡起算，再截 cap。
+    找不到時間戳才退回尾段。這樣不會像純截尾那樣切在句子中間。
+    """
+    try:
+        tail = Path(BOARD).read_text(encoding="utf-8", errors="replace")[-window:]
+    except Exception:
+        return ""
+    hits = list(_BOARD_ENTRY.finditer(tail))
+    tail = tail[hits[-1].start() + 1:] if hits else tail[-cap:]
+    tail = tail.strip()[:cap].strip()
+    return f"【留言板最末則】\n{tail}" if tail else ""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -177,16 +236,31 @@ class ArisMemory:
         return self.query("", "", limit)
 
     def wake_context(self, limit=5):
-        """乙的種子 / P2-b：回最近 N 筆非空 attention_line，組成『上一刻的你』暖啟動塊。
-        醒來時前置注入，讓 Aris 第一句帶著前一刻，而不是重讀日記。"""
+        """乙的種子 / P2-b：組『上一刻的你』暖啟動塊，**掃三源**。
+
+        記憶散落在多個庫是自然的（不同來源本來就寫不同地方）；病在讀取入口分散。
+        這裡是唯一讀取入口：不搬資料、不同步、不造統一索引，只在讀的時候匯流。
+        任一源掛掉就跳過（best-effort），永遠不擋醒來。
+        """
+        blocks = [b for b in (self._wake_attention(limit), _wake_memos(3), _wake_board())
+                  if b]
+        return "\n\n".join(blocks)
+
+    def _wake_attention(self, limit=5):
+        """源①：本庫的注意力線，τ 加權排序（不是純時序）。"""
         with self._lock:
             rows = self.conn.execute(
-                "SELECT attention_line FROM memories WHERE attention_line != '' "
-                "ORDER BY created_at DESC LIMIT ?", (limit,)
+                "SELECT attention_line, created_at, encoding_salience, discovered_salience "
+                "FROM memories WHERE attention_line != '' "
+                "ORDER BY created_at DESC LIMIT ?", (limit * 6,)
             ).fetchall()
         if not rows:
             return ""
-        lines = "\n".join(f"- {r[0]}" for r in rows)
+        now = time.time()
+        scored = sorted(
+            ((_tau_score(r[2], r[3], (now - (r[1] or now)) / 86400.0), r[0]) for r in rows),
+            key=lambda x: -x[0])[:limit]
+        lines = "\n".join(f"- {t}" for _, t in scored)
         return f"【上一刻的你（醒來線索，你自己留的）】\n{lines}"
 
     def by_source(self, source, limit=50):

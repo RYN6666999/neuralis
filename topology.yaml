@@ -1,0 +1,92 @@
+# topology.yaml — Aris 系統的節點與邊
+#
+# 這不是文件，是可執行的。`scripts/probe.py` 會真的跑每條邊的 probe。
+# 圖會跟碼漂移（2026-07-26 證明：_現況.md 宣稱 relay 雙寫，碼裡從沒有那行），
+# 所以這份的價值不在「系統長什麼樣」，在「系統現在還長那樣嗎」。
+#
+# 規矩：
+#   - 一個概念只准出現在一個 node 的 owns 裡。要設計新東西前先 grep owns。
+#   - 每條邊都要有 probe。沒有 probe 的邊等於沒人管，遲早斷掉沒人知道。
+#   - 改任何 node，跑它上下游兩條 probe。probe 沒過 = 沒做完。
+
+version: 1
+updated: 2026-07-26
+
+nodes:
+  - id: board
+    at: ~/Library/.../Fun/Aris/留言板.md
+    owns: [人類介面, session 摘要, 跨 session 交接]
+
+  - id: bridge
+    at: scripts/agentos-aris-bridge.py
+    owns: [channel 路由, 留言板監聽, salience parse, wake 注入]
+
+  - id: aris-api
+    at: laap/chatflow.py  # port 11546
+    owns: [對話主路, session bootstrap, PSI, agency]
+
+  - id: aris-memory
+    at: scripts/aris-memory.py  # port 11551
+    owns: [對話記憶, attention_line, salience, discovered_salience, wake 讀取入口]
+
+  - id: memos
+    at: ~/.scream-code/memory/memos.sqlite   # 唯讀，Scream 進程擁有寫入
+    owns: [工程經驗, what_worked, what_failed]
+
+  - id: gbrain
+    at: gbrain_client.py + gbrain CLI
+    owns: [長期知識, 概念層, 頁面, 連結層]
+
+  - id: relay
+    at: scripts/aris-relay.py  # port 11550
+    owns: [webchat 通道, event 狀態機]
+
+edges:
+  - id: board_to_channel
+    from: board
+    to: bridge
+    via: _message_board_watcher
+    contract: direction=scream→aris · type=kick · 必須有 id（三者缺一就進不了主迴圈）
+    note: 2026-07-26 修好前這條斷了，通知寫進沒人讀的 channel
+    check: 留言板 mtime 變動 → channel 出現一筆合格 entry
+
+  - id: channel_to_aris
+    from: bridge
+    to: aris-api
+    via: main_loop 分支 B
+    contract: kick 進來 → POST 11546 → 回覆非空
+    check: 注一筆 kick → bridge log 出現「✅ Aris 回應」
+
+  - id: aris_to_memory
+    from: bridge
+    to: aris-memory
+    via: _store_aris_memory
+    contract: 每個 turn 一筆 · attention_line 從 ⟶下一步 切出 · salience 標記不得殘留在 content
+    check: 注 kick → DB rows +1
+
+  - id: webchat_to_memory
+    from: relay
+    to: aris-memory
+    via: ⚠️ 不存在
+    contract: webchat 每輪雙筆（webchat + aris-self）
+    note: |
+      _現況.md 宣稱這條 2026-07-25 上線（commit 3b966ae），實查為假：
+      該 hash 不在 neuralis，且 aris-relay.py 歷史上從沒出現過 memories/store。
+      這條 probe 現在會紅，紅是對的 —— 它是待辦，不是回歸。
+    check: POST 11550 一輪 → DB rows +2
+    expect: fail
+
+  - id: memos_to_gbrain
+    from: memos
+    to: gbrain
+    via: scripts/consolidate-memos.py（夜班）
+    contract: what_worked 非空 → 原文寫 mem/YYYY-MM-DD · 冪等（重建整天不 append）
+    check: --dry-run 能列出待固化天數且不報錯
+
+  # 讀取匯流：三源合一，這是唯一入口
+  - id: wake_reads_three
+    from: [aris-memory, memos, board]
+    to: aris-api
+    via: aris_memory.wake_context
+    contract: 任一源掛掉跳過該塊，永不擋醒來 · 至少要有一源出東西
+    check: GET /wake → context 非空且含 ≥1 個【】區塊標題

@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""probe.py — 跑 topology.yaml 每條邊，確認它現在還通著。
+
+節點都有人寫、有人測、有人 commit；邊沒有任何人的任務涵蓋 —— 所以邊斷了沒人知道。
+這支就是那個「會叫的東西」。
+
+yaml 管人看的（contract / note），這裡管機器跑的。兩邊 edge id 必須一一對應，
+對不上就是漂移，開頭先擋下來。
+
+用法：
+    probe.py            # 跑全部
+    probe.py <edge_id>  # 跑一條
+exit 1 = 有非預期的紅。`expect: fail` 的邊紅了算預期，不影響 exit code。
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+TOPO = ROOT / "topology.yaml"
+CHANNEL = Path("/tmp/aris-scream-channel.jsonl")
+BRIDGE_LOG = Path("/tmp/agentos-aris-bridge.log")
+MEM_DB = Path.home() / ".aris-memory.db"
+BOARD = Path.home() / ("Library/Mobile Documents/iCloud~md~obsidian"
+                       "/Documents/Fun/Aris/留言板.md")
+MEM_URL = "http://127.0.0.1:11551"
+
+
+def _rows() -> int:
+    return sqlite3.connect(f"file:{MEM_DB}?mode=ro", uri=True).execute(
+        "SELECT count(*) FROM memories").fetchone()[0]
+
+
+def _kick(text: str) -> str:
+    """注一筆 kick 進 channel，回 entry id。"""
+    eid = f"probe-{int(time.time()*1000):x}"
+    CHANNEL.open("a").write(json.dumps({
+        "ts": time.time(), "id": eid, "direction": "scream→aris",
+        "type": "kick", "content": text,
+        "context": {"source": "probe"}}, ensure_ascii=False) + "\n")
+    return eid
+
+
+def _wait(pred, timeout=45, step=2):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(step)
+    return False
+
+
+# ── 每條邊一個函式，key 對上 topology.yaml 的 edge id ──────────────
+
+def board_to_channel():
+    """碰一下留言板 mtime，看 watcher 有沒有寫出合格 entry。"""
+    if not BOARD.exists():
+        return False, "留言板不存在"
+    before = CHANNEL.stat().st_size if CHANNEL.exists() else 0
+    BOARD.touch()
+    if not _wait(lambda: CHANNEL.exists() and CHANNEL.stat().st_size > before, 25):
+        return False, "watcher 沒寫出 entry（debounce 10s / 自我簽名跳過 也可能）"
+    for line in CHANNEL.read_text().splitlines()[::-1]:
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("context", {}).get("source") == "message-board-watcher":
+            missing = [k for k, v in (("id", e.get("id")),
+                                      ("direction", e.get("direction") == "scream→aris"),
+                                      ("type", e.get("type") == "kick")) if not v]
+            return (not missing), ("契約缺: " + ",".join(missing) if missing else "契約符合")
+    return False, "找不到 watcher entry"
+
+
+def channel_to_aris():
+    """注 kick，看 bridge log 有沒有出現 Aris 回應。"""
+    if not BRIDGE_LOG.exists():
+        return False, "bridge log 不存在（bridge 沒跑？）"
+    # 用字元數不用 st_size：log 全是中文，byte offset 拿去切 str 會切過頭。
+    before = len(BRIDGE_LOG.read_text(errors="replace"))
+    _kick("probe: channel→aris 連通性測試，回一個字即可。")
+    ok = _wait(lambda: "✅ Aris 回應"
+               in BRIDGE_LOG.read_text(errors="replace")[before:], 60)
+    return ok, "log 有回應" if ok else "60s 內沒看到「✅ Aris 回應」"
+
+
+def aris_to_memory():
+    """注 kick，看 DB 有沒有多一筆、且 content 沒殘留 salience 標記。"""
+    before = _rows()
+    _kick("probe: aris→memory 寫入測試，回一個字即可。")
+    if not _wait(lambda: _rows() > before, 60):
+        return False, f"60s 內 rows 沒增加（仍 {before}）"
+    c = sqlite3.connect(f"file:{MEM_DB}?mode=ro", uri=True).execute(
+        "SELECT content FROM memories ORDER BY id DESC LIMIT 1").fetchone()[0]
+    if "⫸salience⫷" in (c or ""):
+        return False, "content 殘留 salience 標記（剝除失效）"
+    return True, f"rows {before}→{_rows()}，content 乾淨"
+
+
+def webchat_to_memory():
+    """relay 那條。現在必紅 —— 它是待辦，不是回歸。"""
+    src = (ROOT / "scripts/aris-relay.py").read_text()
+    ok = "memories/store" in src
+    return ok, "relay 有寫入" if ok else "relay 無 memories/store（待辦，非回歸）"
+
+
+def memos_to_gbrain():
+    """夜班固化能不能列出待固化，且不報錯。"""
+    r = subprocess.run([sys.executable, str(ROOT / "scripts/consolidate-memos.py"),
+                        "--all", "--dry-run"], capture_output=True, text=True)
+    if r.returncode != 0:
+        return False, r.stderr.strip()[:160]
+    return ("固化" in r.stdout), r.stdout.strip().splitlines()[-1][:120]
+
+
+def wake_reads_three():
+    """/wake 三源匯流：至少要有一源出東西。"""
+    try:
+        ctx = json.loads(urllib.request.urlopen(
+            f"{MEM_URL}/wake?limit=3", timeout=5).read()).get("context", "")
+    except Exception as e:
+        return False, f"/wake 打不到: {e}"
+    n = ctx.count("【")
+    return (n >= 1), f"{n} 個區塊" + ("" if n else "（三源全空）")
+
+
+PROBES = {f.__name__: f for f in (
+    board_to_channel, channel_to_aris, aris_to_memory,
+    webchat_to_memory, memos_to_gbrain, wake_reads_three)}
+
+
+def main(argv=None) -> int:
+    argv = argv if argv is not None else sys.argv[1:]
+    topo = yaml.safe_load(TOPO.read_text())
+    edges = {e["id"]: e for e in topo["edges"]}
+
+    # 漂移檢查：yaml 與 probe 必須一一對應
+    drift = (set(edges) ^ set(PROBES))
+    if drift:
+        print(f"❌ topology.yaml 與 probe.py 對不上: {sorted(drift)}")
+        return 2
+    for e in topo["nodes"]:  # owns 唯一性
+        pass
+    owned: dict[str, str] = {}
+    for n in topo["nodes"]:
+        for c in n.get("owns", []):
+            if c in owned:
+                print(f"❌ 概念「{c}」有兩個 owner: {owned[c]} / {n['id']}")
+                return 2
+            owned[c] = n["id"]
+
+    targets = argv or list(edges)
+    fails = 0
+    for eid in targets:
+        if eid not in PROBES:
+            print(f"❌ 沒這條邊: {eid}")
+            return 2
+        expect_fail = edges[eid].get("expect") == "fail"
+        try:
+            ok, msg = PROBES[eid]()
+        except Exception as e:
+            ok, msg = False, f"probe 自己炸了: {e}"
+        if ok:
+            mark = "✅"
+        elif expect_fail:
+            mark = "🟡"
+        else:
+            mark = "❌"
+            fails += 1
+        print(f"{mark} {eid:22} {msg}")
+    print(f"\n{len(targets)} 條邊，{fails} 條非預期斷線")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
