@@ -32,6 +32,9 @@ DENY_SPIKE_WARN_RATIO = 2.0
 DENY_SPIKE_CRITICAL_RATIO = 3.0
 MIN_BASELINE_RATE = 0.01
 MIN_BASELINE_TOTAL = 20
+BRIDGE_SCRIPT = Path(os.path.expanduser("~/Developer/neuralis/scripts/agentos-aris-bridge.py"))
+BRIDGE_PLIST = Path(os.path.expanduser("~/Library/LaunchAgents")).glob("com.neuralis.*.plist")
+CANARY_PLIST = Path(os.path.expanduser("~/Library/LaunchAgents/com.neuralis.task-executor.plist"))
 
 
 @dataclass
@@ -188,6 +191,79 @@ def _check_deny_spike(rows_1h: list[dict[str, Any]], rows_24h: list[dict[str, An
     )
 
 
+def _check_bridge_env() -> CheckResult:
+    """"bridge_env" probe（第七條邊）：驗證執行環境完整性。
+    
+    三項檢查（任一 fail → critical）：
+    1. canary enabled — 試 import pydantic（失敗 = 評分路由被靜默降級）
+    2. 單一 bridge process — 確保不多實例衝突
+    3. plist 完整性 — com.neuralis.*.plist 全存在且 XML 可 parse
+    """
+    issues = []
+    details: dict[str, Any] = {}
+
+    # 1. canary enabled
+    pydantic_ok = False
+    try:
+        import pydantic  # noqa: F401
+        pydantic_ok = True
+    except ImportError:
+        pydantic_ok = False
+    details["pydantic_importable"] = pydantic_ok
+    if not pydantic_ok:
+        issues.append("pydantic import failed — canary scoring disabled")
+
+    # 2. single bridge process
+    try:
+        import subprocess
+        raw = subprocess.check_output(
+            ["pgrep", "-f", "agentos-aris-bridge.py"], text=True, timeout=5
+        ).strip()
+        pids = [p.strip() for p in raw.splitlines() if p.strip()]
+        bridge_count = len(pids)
+        details["bridge_pids"] = pids
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        bridge_count = 0
+        details["bridge_pids"] = []
+
+    details["bridge_process_count"] = bridge_count
+    if bridge_count == 0:
+        issues.append("no bridge process running")
+    elif bridge_count > 1:
+        issues.append(f"{bridge_count} bridge processes running — expected 1")
+
+    # 3. plist integrity
+    plist_dir = Path(os.path.expanduser("~/Library/LaunchAgents"))
+    plists = sorted(plist_dir.glob("com.neuralis.*.plist"))
+    details["plist_count"] = len(plists)
+    details["plist_paths"] = [str(p) for p in plists]
+    xml_broken = []
+    for p in plists:
+        try:
+            raw = p.read_bytes()
+            if b"<?xml" not in raw:
+                xml_broken.append(p.name)
+        except OSError:
+            xml_broken.append(p.name)
+    if xml_broken:
+        issues.append(f"plist XML broken: {', '.join(xml_broken)}")
+    # 檢查 task-executor 這個關鍵 plist 是否存在
+    has_canary_plist = CANARY_PLIST.exists()
+    details["canary_plist_exists"] = has_canary_plist
+    if not has_canary_plist:
+        issues.append("com.neuralis.task-executor.plist missing — bridge won't survive reboot")
+
+    severity = "critical" if issues else "ok"
+    return CheckResult(
+        name="bridge_env",
+        severity=severity,
+        message="; ".join(issues) if issues else "bridge environment healthy",
+        value=float(bridge_count),
+        threshold=1.0,
+        details=details,
+    )
+
+
 def _build_status(checks: list[CheckResult], rows_1h: list[dict[str, Any]], rows_24h: list[dict[str, Any]]) -> dict[str, Any]:
     overall = _max_severity(checks)
     return {
@@ -217,6 +293,7 @@ def main() -> int:
         _check_sandbox_success(rows_1h),
         _check_agency_bypass(rows_1h),
         _check_deny_spike(rows_1h, rows_24h),
+        _check_bridge_env(),
     ]
     status = _build_status(checks, rows_1h, rows_24h)
     _write_status(status)
