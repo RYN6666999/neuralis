@@ -99,3 +99,28 @@ edges:
     contract: scoring router import 成功 → ④ Gate 活著 · 失敗 → bridge 靜默降級（log 一行，無 alarm）
     note: 2026-07-26 證實此閘死過：plist 指 laapenv/bin/python 但實際用 homebrew 3.12 → pydantic 消失 → import fail → 系統照跑但 Gate 全開。probe 用自己 interpreter 測不出來。
     check: "bridge log 最後一次重啟含「Scoring Router canary bridge: enabled」"
+
+  - id: relay_remembers_turn
+    from: relay
+    to: aris-api
+    via: process_worker messages 組裝
+    expect: fail
+    contract: 同 conversation_id 的前幾輪要回放進 messages
+    check: 兩輪哨兵，第二輪答得出第一輪給的代號
+
+  - id: recall_not_selfinflated
+    from: relay
+    to: aris-memory
+    via: _remember
+    expect: fail
+    contract: discovered_salience 只能由真 recall 賺，寫入端不得自發
+    check: 新寫入的 aris-self 記憶 ds=0 且 total_recalls=0
+
+  - id: wake_reaches_prompt
+    from: aris-memory
+    to: aris-api
+    via: chatflow._session_bootstrap_memories
+    expect: fail
+    contract: /wake 三源內容必須真的進到 system prompt
+    note: wake_reads_three 只驗源頭有出東西，沒驗有沒有到終點。這條補另一半。
+    check: 塞哨兵 attention_line → 問 Aris 懸著什麼 → 回覆含哨兵
