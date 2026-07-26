@@ -569,7 +569,8 @@ def _make_chat_handler(orig_handler):
                 result = author_task.result()
                 auth_content = result.get("content", "")
                 auth_engine = result.get("engine", "laap-core")
-                if auth_content:
+                if not (auth_engine == "laap-fallback"
+                        or (auth_engine.startswith("rules:") and re.match(r'^\[.*\]', auth_content.strip()))):
                     content = auth_content
                     engine = auth_engine
             except asyncio.TimeoutError:
