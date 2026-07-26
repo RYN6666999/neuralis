@@ -60,8 +60,9 @@ class AgencyLoop:
 
     v0.2 — 神經調節物質：
     腎上腺素：arousal 縮短 agency interval。
-    催產素：per-entity trust 權重，熟人 relatedness 增益更大。
-    催產素 v0.2 補完：relatedness 加入查詢角度，trust 真正驅動行為。
+    催產素 v0.3 — 登場感（presence）：per-entity trust 量「這個人現在在不在」，
+    遞增上升 + 閒置向 baseline 回歸（不再飽和），接活槓桿 _effective_exploration
+    （在場少探索、離開多探索）。舊的 relatedness 增益已移除（該需求無查詢角度，接空鉤）。
 
     v0.3 — 持久化：
     RPE 學習狀態 (_need_stats, trust, exploration_rate) 定期寫入 gbrain，
@@ -97,9 +98,10 @@ class AgencyLoop:
         self._exploration_rate = 0.15              # 探索非最優角度的機率
         self._rpe_total = 0.0                      # 累計 RPE（儀表用）
         self._rpe_count = 0
-        # ── 催產素：信任權重 ──
-        self._trust_scores: dict = {"user": 0.3}   # entity → trust 0-1
-        self._trust_decay_rate = 0.0005             # 每次評估衰減量
+        # ── 催產素：登場感（presence）感測器 ──
+        # trust = 「這個人現在在不在」。互動推高（遞增式，越高越難推），
+        # 閒置向 baseline 均值回歸（OU 式，會真的降下來）。不再單調飽和到 1.0。
+        self._trust_scores: dict = {"user": self._TRUST_BASELINE}   # entity → presence 0-1
         # ── 自我強化循環防護 ──
         self._last_was_self_initiated: bool = False
         self._self_cycle_count: int = 0
@@ -213,14 +215,14 @@ class AgencyLoop:
         if len(self._action_ts) >= self.max_per_hour:
             return  # rate cap
 
-        # 催產素：信任衰減
+        # 登場感：閒置時向 baseline 均值回歸（沒互動 → presence 真的降下來）
         for entity in self._trust_scores:
-            self._trust_scores[entity] = max(0.0, self._trust_scores[entity] - self._trust_decay_rate)
+            t = self._trust_scores[entity]
+            self._trust_scores[entity] = t + (self._TRUST_BASELINE - t) * self._TRUST_DECAY_PULL
 
         drives = self.psi.get_drives()
-        # 催產素：信任權重 → relatedness 增益（最高 +50%）
-        trust = self._trust_scores.get("user", 0.0)
-        drives["relatedness"] = drives.get("relatedness", 0.0) * (1.0 + trust * 0.5)
+        # presence 不再假驅動 relatedness（該需求 07-15 已退出 _ANGLE，接空鉤）；
+        # 改接活槓桿 _effective_exploration（登場感高 → 少探索、利用你開的題）。
 
         # 依 drive 高→低找第一個「超閾值 + 不在 cooldown + 規則表有招」的需求
         for need, drive in sorted(drives.items(), key=lambda kv: kv[1], reverse=True):
@@ -238,10 +240,11 @@ class AgencyLoop:
     def note_interaction(self, entity: str = "user") -> None:
         """催產素：每次使用者互動提升信任權重（從 chatflow 呼叫）。
 
-        trust 上升快（+0.03/次），下降慢（decay 0.0005/評估週期）。
+        遞增式上升（越接近 1 越難推），閒置由 _evaluate 向 baseline 回歸。
+        不再單調飽和：互動密集 → 高登場感，離開久 → 落回 baseline。
         """
-        old = self._trust_scores.get(entity, 0.0)
-        self._trust_scores[entity] = min(1.0, old + 0.03)
+        old = self._trust_scores.get(entity, self._TRUST_BASELINE)
+        self._trust_scores[entity] = old + (1.0 - old) * self._TRUST_RISE_GAIN
         self._self_cycle_count = 0  # 真互動重置循環計數
 
     # ── 持久化：RPE 學習狀態 → gbrain ──
@@ -406,6 +409,13 @@ class AgencyLoop:
 
     _ANGLE = {"certainty": "", "growth": "延伸 新方向", "competence": "作法 經驗 問Scream"}
 
+    # ── 登場感（presence）調參 ──
+    _TRUST_BASELINE = 0.2      # 閒置均值回歸目標（冷場底值）
+    _TRUST_RISE_GAIN = 0.15    # 每次互動：trust += (1-trust)*gain（遞增式）
+    _TRUST_DECAY_PULL = 0.05   # 每評估週期：trust += (baseline-trust)*pull（回歸式）
+    _TRUST_MID = 0.5           # 探索調變的中性參考點
+    _TRUST_EXPLORE_K = 0.6     # 登場感 → 探索率調變強度
+
     # T5: AgentOS 工具路由 — 當 exploration 觸發時，agency 可用 web-search 取代 gbrain
     _AGENTOS_TOOL_MAP = {
         "growth":     ("web-search", "最新發展 新技術 趨勢"),  # (tool, angle_suffix)
@@ -567,6 +577,10 @@ class AgencyLoop:
                   (1.0 - 0.6 * max(0.0, biases["attention_narrowing"]))
         except Exception:
             pass  # affective 沒起 → 用底值
+        # 登場感調變：你在場（presence 高）→ 少探索、利用你開的題；
+        # 你離開久（presence 落回 baseline）→ 多探索、自主漫遊。
+        presence = self._trust_scores.get("user", self._TRUST_BASELINE)
+        eff *= 1.0 + (self._TRUST_MID - presence) * self._TRUST_EXPLORE_K
         return max(0.02, min(0.5, eff))
 
     @staticmethod
