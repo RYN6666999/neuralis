@@ -42,6 +42,8 @@ _NEED_NAMES = ["certainty", "competence", "autonomy", "relatedness", "growth"]
 # ── QUIRK-1 constants (label reads raw_valence, injection reads endorphin) ──
 _LABEL_VALENCE_THRESHOLD = 0.3
 
+_filter_blocked: int = 0           # 被擋下的累計次數（兩條 path 共用）
+
 _STATE_LABEL_MAP = {
     "competence": ("confident.helpful", "humble.learning"),
     "relatedness": ("warm.grateful", "lonely.seeking"),
@@ -70,12 +72,20 @@ class PythonPsiBackend:
         self._core.stop()
 
     def process_input(self, text: str, source: str = "user") -> None:
+        global _filter_blocked
         # M1 compatibility limit: the current PsiCore.process_input has
         # no `source` parameter, so `source` is ACCEPTED but not stored,
         # not audited, and not forwarded to the constitution.  It has
         # zero effect on PSI behavior here.  Real provenance/constitution
         # wiring is future work; do not add a `last_source` field.
-        self._core.process_input(text)
+        if _is_human_input(text):
+            self._core.process_input(text)
+        else:
+            old = self._core.last_input
+            self._core.process_input(text)   # 情緒照跑，不擋
+            self._core.last_input = old      # 只還原 last_input
+            _filter_blocked += 1
+            logger.info(f"[PythonPsiBackend] _last_input 已擋 {_filter_blocked} 次（非真人輸入）")
 
     def get_state(self) -> Dict[str, Any]:
         # As-is: no copy, no recompute, no injected schema_version/
@@ -378,7 +388,14 @@ class RustPsiBackend:
                 self._daemon_process.wait()
             self._daemon_process = None
 
-    # ── B2: keyword→AffectiveEvent mapping (mirrors PsiCore.process_input) ──
+    # ── 過濾函式：判斷是否為真人輸入（供兩條 path 共用）──
+def _is_human_input(text: str) -> bool:
+    """False for system-injected inputs (Scream reminders, bridge notifications)."""
+    t = text.strip()
+    return not (t.startswith("<system-reminder>") or "📬 留言板" in text or "【⚠️ Aris 通訊協議" in text)
+
+
+# ── B2: keyword→AffectiveEvent mapping (mirrors PsiCore.process_input) ──
     _NEED_EVENT_MAP: dict[str, str] = {
         "competence": "CompetenceSuccess",
         "autonomy": "AutonomyGranted",
@@ -421,7 +438,12 @@ class RustPsiBackend:
         Mirrors PsiCore.process_input() keyword matching.  The daemon's
         FIFO reader thread picks up the events and posts them to the Rust
         engine's ring buffer via PsiHandle.post_event()."""
-        self._last_input = text
+        global _filter_blocked
+        if not _is_human_input(text):
+            _filter_blocked += 1
+            logger.info(f"[RustPsiBackend] _last_input 已擋 {_filter_blocked} 次（非真人輸入）")
+        else:
+            self._last_input = text
         text_lower = text.lower()
 
         # 1. Keyword matching — map matched needs to AffectiveEvent names.
