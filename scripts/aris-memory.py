@@ -395,6 +395,7 @@ def _serve(port=PORT):
                 serves_needs=body.get("serves_needs"),
                 psi_state=body.get("psi_state"),
                 mood_note=body.get("mood_note", ""),
+                flagged=body.get("flagged", 0),
             )
             self._send(200, r)
 

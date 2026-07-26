@@ -91,3 +91,11 @@ edges:
     via: aris_memory.wake_context
     contract: 任一源掛掉跳過該塊，永不擋醒來 · 至少要有一源出東西
     check: GET /wake → context 非空且含 ≥1 個【】區塊標題
+
+  - id: bridge_scoring_router
+    from: bridge
+    to: bridge
+    via: startup import check（contracts.verdict_v2 + scoring）
+    contract: scoring router import 成功 → ④ Gate 活著 · 失敗 → bridge 靜默降級（log 一行，無 alarm）
+    note: 2026-07-26 證實此閘死過：plist 指 laapenv/bin/python 但實際用 homebrew 3.12 → pydantic 消失 → import fail → 系統照跑但 Gate 全開。probe 用自己 interpreter 測不出來。
+    check: "bridge log 最後一次重啟含「Scoring Router canary bridge: enabled」"

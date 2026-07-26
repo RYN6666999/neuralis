@@ -15,6 +15,7 @@ exit 1 = 有非預期的紅。`expect: fail` 的邊紅了算預期，不影響 e
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +33,57 @@ MEM_DB = Path.home() / ".aris-memory.db"
 BOARD = Path.home() / ("Library/Mobile Documents/iCloud~md~obsidian"
                        "/Documents/Fun/Aris/留言板.md")
 MEM_URL = "http://127.0.0.1:11551"
+BRIDGE_PLIST = Path.home() / "Library/LaunchAgents/com.neuralis.task-executor.plist"
+
+
+def _live_bridge_python() -> str:
+    """從正在跑的 bridge process 抓它實際用的 python 路徑。
+
+    不問 plist（plist 說謊過、也可能 bridge 是手動重開的）。
+    從 __PYVENV_LAUNCHER__ 環境變數拿（保留 virtualenv symlink）。
+    找不到 process 時回空字串 — 讓呼叫端退到 _bridge_python_fallback()。
+    """
+    try:
+        import subprocess
+        r = subprocess.run(["pgrep", "-f", "agentos-aris-bridge\\.py"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0 or not r.stdout.strip():
+            return ""
+        pid = r.stdout.strip().splitlines()[0]
+        # 從 process 的環境變數拿 __PYVENV_LAUNCHER__（叫用時的 python 路徑）
+        env = subprocess.run(["ps", "eww", "-p", pid],
+                             capture_output=True, text=True, timeout=5)
+        if env.returncode == 0:
+            for token in env.stdout.split():
+                if token.startswith("__PYVENV_LAUNCHER__="):
+                    return token.split("=", 1)[1]
+        # 備案：command line 第一個 token
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", pid],
+                             capture_output=True, text=True, timeout=5)
+        if cmd.returncode == 0 and cmd.stdout.strip():
+            return cmd.stdout.strip().split()[0]
+    except Exception:
+        pass
+    return ""
+
+
+def _bridge_python_fallback() -> str:
+    """plist 備案 — 只在 bridge 沒跑時用。"""
+    try:
+        import plistlib
+        with BRIDGE_PLIST.open("rb") as f:
+            pl = plistlib.load(f)
+        cmd = " ".join(pl.get("ProgramArguments", []))
+        for token in cmd.split():
+            if token.endswith("/python") or token.endswith("/python3"):
+                return token
+        import re
+        m = re.search(r'\bexec\s+(/[^\s]+/python[3]?\S*)', cmd)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
 
 
 def _rows() -> int:
@@ -138,12 +190,16 @@ def webchat_to_memory():
 
 
 def memos_to_gbrain():
-    """夜班固化能不能列出待固化，且不報錯。"""
-    r = subprocess.run([sys.executable, str(ROOT / "scripts/consolidate-memos.py"),
+    """夜班固化能不能列出待固化，且不報錯。用 bridge 的 interpreter 跑，不是 probe 自己的。"""
+    bp = _live_bridge_python() or _bridge_python_fallback()
+    py = bp or sys.executable
+    log_prefix = f" (live bridge python: {bp})" if bp else " (fallback: probe's own python)"
+    r = subprocess.run([py, str(ROOT / "scripts/consolidate-memos.py"),
                         "--all", "--dry-run"], capture_output=True, text=True)
     if r.returncode != 0:
         return False, r.stderr.strip()[:160]
-    return ("固化" in r.stdout), r.stdout.strip().splitlines()[-1][:120]
+    return (("固化" in r.stdout) or ("no memos" in r.stdout.lower())), (
+        r.stdout.strip().splitlines()[-1][:120] + log_prefix)
 
 
 def wake_reads_three():
@@ -157,9 +213,42 @@ def wake_reads_three():
     return (n >= 1), f"{n} 個區塊" + ("" if n else "（三源全空）")
 
 
+def bridge_scoring_router():
+    """Scoring router import 是否成功。用 bridge 自己的 python 跑 import 測試。
+
+    2026-07-26 證實：plist→laapenv 但實跑 homebrew → pydantic 不在 → import 靜默降級。
+    probe 用自己的 interpreter（有 pydantic）永遠測不出來。
+    """
+    bp = _live_bridge_python() or _bridge_python_fallback()
+    if not bp:
+        return False, "抓不到 live bridge process，plist 也解析失敗"
+    sandbox = str(Path.home() / "agent-sandbox")
+    r = subprocess.run([bp, "-c",
+                        "from contracts.verdict_v2 import ActionRequest, VerdictV2; "
+                        "from router.scoring import score; "
+                        "print('OK')"],
+                       capture_output=True, text=True, timeout=10,
+                       env={**os.environ, "PYTHONPATH": sandbox})
+    if r.returncode != 0:
+        err = r.stderr.strip()
+        # 截取有效錯誤訊息（避免 traceback flood）
+        lines = err.splitlines()
+        key = "\n".join(ln for ln in lines if "Error" in ln or "error" in ln or "No module" in ln)
+        return False, f"scoring router import 失敗: {(key or err)[:200]}"
+    # 第二層確認：bridge log 最近的 startup 有 enabled 嗎？
+    if BRIDGE_LOG.exists():
+        lines = BRIDGE_LOG.read_text(errors="replace").splitlines()
+        for line in reversed(lines):
+            if "Scoring Router canary bridge" in line:
+                ok = "enabled" in line
+                return ok, ("enabled" if ok else f"disabled: {line.split('—')[-1].strip()}")
+    return True, f"import OK（log 未確認）"
+
+
 PROBES = {f.__name__: f for f in (
     board_to_channel, channel_to_aris, aris_to_memory,
-    webchat_to_memory, memos_to_gbrain, wake_reads_three)}
+    webchat_to_memory, memos_to_gbrain, wake_reads_three,
+    bridge_scoring_router)}
 
 
 def main(argv=None) -> int:
