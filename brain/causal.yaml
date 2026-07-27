@@ -59,6 +59,14 @@ blockers:
     blocks: [固化cron, 檢索過濾, 升格路徑, 修剪cron]
     src: 管線地圖 §11 #6 #9 #14
     note: 下游 4 個全 P0。目前圖上最高槓桿點。
+    evidence: |
+      brain/memcheck.py 2026-07-27 唯讀實測 ~/.aris-memory.db（152 筆）：
+      · confidence 欄 152/152 全 yellow —— 零 green 零 red
+      · origin 欄 152/152 全 auto_generated —— 零 human
+      · provenance 欄 152/152 全空
+      三欄都存在（有人設計過），但沒有任何邏輯在填。
+      這是「閘宣告了但沒接線」的硬證據，不是推論。
+    verify: python3 brain/memcheck.py
 
   - id: salience-gate
     label: Salience 閘（什麼值得學 vs 雜訊）
@@ -188,6 +196,28 @@ risks:
     why: 上游 lorryjovens-hub 一動可能靜默漂移，且本地有未提交變更
     fix: brain/drift.py 監測（已實作）；決定要跟上游還是長期分叉
     detected_by: brain/drift.py 2026-07-27 實測
+
+  - id: origin-all-auto
+    severity: high
+    what: 152/152 筆記憶的 origin 都是 auto_generated，零筆標 human
+    why: |
+      Ryan 說的話和 AI 自己說的話在資料庫裡權重相同。
+      AI 讀回自己的推測，會誤認為是事實 → 自我強化迴路（self-reinforcement）。
+      這比「記錯」更危險：記錯可以查，自我強化會越查越確信。
+    fix: 寫入端依來源分流 —— webchat/ob 來源標 human，aris-self 標 auto_generated
+    detected_by: brain/memcheck.py 2026-07-27 實測
+    blocks_ref: confidence-gate
+
+  - id: gbrain-never-synced
+    severity: high
+    what: synced_to_gbrain 0/152，而 ~/gbrain 有 4697 個 md
+    why: |
+      L2 語意層（gbrain）和 L3 長期層（.aris-memory.db）是兩座孤島。
+      海馬迴 → 皮質的升格（固化）實際沒在跑，只是 schema 裡有這個欄位。
+      後果：新記憶永遠查不到舊知識，舊知識永遠不知道新發生了什麼。
+    fix: 固化 cron（見 blockers.固化cron，被 confidence-gate 卡住）
+    detected_by: brain/memcheck.py 2026-07-27 實測
+    blocks_ref: 固化cron
 
   - id: aris-mem-no-auth
     severity: medium

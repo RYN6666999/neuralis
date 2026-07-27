@@ -3,7 +3,7 @@
 
 # NEURALIS — AI 冷啟動簡報
 
-生成於 2026-07-27 15:21 CST　·　模式：live 實測
+生成於 2026-07-27 18:56 CST　·　模式：live 實測
 
 ## 先讀這三條
 
@@ -56,6 +56,8 @@ LB-arcanum(記憶) → neuralis(大腦/Aris) ⇄ scream(身體)
 |---|---|---|
 | 🔴 | `scream-stale` | Scream 本地 0.10.0，npm latest 0.10.13 — 落後 13 版 |
 | 🟡 | `laap-diverged` | 本地 laap-AGI feat/env-config-hermes@7f02b62 ≠ upstream/main@c3d495c |
+| 🔴 | `origin-all-auto` | 152/152 筆記憶的 origin 都是 auto_generated，零筆標 human |
+| 🔴 | `gbrain-never-synced` | synced_to_gbrain 0/152，而 ~/gbrain 有 4697 個 md |
 | 🟡 | `aris-mem-no-auth` | aris-mem.* tunnel 無 bearer token |
 | 🔴 | `doc-lies` | 文件宣稱的功能實際不存在 |
 
