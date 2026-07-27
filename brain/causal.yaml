@@ -39,7 +39,8 @@ hubs:
     role: 身體 · CLI + 42 工具
     repo: LIUTod/scream-code
     owned: false          # ← 上游，不是你的
-    risk: 本地 ~/Developer/neuralis/scream-code 無 .git，無法比對漂移
+    install: npm 全域 /opt/homebrew/lib/node_modules/scream-code
+    risk: 本地 0.10.0 落後 npm latest 0.10.13 共 13 版（drift.py 實測 2026-07-27）
 
   - id: laap-upstream
     role: laap-core · PSI 引擎源頭
@@ -168,19 +169,25 @@ sealed:
 
 # ── 已知風險：探測不到但會咬人 ──
 risks:
-  - id: scream-no-git
+  - id: scream-stale
     severity: high
-    what: ~/Developer/neuralis/scream-code 無 .git
-    why: 身體跑這份碼，但無法比對上游 LIUTod/scream-code，不知落後多少或本地改過什麼
-    fix: git init + 加 upstream remote，或改用 submodule
-    detected_by: genspark 2026-07-27 實測
+    what: Scream 本地 0.10.0，npm latest 0.10.13 — 落後 13 版
+    why: |
+      身體是 npm 全域安裝（/opt/homebrew/lib/node_modules/scream-code），不是原始碼。
+      ~/Developer/neuralis/scream-code/ 只有 mcp.json，是設定不是碼 —— 所以「無 .git」
+      本身不是問題，這裡從來不該有 git。真正的問題是版本落後 13 版。
+    fix: npm i -g scream-code@latest（升級前先確認 config.toml 相容）
+    detected_by: brain/drift.py 2026-07-27 實測
+    note: |
+      前一版 causal.yaml 曾記為 scream-no-git（誤判：以為該目錄是原始碼）。
+      這正是 doc-lies 風險的實例 —— 連我自己也會誤判，所以一切以實測為準。
 
   - id: laap-diverged
     severity: medium
-    what: 本地 laap-AGI 在 feat/env-config-hermes，非 main
-    why: 上游 lorryjovens-hub 一動可能靜默漂移
-    fix: upstream_laap_drift probe
-    detected_by: genspark 2026-07-27 實測
+    what: 本地 laap-AGI feat/env-config-hermes@7f02b62 ≠ upstream/main@c3d495c
+    why: 上游 lorryjovens-hub 一動可能靜默漂移，且本地有未提交變更
+    fix: brain/drift.py 監測（已實作）；決定要跟上游還是長期分叉
+    detected_by: brain/drift.py 2026-07-27 實測
 
   - id: aris-mem-no-auth
     severity: medium

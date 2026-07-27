@@ -18,6 +18,8 @@
 | `../topology.yaml` | **執行期**：邊現在通不通 | `scripts/probe.py` 真打一輪 |
 | `causal.yaml` | **設計期**：誰卡著誰 | 不可探測，只能宣告 + 附 `src` |
 | `blast.py` | **影響半徑**：動它會炸到誰 | 靜態走圖 |
+| `drift.py` | **上游**：不是我的東西動了沒 | 查 npm / GitHub API |
+| `context.py` | **合成**：一份給 AI 的簡報 | 生成 `CONTEXT.md` |
 
 判斷該寫哪份的規則：
 - 「A 呼叫 B 但斷了」→ `topology.yaml`
@@ -31,7 +33,11 @@
 ./brain/blast.py 修剪cron --why      # 它被誰卡住
 ./brain/blast.py --risks            # 只看風險
 ./brain/blast.py --json             # 機器讀
+./brain/drift.py                    # 上游漂移偵測
+./brain/context.py --live -o brain/CONTEXT.md   # 生成 AI 冷啟動簡報
 ```
+
+**新 session 開場只要一句**：讀 `brain/CONTEXT.md`。
 
 ## 系統一句話
 
@@ -69,19 +75,22 @@ LB-arcanum(記憶) → neuralis(大腦/Aris) ⇄ scream(身體)
 
 | 風險 | 說明 |
 |---|---|
-| 🔴 `scream-no-git` | 本地 `scream-code` 無 `.git`，無法比對上游漂移 |
+| 🔴 `scream-stale` | Scream 本地 `0.10.0`，npm latest `0.10.13` — **落後 13 版** |
 | 🔴 `doc-lies` | 文件宣稱 ≠ 實際。只信 probe |
-| 🟡 `laap-diverged` | 本地在 `feat/env-config-hermes`，非 main |
+| 🟡 `laap-diverged` | `feat/env-config-hermes@7f02b62` ≠ `upstream/main@c3d495c` |
 | 🟡 `aris-mem-no-auth` | tunnel 無 bearer token |
 
 ## 給各個 AI 的用法
 
 | AI | 怎麼用 |
 |---|---|
-| **Genspark**（雲端） | 讀本檔 + `blast.py --json` |
+| **Genspark**（雲端） | 貼 `CONTEXT.md`，或從 GitHub 讀 |
 | **Claude Desktop** | 檔案系統 MCP 指向 `brain/` |
-| **Scream / Aris** | `./brain/blast.py`；或 `--json` 餵 gbrain |
+| **Scream / Aris** | `cat brain/CONTEXT.md`；`--json` 餵 gbrain |
 | **Copilot** | `.github/copilot-instructions.md` 指過來 |
+
+`CONTEXT.md` 開頭寫死「勿手改」——**沒有人能在裡面塞一句假話而不被下次重跑洗掉**。
+這是針對 `doc-lies` 前科的結構性防禦。
 
 ## 維護
 
