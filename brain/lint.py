@@ -39,6 +39,7 @@ exit 0 = 乾淨 · exit 1 = 有違規
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -193,6 +194,17 @@ def check_gate_alive() -> list[str]:
     不在這裡跑 `git hook run pre-commit` —— 這支自己被 pre-commit 呼叫，
     那樣會無限遞迴。改成解析出「git 實際會用的那個檔」再驗它。
     """
+    # CI 上沒有 pre-commit 也不該有 —— CI 自己就是那道閘，要求它再裝一個
+    # 本機 hook 是範疇錯誤。但版控裡的那份必須完好，否則本機裝了也是空的。
+    if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+        h = ROOT / ".githooks" / "pre-commit"
+        if not h.exists():
+            return ["版控裡的 .githooks/pre-commit 不見了 —— 本機再怎麼設定都掛不上"]
+        if not h.stat().st_mode & 0o111:
+            return [".githooks/pre-commit 沒有執行位元（git 會靜默跳過）→ "
+                    "git update-index --chmod=+x .githooks/pre-commit"]
+        return []
+
     rc, configured = _git("config", "core.hooksPath")
     versioned = rc == 0 and configured
     hooks_dir = (ROOT / configured) if versioned else (ROOT / ".git" / "hooks")
