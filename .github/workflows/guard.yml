@@ -1,0 +1,81 @@
+# guard.yml — 繞不過的那道閘。
+#
+# 為什麼要有這個：pre-commit 有兩個天生的洞，都不是它的錯，是它的性質。
+#   1. `.git/hooks` 不進版控 —— 換分支、重 clone 就靜默消失。2026-07-27
+#      查出主分支的閘已經死了一段時間，每次 commit 都沒被擋過，無聲無息。
+#   2. `git commit --no-verify` 一秒繞過。逃生門本來就該存在，但不能是
+#      唯一一道門旁邊的逃生門。
+#
+# CI 兩個洞都沒有：跑在別人的機器上，讀版控裡的這份檔，你本機怎麼設定
+# 都繞不掉。所以真正的鐵律守在這裡，pre-commit 只是讓你早點知道。
+#
+# 本機與 CI 跑的是同一組指令（見下），不是兩份各自維護的清單 ——
+# 兩份就會漂移，那又是一個抄本，又是一個 doc-lie 的溫床。
+#
+# 沒有放進來的：scripts/probe.py。它要打活的 relay(11550) / Aris API(11546)，
+# CI 上沒有那些服務，硬跑只會得到「服務未啟動」的假紅。假紅比沒有更糟 ——
+# 人會學會無視紅燈。probe 保持手動 + 上線前跑。
+
+name: Guard
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  guard:
+    name: 鐵律 · 事實只能推導不能複製
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        # fetch-depth: 0 —— lint 檢查 B 要驗 src 引用的 commit hash 存不存在，
+        # 淺 clone 會讓真實存在的舊 commit 被誤判成幻覺（假陽性）。
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install deps
+        run: pip install -r requirements-dev.txt
+
+      # ---------- 情報層守門人 ----------
+      # A src 必填 · B src 可解析（3b966ae 那個病）· C schema
+      # D 常數未抄襲（鐵律核心）· E 閘存活
+      # 任一紅 → hard stop。
+      - name: Lint · 情報層
+        run: python3 brain/lint.py
+
+      # ---------- 測試 ----------
+      - name: Tests
+        run: python3 -m pytest -q tests/
+
+      # ---------- 拓樸結構 ----------
+      # topology.yaml 的 edges 與 probe.py 的 PROBES 必須一一對應（對稱差集）。
+      # 這段是純結構檢查，不打任何服務，所以 CI 跑得動。
+      # 少一條 probe 就少一條被驗證的線，而且沒有人會發現 —— 所以要擋。
+      - name: Topology · 對稱差集
+        run: |
+          python3 - <<'PY'
+          import sys, pathlib, yaml, re
+          root = pathlib.Path('.')
+          edges = {e['id'] for e in yaml.safe_load(
+              (root / 'topology.yaml').read_text(encoding='utf-8'))['edges']}
+          src = (root / 'scripts' / 'probe.py').read_text(encoding='utf-8')
+          block = re.search(r'PROBES\s*=\s*\{f\.__name__:\s*f\s+for\s+f\s+in\s+\((.*?)\)\}',
+                            src, re.S)
+          if not block:
+              sys.exit('找不到 PROBES 定義 —— probe.py 結構變了，這段檢查要跟著改')
+          probes = {n.strip() for n in block.group(1).replace('\n', ' ').split(',') if n.strip()}
+          drift = edges ^ probes
+          if drift:
+              sys.exit(f'✗ 拓樸漂移：{sorted(drift)}\n'
+                       f'  edges={len(edges)} probes={len(probes)}\n'
+                       f'  加邊必須同時加 probe 函式，反之亦然。')
+          print(f'✓ {len(edges)} 條邊一一對應')
+          PY

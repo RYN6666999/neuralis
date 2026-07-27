@@ -1,0 +1,48 @@
+#!/bin/sh
+# pre-commit — 提交前的閘。不過就不准進版控。
+#
+# ┌─ 為什麼放在 .githooks/ 而不是 .git/hooks/ ────────────────────────┐
+# │ .git/hooks 不進版控。前一版把閘做成 .git/hooks/pre-commit 指向    │
+# │ scripts/pre-commit.sh 的 symlink，切到沒有那支檔的分支之後：      │
+# │                                                                  │
+# │   $ git hook run pre-commit                                      │
+# │   error: cannot find a hook named pre-commit    ← exit 0          │
+# │                                                                  │
+# │ git 對懸空 hook 是「靜默放行」，不是報錯。閘看起來在，實際死了，   │
+# │ 而且沒有任何訊號。之後每一次 commit 都沒被擋過。                  │
+# │                                                                  │
+# │ 這份放進版控，用 core.hooksPath 指過來，換分支就跟著走：          │
+# │   git config core.hooksPath .githooks                            │
+# │ 裝沒裝，跑 `python3 brain/lint.py` 的檢查 E 會告訴你。           │
+# └──────────────────────────────────────────────────────────────────┘
+#
+# 這裡只放「快 + 不需要外部服務」的檢查。scripts/probe.py 要打活的
+# relay / Aris API，服務沒起就會紅 —— 那種東西擋 commit 只會逼人養成
+# --no-verify 的習慣，閘就白做了。probe 保持手動 + 上線前跑。
+#
+# 逃生門：git commit --no-verify（只給 docs-only 或真的緊急用，
+# 不要拿來閃真失敗 —— CI 那關擋得住，你只是把問題往後推）。
+set -e
+
+# rtk 包的 python3 沒有 numpy，會假失敗。釘 homebrew 那支。
+PY="${NEURALIS_TEST_PY:-/opt/homebrew/bin/python3}"
+if [ ! -x "$PY" ]; then
+    echo "[pre-commit] 找不到直譯器：$PY（可用 NEURALIS_TEST_PY 覆蓋）" >&2
+    exit 1
+fi
+
+echo "[pre-commit] 情報層守門人 ..."
+if ! "$PY" brain/lint.py; then
+    echo "[pre-commit] LINT 失敗 —— commit 擋下。" >&2
+    echo "  鐵律：事實只能推導，不能複製。修掉違規，或把沒出處的宣稱刪掉。" >&2
+    exit 1
+fi
+
+echo "[pre-commit] 測試 ..."
+if ! "$PY" -m pytest -q -p no:cacheprovider tests/; then
+    echo "" >&2
+    echo "[pre-commit] 測試失敗 —— commit 擋下。" >&2
+    exit 1
+fi
+
+echo "[pre-commit] 綠。"
