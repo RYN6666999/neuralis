@@ -1,0 +1,233 @@
+# causal.yaml — Neuralis 設計期因果鏈
+#
+# topology.yaml 管「執行期」：邊現在通不通，每條有 probe 真打一輪。
+# 這份管「設計期」：誰卡著誰，為什麼還沒做，解開一個能連帶解開幾個。
+#
+# 兩份的分工是硬的，別混：
+#   - 「A 呼叫 B 但斷了」        → topology.yaml（可探測）
+#   - 「A 沒做因為 B 還沒建好」  → 這裡（探測不到，只能宣告）
+#
+# 規矩（沿用 topology.yaml，加一條）：
+#   - 每個 blocker 都要有 src，指回真實出處。沒 src 的是幻覺，刪掉。
+#   - 一個項目只准出現在一個 blocker 的 to 裡。多重阻塞列 also_blocked_by。
+#   - 狀態只有四種：done / partial / not_started / sealed。不准自創。
+#
+# 用法：./brain/blast.py <id>   → 看動它會炸到誰
+
+version: 1
+updated: 2026-07-27
+source: Aris/Scream 完整管線地圖 v2 (2026-07-26) §6 §11
+
+# ── 樞紐節點：粗神經節，動它們全身震 ──
+hubs:
+  - id: neuralis
+    role: 大腦 · 主樞紐
+    repo: RYN6666999/neuralis
+    owned: true
+
+  - id: LB-arcanum
+    role: 語意記憶源頭（gbrain）
+    repo: RYN6666999/LB-arcanum
+    owned: true
+
+  - id: agentOS
+    role: 工具面 · 38 工具 registry
+    repo: RYN6666999/agent-sandbox
+    owned: true
+
+  - id: scream
+    role: 身體 · CLI + 42 工具
+    repo: LIUTod/scream-code
+    owned: false          # ← 上游，不是你的
+    install: npm 全域 /opt/homebrew/lib/node_modules/scream-code
+    risk: 本地 0.10.0 落後 npm latest 0.10.13 共 13 版（drift.py 實測 2026-07-27）
+
+  - id: laap-upstream
+    role: laap-core · PSI 引擎源頭
+    repo: lorryjovens-hub/laap-AGI
+    owned: false          # ← 上游，不是你的
+    risk: 本地在 feat/env-config-hermes，已與 upstream/main 分岔
+
+# ── 阻塞鏈：誰卡著誰 ──
+# from 沒完成 → to 全部動不了。這是「牽一髮動全身」的實體。
+blockers:
+  - id: confidence-gate
+    label: Confidence 閘（四繩計算）
+    status: partial
+    done: [寫入端硬閘, origin/confidence/provenance 三欄, 封頂, relay 帶 origin]
+    missing: [四繩計算, 檢索過濾, 黃轉綠升格路徑]
+    blocks: [固化cron, 檢索過濾, 升格路徑, 修剪cron]
+    src: 管線地圖 §11 #6 #9 #14
+    note: 下游 4 個全 P0。目前圖上最高槓桿點。
+    evidence: |
+      brain/memcheck.py 2026-07-27 唯讀實測 ~/.aris-memory.db（152 筆）：
+      · confidence 欄 152/152 全 yellow —— 零 green 零 red
+      · origin 欄 152/152 全 auto_generated —— 零 human
+      · provenance 欄 152/152 全空
+      三欄都存在（有人設計過），但沒有任何邏輯在填。
+      這是「閘宣告了但沒接線」的硬證據，不是推論。
+    verify: python3 brain/memcheck.py
+
+  - id: salience-gate
+    label: Salience 閘（什麼值得學 vs 雜訊）
+    status: not_started
+    done: [spec 已寫在 2-記憶系統/]
+    missing: [Phase 1 編碼]
+    blocks: [值得學判斷, 修剪cron]
+    src: 管線地圖 §6 §11 #8
+    note: spec 齊了但沒開工。第二高槓桿。
+
+  - id: 固化cron
+    label: 海馬→皮質升格 cron
+    status: not_started
+    blocked_by: [confidence-gate]
+    blocks: [重建式查詢]
+    src: 管線地圖 §11 #9
+
+  - id: 修剪cron
+    label: 修剪 cron（只剪連結不刪頁）
+    status: not_started
+    blocked_by: [confidence-gate, salience-gate]
+    src: 管線地圖 §11 #11
+    note: 雙重阻塞，最晚能動的一個。
+
+  - id: 檢索過濾
+    label: confidence 檢索過濾
+    status: not_started
+    blocked_by: [confidence-gate]
+    src: 管線地圖 §11 #6
+
+  - id: 升格路徑
+    label: 黃轉綠升格
+    status: not_started
+    blocked_by: [confidence-gate]
+    src: 管線地圖 §11 #6
+
+  - id: 值得學判斷
+    label: 自發成長判斷邏輯
+    status: not_started
+    blocked_by: [salience-gate]
+    src: 管線地圖 §6
+
+  - id: 重建式查詢
+    label: 擴散激活 = 聯想
+    status: not_started
+    blocked_by: [固化cron]
+    src: 管線地圖 §11 #10
+    note: Aris 自認弱點，高難度。鏈最深處。
+
+  - id: 因果鏈前瞻
+    label: 多步前瞻 T_lookahead
+    status: not_started
+    blocked_by: [gbrain快取]
+    src: 管線地圖 §11 #12
+    note: 拿 gbrain 快取當世界模型做 rollout。
+
+  - id: gbrain快取
+    label: gbrain 快取命中率
+    status: partial
+    metric: 64%
+    blocks: [因果鏈前瞻]
+    src: 管線地圖 §6 §11 #26
+
+  - id: attention_line寫入
+    label: P0 事件帳本 attention_line
+    status: partial
+    done: [schema]
+    missing: [bridge 側每 turn 填 假設/預測/actual/was_useful]
+    src: 管線地圖 §11 #5
+
+# ── 封印：能開但刻意沒開。解封成本 vs 收益 ──
+sealed:
+  - id: rust-psi
+    label: Rust PSI Backend 接線
+    why: RustPsiBackend class 建好，但 startup.py 沒接。先試 Rust 失敗就降級 Python，Python 夠用所以沒人修。
+    unseal_cost: low
+    unseal_gain: 2000 ticks/s · p99 4µs
+    hard_blocker: rustc 未安裝
+    src: 管線地圖 §6 §11 #18 #29
+
+  - id: agency-delegate
+    label: Agency Delegate
+    why: NEURALIS_AGENCY_DELEGATE 未設定，預設 off
+    effect: Aris 只能 call 唯讀白名單（gbrain/qmd/file-search/scream-ask），不能委派 Scream 寫入
+    unseal_cost: low          # 一個環境變數
+    unseal_risk: high         # 大腦獲得身體的寫入權
+    gate_required: [Phase 4b 人類批准閘, Scoring Router sandbox lane]
+    src: 管線地圖 §6 §11 #15
+
+  - id: phase4b-approval
+    label: Phase 4b 人類批准閘
+    why: 只在 Scream 互動 TUI 存在，純 AI 模式（bridge 通道）不經過
+    blocks_unseal_of: [agency-delegate]
+    src: 管線地圖 §5 §6
+
+  - id: sandbox-lane
+    label: Scoring Router sandbox lane
+    why: 程式碼在，lane 未啟用
+    blocks_unseal_of: [agency-delegate]
+    src: 管線地圖 §5 §6 §11 #25
+
+  - id: phase4c-rsi
+    label: Phase 4c RSI 戰略安全層
+    why: 刻意不做
+    unseal_cost: n/a
+    src: 管線地圖 §5 §6
+    note: 這條不是債，是決定。別當 TODO。
+
+# ── 已知風險：探測不到但會咬人 ──
+risks:
+  - id: scream-stale
+    severity: high
+    what: Scream 本地 0.10.0，npm latest 0.10.13 — 落後 13 版
+    why: |
+      身體是 npm 全域安裝（/opt/homebrew/lib/node_modules/scream-code），不是原始碼。
+      ~/Developer/neuralis/scream-code/ 只有 mcp.json，是設定不是碼 —— 所以「無 .git」
+      本身不是問題，這裡從來不該有 git。真正的問題是版本落後 13 版。
+    fix: npm i -g scream-code@latest（升級前先確認 config.toml 相容）
+    detected_by: brain/drift.py 2026-07-27 實測
+    note: |
+      前一版 causal.yaml 曾記為 scream-no-git（誤判：以為該目錄是原始碼）。
+      這正是 doc-lies 風險的實例 —— 連我自己也會誤判，所以一切以實測為準。
+
+  - id: laap-diverged
+    severity: medium
+    what: 本地 laap-AGI feat/env-config-hermes@7f02b62 ≠ upstream/main@c3d495c
+    why: 上游 lorryjovens-hub 一動可能靜默漂移，且本地有未提交變更
+    fix: brain/drift.py 監測（已實作）；決定要跟上游還是長期分叉
+    detected_by: brain/drift.py 2026-07-27 實測
+
+  - id: origin-all-auto
+    severity: high
+    what: 152/152 筆記憶的 origin 都是 auto_generated，零筆標 human
+    why: |
+      Ryan 說的話和 AI 自己說的話在資料庫裡權重相同。
+      AI 讀回自己的推測，會誤認為是事實 → 自我強化迴路（self-reinforcement）。
+      這比「記錯」更危險：記錯可以查，自我強化會越查越確信。
+    fix: 寫入端依來源分流 —— webchat/ob 來源標 human，aris-self 標 auto_generated
+    detected_by: brain/memcheck.py 2026-07-27 實測
+    blocks_ref: confidence-gate
+
+  - id: gbrain-never-synced
+    severity: high
+    what: synced_to_gbrain 0/152，而 ~/gbrain 有 4697 個 md
+    why: |
+      L2 語意層（gbrain）和 L3 長期層（.aris-memory.db）是兩座孤島。
+      海馬迴 → 皮質的升格（固化）實際沒在跑，只是 schema 裡有這個欄位。
+      後果：新記憶永遠查不到舊知識，舊知識永遠不知道新發生了什麼。
+    fix: 固化 cron（見 blockers.固化cron，被 confidence-gate 卡住）
+    detected_by: brain/memcheck.py 2026-07-27 實測
+    blocks_ref: 固化cron
+
+  - id: aris-mem-no-auth
+    severity: medium
+    what: aris-mem.* tunnel 無 bearer token
+    src: 管線地圖 §11 #19
+
+  - id: doc-lies
+    severity: high
+    what: 文件宣稱的功能實際不存在
+    evidence: _現況.md 宣稱 relay 雙寫（commit 3b966ae），實查該 hash 不在 neuralis
+    fix: 只信 probe 端到端實跑，不信 grep 原始碼
+    src: topology.yaml 開頭 · 管線地圖 §9
+    note: 這是本專案最重要的一條紀律。brain/ 產出的所有 .md 都是生成物，不可手改。

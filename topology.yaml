@@ -8,9 +8,17 @@
 #   - 一個概念只准出現在一個 node 的 owns 裡。要設計新東西前先 grep owns。
 #   - 每條邊都要有 probe。沒有 probe 的邊等於沒人管，遲早斷掉沒人知道。
 #   - 改任何 node，跑它上下游兩條 probe。probe 沒過 = 沒做完。
+#
+# 兩層分工（2026-07-27 加）：
+#   - 這份 = 執行期。「這條線現在通不通」，probe 能實測。
+#   - brain/causal.yaml = 設計期。「誰卡住誰」，只宣告不實測。
+#   兩份不准互抄。要問影響半徑跑 brain/blast.py，不要在這裡塞因果。
+#
+# ⚠️ edges: 受 probe.py 硬鎖（set(edges) ^ set(PROBES) 不為空就 return 2）。
+#    加邊必須同時加 probe 函式，否則全套驗證癱瘓。跨 repo 節點只加 node，不加 edge。
 
 version: 1
-updated: 2026-07-26
+updated: 2026-07-27
 
 nodes:
   - id: board
@@ -40,6 +48,36 @@ nodes:
   - id: relay
     at: scripts/aris-relay.py  # port 11550
     owns: [webchat 通道, event 狀態機]
+
+  # ── 跨 repo 節點（2026-07-27 加）─────────────────────────
+  # 這些不在 neuralis 裡，但 neuralis 依賴它們。
+  # 沒有 edge，因為 probe 驗不到別人的 repo；改用 brain/drift.py 監測版本漂移。
+
+  - id: scream
+    at: /opt/homebrew/lib/node_modules/scream-code  # npm 全域，非原始碼
+    repo: LIUTod/scream-code
+    owned: false
+    owns: [身體執行, 檔案讀寫, git 操作]
+    watch: brain/drift.py
+    note: |
+      本地 0.10.0，npm latest 0.10.13 — 落後 13 版（2026-07-27 實測）。
+      ~/Developer/neuralis/scream-code/ 只有 mcp.json，是設定不是碼。
+      升級評估見 brain/upgrade-scream.md（結論：先不升）。
+
+  - id: laap-upstream
+    at: ~/Developer/laap-AGI
+    repo: lorryjovens-hub/laap-AGI
+    owned: false
+    owns: [上游模型層]
+    watch: brain/drift.py
+    note: 本地 feat/env-config-hermes@7f02b62 != upstream/main@c3d495c，已分叉。
+
+  - id: agentOS
+    at: ~/Developer/agent-sandbox
+    repo: RYN6666999/agent-sandbox
+    owned: true
+    owns: [沙箱隔離, 工具權限邊界]
+    note: path-DENY 紅線 ~/Developer/neuralis/laap/** 在此定義。
 
 edges:
   - id: board_to_channel
@@ -112,7 +150,6 @@ edges:
     from: relay
     to: aris-memory
     via: _remember
-    expect: fail
     contract: discovered_salience 只能由真 recall 賺，寫入端不得自發
     check: 新寫入的 aris-self 記憶 ds=0 且 total_recalls=0
 
