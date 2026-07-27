@@ -2,11 +2,38 @@
 """lint.py — 情報層守門人。違反鐵律就 exit 1。
 
 ╔══════════════════════════════════════════════════════════════════╗
-║  鐵律：事實只能推導，不能複製。                                    ║
-║                                                                  ║
+║  鐵律一：事實只能推導，不能複製。                                  ║
 ║  一個事實被抄寫一次，就等於預約了未來某天的一個謊。                  ║
 ║  因為抄本不會跟著本體變，而沒有人會記得回頭對。                     ║
+║                                                                  ║
+║  鐵律二：0 信心路由 —— 預設第一次就有問題，換一條路驗過才算數。      ║
+║  產出者不得自驗。用產出它的同一條路去驗，等於沒驗。                  ║
 ╚══════════════════════════════════════════════════════════════════╝
+
+這裡是兩條鐵律的唯一權威正文。CLAUDE.md / AGENTS.md 只放指標不複述
+（複述就是抄本，違反鐵律一）；反過來檢查 G 盯著那兩份文件，指標被拿掉
+就擋 commit。兩邊互相咬住，任一邊爛掉都會紅。
+
+── 鐵律二的判例（全部發生在 2026-07-27 同一天，同一個人身上）──
+
+  · 「驗過」跨 repo 節點才推上去 —— 驗的方式是跑 probe.py，但 probe 只驗
+    edges 的對稱差集，node 欄位一個字都不看。同角度驗 = 沒驗。
+    結果一次放行三個假宣稱（at 指向不存在的目錄、紅線歸屬完全講反、
+    能力描述與該 repo 實際做的事無關）。
+
+  · 修好 topology.yaml 之後，習慣性想重跑 lint 確認 —— 但 lint 正是指導
+    這次修改的那條路。改走獨立路徑（直接 stat 檔案）才發現：那次編輯
+    把 yaml 語法弄壞了（未加引號的純量裡出現 `at: `，被當成 mapping key）。
+
+  · 獨立路徑的第一版腳本自己也是錯的（`~` 在雙引號裡不展開，四個真實存在
+    的路徑被誤報成開不起來）。**驗證器也是第一次寫的開發行為，也預設有問題。**
+
+  · check F 第一版用「長得像不像路徑」猜，把 6 個正確的 repo 相對路徑和
+    含空格的 macOS 路徑判成「描述」。兩條路互相打臉才抓到 ——
+    **若只有一條路，我會去「修」6 個本來就對的東西。**
+
+  推論：兩條獨立路徑得到不同答案時，那個「不一致」本身就是訊號。
+  只有一條路的時候，你不會知道自己錯了。
 
 這支不是文件，是閘。文件會腐敗（它自己就是抄本），閘不會 —— 閘要嘛跑
 過要嘛擋下來，沒有第三種狀態。所以鐵律寫在這裡，不寫在 README。
@@ -223,12 +250,106 @@ def check_gate_alive() -> list[str]:
     return []
 
 
+# ── F. 換個角度驗：拿檔案系統對 yaml 的宣稱 ────────────────────────
+# 鐵律二：任何開發行為第一次一定有問題，換個角度驗過才算數。
+#
+# 2026-07-27 的實例：topology.yaml 加了三個跨 repo 節點，作者「驗過」的
+# 方式是跑 probe.py —— 但 probe 只驗 edges 的對稱差集，**node 欄位它一個
+# 字都不看**。同角度驗 = 沒驗。結果一次放行三個假宣稱：
+#   · at: 指的目錄不存在（真實位置差一層）
+#   · note: 說某條紅線「在此定義」，實際定義在完全另一個 repo
+#   · owns: 描述的能力與該 repo 實際做的事無關
+#
+# 所以這道檢查刻意不讀 probe、不讀任何宣稱層，只做一件事：
+# **把 yaml 說的位置，拿去檔案系統實際打開看。** 這就是「另一個角度」。
+def check_claims_resolve(data: dict) -> list[str]:
+    topo_path = ROOT / "topology.yaml"
+    if not topo_path.exists():
+        return ["topology.yaml 不存在"]
+    topo = yaml.safe_load(topo_path.read_text(encoding="utf-8"))
+    bad = []
+
+    # CI 上沒有這些本機 checkout，路徑檢查在那裡沒有意義
+    in_ci = bool(os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"))
+
+    for node in topo.get("nodes") or []:
+        nid = node.get("id", "?")
+
+        # F1. at: 宣告的位置要真的在
+        # 三種病要分開報。訊息講錯病，讀的人就會誤判成假陽性然後忽略它 ——
+        # 我 2026-07-27 就是這樣差點放掉一個真陽性。
+        at = str(node.get("at") or "").strip()
+        if at and not at.startswith(("http://", "https://")):
+            # 不要用「長得像不像路徑」去猜 —— 我第一版就是這樣猜的，把 6 個
+            # 正確的 repo 相對路徑和含空格的 macOS 路徑判成「描述」，差點去
+            # 「修」本來就對的東西。直接開開看最省事也最準。
+            p = Path(at).expanduser()
+            if not p.is_absolute():
+                p = ROOT / p
+            if "..." in at:
+                bad.append(f"node/{nid} at='{at}' 含縮寫 `...` —— 人看得懂，機器驗不了。"
+                           "寫完整路徑，否則這行永遠沒人查得動")
+            elif in_ci and at.startswith("~"):
+                pass          # 家目錄下的東西 CI 上本來就沒有，不是問題
+            elif not p.exists():
+                bad.append(f"node/{nid} at='{at}' 開不起來 —— "
+                           "若是路徑就修正它；若是描述請改放 note:")
+
+        # F2. 文字裡引用 `檔案:行號` 的，該檔要在、該行要有東西
+        blob = " ".join(str(node.get(k) or "") for k in ("note", "owns", "watch"))
+        for ref, lineno in re.findall(r"([\w./-]+\.(?:py|yaml|yml|md|json|sh)):(\d+)", blob):
+            f = ROOT / ref
+            if not f.exists():
+                bad.append(f"node/{nid} 引用 {ref}:{lineno} —— 檔案不存在")
+                continue
+            n = int(lineno)
+            lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+            if n > len(lines):
+                bad.append(f"node/{nid} 引用 {ref}:{lineno} —— 該檔只有 {len(lines)} 行")
+
+        # F3. watch: 指的工具要真的存在（不然「有人盯著」是假的）
+        w = str(node.get("watch") or "").strip()
+        if w and not (ROOT / w).exists():
+            bad.append(f"node/{nid} watch='{w}' 不存在 —— 宣稱有監控但工具不在")
+
+    return bad
+
+
+# ── G. 鐵律不准從入口文件消失 ──────────────────────────────────────
+# 把法條放進文件只解決一半問題：文件會被改、被重寫、被「精簡」掉。
+# 這道檢查讓「拿掉鐵律」這個動作本身會擋 commit —— 文件與閘互相咬住。
+#
+# 只驗錨點與指標存不存在，不驗字句。驗字句就變成「文件必須逐字等於某個
+# 樣板」，那是另一種抄本，會擋住正常的措辭調整 —— 假紅比沒有更糟。
+IRON_LAW_ANCHOR = "IRON-LAW-ANCHOR"
+ENTRY_DOCS = ("CLAUDE.md", "AGENTS.md")
+
+
+def check_iron_law_anchored() -> list[str]:
+    bad = []
+    for name in ENTRY_DOCS:
+        p = ROOT / name
+        if not p.exists():
+            bad.append(f"{name} 不見了 —— 那是各家 agent 的入口，沒有它鐵律傳不下去")
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if IRON_LAW_ANCHOR not in text:
+            bad.append(f"{name} 的 {IRON_LAW_ANCHOR} 錨點被拿掉了 —— "
+                       "鐵律從入口消失，下一個 agent 不會知道規矩")
+        if "brain/lint.py" not in text:
+            bad.append(f"{name} 沒有指向 brain/lint.py —— "
+                       "指標斷了，法條正文就找不到（正文只在 lint.py 檔頭）")
+    return bad
+
+
 CHECKS = (
     ("A src-必填", lambda d: check_src_present(d)),
     ("B src-可解析", lambda d: check_src_resolves(d)),
     ("C schema", lambda d: check_schema(d)),
     ("D 常數未抄襲", lambda d: check_copied_constants()),
     ("E 閘存活", lambda d: check_gate_alive()),
+    ("F 宣稱對得上檔案系統", check_claims_resolve),
+    ("G 鐵律沒被摘掉", lambda d: check_iron_law_anchored()),
 )
 
 

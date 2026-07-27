@@ -3,6 +3,20 @@
 短期進度不放這裡（見 `AGENTS.md` 與 `handoff-next-session.md`）。
 本檔只放不隨 roadmap 變動的規則。
 
+## 鐵律（凌駕以下所有條款，違反直接擋 commit）
+
+**鐵律一：事實只能推導，不能複製。**
+抄一次 = 預約未來某天的一個謊。抄本不會跟著本體變，也沒人會回頭對。
+
+**鐵律二：0 信心路由 — 任何開發行為預設第一次就有問題，換一條路驗過才算數。**
+產出者不得自驗。用產出它的同一條路去驗，等於沒驗。
+
+<!-- IRON-LAW-ANCHOR: 本段由 brain/lint.py 檢查 G 盯著，刪掉會擋 commit。 -->
+法條正文與判例在 `brain/lint.py` 的檔頭，**那裡是唯一權威**。
+這裡刻意不複述細節 —— 複述就是抄本，抄本會腐敗，而那正是鐵律一禁的事。
+
+    python3 brain/lint.py     # 六道檢查，每道對應一個真實踩過的坑
+
 1. neuralis 是獨立 overlay — 不直接修改 laap-AGI 上游 repo，透過
    PYTHONPATH 疊加。
 2. Python `laap/psi_core.py` 是目前 PSI 行為的參考實作。新增非 Python

@@ -22,8 +22,9 @@ updated: 2026-07-27
 
 nodes:
   - id: board
-    at: ~/Library/.../Fun/Aris/留言板.md
+    at: ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md
     owns: [人類介面, session 摘要, 跨 session 交接]
+    note: 原本寫成 ~/Library/.../ 縮寫，人看得懂但機器驗不了 —— 無法驗證的宣稱等於沒宣稱。
 
   - id: bridge
     at: scripts/agentos-aris-bridge.py
@@ -42,8 +43,9 @@ nodes:
     owns: [工程經驗, what_worked, what_failed]
 
   - id: gbrain
-    at: gbrain_client.py + gbrain CLI
+    at: gbrain_client.py
     owns: [長期知識, 概念層, 頁面, 連結層]
+    note: "另有 gbrain CLI（外部指令，不在本 repo）。at 欄只放本 repo 打得開的東西。"
 
   - id: relay
     at: scripts/aris-relay.py  # port 11550
@@ -73,11 +75,21 @@ nodes:
     note: 本地 feat/env-config-hermes@7f02b62 != upstream/main@c3d495c，已分叉。
 
   - id: agentOS
-    at: ~/Developer/agent-sandbox
+    at: ~/agent-sandbox
     repo: RYN6666999/agent-sandbox
     owned: true
-    owns: [沙箱隔離, 工具權限邊界]
-    note: path-DENY 紅線 ~/Developer/neuralis/laap/** 在此定義。
+    owns: [沙箱密鑰隔離, 委派評分路由]
+    note: |
+      2026-07-27 訂正三處假宣稱（原文由跨 repo 節點那次 commit 引入，
+      node 欄位當時沒有任何檢查看著，所以矇混過關）：
+        · at: 原寫 ~/Developer/agent-sandbox —— 該目錄不存在，本尊在 ~/agent-sandbox
+        · 原稱 path-DENY 紅線在此定義 —— 反了，定義在 neuralis 自己的
+          laap/safety_gate.py:165，測試在 tests/test_delegation_path_deny.py
+        · 這裡的 DENY 擋的是密鑰檔（.env / *.key / sk-），與 laap 路徑保護無關。
+          位置：agent-sandbox repo 的 sandbox_canary.py（跨 repo，不在本 repo，
+          所以不寫行號 —— 行號會漂，而且這裡驗不到）
+      ⚠️ ~/Desktop/agent-sandbox 是 2026-06-28 的舊 checkout 且有未提交改動，
+      不要讀那份。本尊以 at: 為準。
 
 edges:
   - id: board_to_channel
