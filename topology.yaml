@@ -150,7 +150,6 @@ edges:
     from: relay
     to: aris-memory
     via: _remember
-    expect: fail
     contract: discovered_salience 只能由真 recall 賺，寫入端不得自發
     check: 新寫入的 aris-self 記憶 ds=0 且 total_recalls=0
 
