@@ -20,6 +20,7 @@
 | `blast.py` | **影響半徑**：動它會炸到誰 | 靜態走圖 |
 | `drift.py` | **上游**：不是我的東西動了沒 | 查 npm / GitHub API |
 | `context.py` | **合成**：一份給 AI 的簡報 | 生成 `CONTEXT.md` |
+| `memcheck.py` | **記憶**：記憶有沒有品質分級 | 唯讀查 `.aris-memory.db` |
 
 判斷該寫哪份的規則：
 - 「A 呼叫 B 但斷了」→ `topology.yaml`
@@ -35,6 +36,7 @@
 ./brain/blast.py --json             # 機器讀
 ./brain/drift.py                    # 上游漂移偵測
 ./brain/context.py --live -o brain/CONTEXT.md   # 生成 AI 冷啟動簡報
+python3 ./brain/memcheck.py          # 記憶層體檢（唯讀，3 紅燈）
 ```
 
 **新 session 開場只要一句**：讀 `brain/CONTEXT.md`。
