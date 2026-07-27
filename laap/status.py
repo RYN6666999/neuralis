@@ -18,6 +18,8 @@ from typing import Optional
 
 logger = logging.getLogger("laap.status")
 
+from laap import psi_backend
+
 STATUS_PATH = Path(__file__).resolve().parents[1] / "status.json"
 
 
@@ -38,6 +40,7 @@ def snapshot() -> dict:
                 "emotion": st["emotion"],
                 "attention": st["attention"],
                 "last_input": psi.get_last_input()[:80],
+                "last_input_filtered": psi_backend._filter_blocked,
                 "affective": st.get("affective"),
             }
         except Exception as e:

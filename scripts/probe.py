@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -27,6 +28,21 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 TOPO = ROOT / "topology.yaml"
+
+
+def _laap_const(name: str, _src=None):
+    """現讀 laap/chatflow.py 的模組常數真值。
+
+    鐵律：事實只能推導，不能複製。這支曾把 bootstrap 冷卻常數抄進註解，
+    抄的值比真值大 15 倍，害「假紅」的判斷整個歪掉。用讀的就不會歪。
+    （不 import chatflow —— 它會拉起一整串重依賴，probe 要能單獨跑。）
+    """
+    src = _src or (ROOT / "laap" / "chatflow.py").read_text(encoding="utf-8")
+    m = re.search(rf"^{re.escape(name)}\s*=\s*(\d+(?:\.\d+)?)", src, re.M)
+    if not m:
+        return f"?（chatflow.py 找不到 {name}）"
+    v = float(m.group(1))
+    return int(v) if v.is_integer() else v
 CHANNEL = Path("/tmp/aris-scream-channel.jsonl")
 BRIDGE_LOG = Path("/tmp/agentos-aris-bridge.log")
 MEM_DB = Path.home() / ".aris-memory.db"
@@ -351,8 +367,12 @@ def wake_reaches_prompt():
         return False, f"服務未啟動: Aris API 11546 打不到: {e}"
     if token in reply:
         return True, f"綠: 回覆含哨兵「{token}」（/wake 有進 prompt）"
-    # 可能是冷卻造成的假紅
-    cooler_note = "（可能是 _BOOTSTRAP_MIN_GAP=1800 冷卻造成的假紅）"
+    # 可能是快取造成的假紅。真凶是 TTL 不是 MIN_GAP：
+    # _session_bootstrap_memories() 在 TTL 內直接回傳快取，所以剛寫的哨兵
+    # 進不去，但舊哨兵會出現在回覆裡 —— 看到舊的沒新的就是這個。
+    # 值一律現讀 chatflow.py，不抄。抄了就是下一個 doc-lie（brain/lint.py 檢查 D）。
+    cooler_note = (f"（可能是 _BOOTSTRAP_TTL={_laap_const('_BOOTSTRAP_TTL')}s 快取造成的假紅"
+                   f"：回覆若含『舊』哨兵即為此症）")
     return False, f"真紅: 回覆不含哨兵「{token}」，回覆開頭={reply[:160]}{cooler_note}"
 
 

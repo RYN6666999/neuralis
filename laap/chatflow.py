@@ -192,8 +192,25 @@ _BOARD_PATH = os.path.expanduser(
     "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md")
 _BOOTSTRAP_TTL = 300.0        # 同 process 內快取，避免每次 session-start 重讀
 _BOOTSTRAP_MIN_GAP = 120.0    # 兩次注入最小間隔（web 是無狀態通道，防每則訊息重打；壓低讓 probe 可測）
-_bootstrap_cache: dict = {"ts": 0.0, "lines": []}
+_bootstrap_cache: dict = {"ts": 0.0, "lines": [], "wake_ids": []}
 _last_bootstrap_ts: float = 0.0
+
+
+def _credit_recall_async(ids: list) -> None:
+    """對暖啟動撈進的記憶記 recall（fire-and-forget，絕不擋 loop 線程）。"""
+    if not ids:
+        return
+    def _post():
+        try:
+            import urllib.request as _u, json as _j
+            data = _j.dumps({"ids": ids}).encode()
+            req = _u.Request("http://127.0.0.1:11551/memories/recall_hit",
+                             data=data, headers={"Content-Type": "application/json"})
+            _u.urlopen(req, timeout=3).read()
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_post, daemon=True).start()
 
 
 def _session_bootstrap_memories() -> list:
@@ -228,13 +245,18 @@ def _session_bootstrap_memories() -> list:
         import urllib.request, json
         req = urllib.request.Request("http://127.0.0.1:11551/wake?limit=5")
         resp = urllib.request.urlopen(req, timeout=3)
-        wake = json.loads(resp.read().decode()).get("context") or ""
+        _wj = json.loads(resp.read().decode())
+        wake = _wj.get("context") or ""
         if wake.strip():
             lines.append(f"【上一刻的你（注意力線索）】{wake[:300]}")
+        _wake_ids = list(_wj.get("recalled_ids") or [])
     except Exception:
-        pass
+        _wake_ids = []
     _bootstrap_cache["ts"] = now
     _bootstrap_cache["lines"] = list(lines)
+    # 被撈記憶 id 進快取（credit 時機在 _maybe_session_bootstrap 真注入處，
+    # 不在這裡——這函式被 TTL 快取，快取命中不會重跑，記分點綁快取會漏）
+    _bootstrap_cache["wake_ids"] = _wake_ids
     return lines
 
 
@@ -254,6 +276,10 @@ def _maybe_session_bootstrap(messages: list, user_turn: bool, user_msg: str) -> 
     lines = _session_bootstrap_memories()
     if lines:
         _last_bootstrap_ts = now
+        # outcome-tied recall：真使用者開新 session 且暖啟動有注入 = 這些記憶被撈給
+        # 在場的人 → credit（fire-and-forget）。只在真使用者 bootstrap 觸發（Aris 無人
+        # 值守自主醒來走別的 /wake 路徑不經此），MIN_GAP 120s 限速，不自賺分於無人時。
+        _credit_recall_async(_bootstrap_cache.get("wake_ids") or [])
     return lines
 
 
@@ -569,7 +595,8 @@ def _make_chat_handler(orig_handler):
                 result = author_task.result()
                 auth_content = result.get("content", "")
                 auth_engine = result.get("engine", "laap-core")
-                if auth_content:
+                if not (auth_engine == "laap-fallback"
+                        or (auth_engine.startswith("rules:") and re.match(r'^\[.*\]', auth_content.strip()))):
                     content = auth_content
                     engine = auth_engine
             except asyncio.TimeoutError:
