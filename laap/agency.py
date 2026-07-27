@@ -423,25 +423,51 @@ class AgencyLoop:
         # certainty 保持 gbrain（需要個人記憶，不是網頁搜尋）
     }
 
-    def _score_result(self, result: str, tool: str = "") -> float:
+    @staticmethod
+    def _query_tokens(text: str) -> set:
+        """詞相關閘用的 token 集：拉丁/數字詞 + CJK bigram（CJK 無空格）。"""
+        text = (text or "").lower()
+        toks = set(re.findall(r'[a-z0-9]{2,}', text))
+        for run in re.findall(r'[一-鿿]+', text):
+            if len(run) == 1:
+                toks.add(run)
+            for i in range(len(run) - 1):
+                toks.add(run[i:i + 2])
+        return toks
+
+    def _score_result(self, result: str, tool: str = "", query: str = "") -> float:
         """量產工具結果的品質分數 0-1。
 
         gbrain 結果拆 [score] 前綴行；AgentOS/web-search 結果是結構化 JSON，
         無 [score] 前綴，給較高基礎分（有意義的搜尋結果比空記憶有價值）。
+
+        詞相關閘（query 有給時）：gbrain 對任何 query 都回高相似分——實測亂碼
+        query top hit 0.89、無關的「煎蛋」1.02，純語意分是刷分漏洞（sandbox
+        信號量測抓到，見 reports/sandbox-signal-measure-result.md）。要求命中內容
+        與 query 有實際詞重疊才算分，濾掉自賺分（handoff backtest 血訓同法）。
+        query="" 時不閘（向後相容 check-dopamine 等呼叫）。
+        ponytail: 粗閘（任一詞重疊即過），非 TF-IDF；天花板=純同義語意命中會被誤殺。
         """
         if not result or result == "無結果":
             return 0.0
+        q_tokens = self._query_tokens(query) if query else set()
         scores = []
+        had_score_lines = False
         for line in result.splitlines():
             m = re.match(r'^\[([\d.]+)\]', line)
-            if m:
-                scores.append(float(m.group(1)))
-        if not scores:
+            if not m:
+                continue
+            had_score_lines = True
+            if q_tokens and not (q_tokens & self._query_tokens(line)):
+                continue  # 詞相關閘：與 query 零詞重疊 → 不算分
+            scores.append(min(1.0, float(m.group(1))))  # 順手 clamp gbrain 的 >1.0
+        if not had_score_lines:
             # 無 [score] 前綴（web-search 等結構化結果）：給 flat 分級基礎分。
             # 曾用 min(base, len/500) — 純長度信號 = 刷分漏洞（長垃圾 0.6 vs 短好 0.006）。
-            # E1.1 拿掉長度（改 flat）；真的品質區分留給 E1.2 下游效用信號
-            # （agency 寫的記憶後續有沒有被 recall 用到），不是長度。
+            # E1.1 拿掉長度（改 flat）；真的品質區分留給 E1.2 下游效用信號。
             return 0.6 if classify(tool) in ("readonly_agentos",) else 0.4
+        if not scores:
+            return 0.0  # 有評分命中但全與 query 無關 → 沒撈到相關的
         hit_count = len(scores)
         avg_score = sum(scores) / len(scores)
         # 組合：平均分為主 + hit 數加成（遞減），鼓勵多樣化但不鼓勵垃圾多
@@ -625,7 +651,7 @@ class AgencyLoop:
         _emit_event(AGENCY_TOOL_RESULT, tool=tool, ok=ok, result_len=len(result or ""))
 
         # ── RPE 計算 ──
-        outcome = self._score_result(result, tool=tool) if ok else 0.0
+        outcome = self._score_result(result, tool=tool, query=prompt) if ok else 0.0
         stats = self._need_stats.setdefault(need, {
             "expected": 0.3, "rpes": [], "angle_weights": {}})
         expected = stats["expected"]
