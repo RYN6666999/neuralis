@@ -3,7 +3,7 @@
 
 # NEURALIS — AI 冷啟動簡報
 
-生成於 2026-07-27 18:56 CST　·　模式：live 實測
+生成於 2026-07-27 19:04 CST　·　模式：live 實測
 
 ## 先讀這三條
 
@@ -71,7 +71,7 @@ LB-arcanum(記憶) → neuralis(大腦/Aris) ⇄ scream(身體)
 
 ## 執行期拓樸（topology.yaml）
 
-7 節點 · 10 條邊（3 條 `expect: fail`）
+10 節點 · 10 條邊（3 條 `expect: fail`）
 
 已知紅（預期內，不是新 bug）：
 - `relay_remembers_turn`：同 conversation_id 的前幾輪要回放進 messages
