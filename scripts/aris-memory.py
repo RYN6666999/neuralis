@@ -249,27 +249,32 @@ class ArisMemory:
         記憶散落在多個庫是自然的（不同來源本來就寫不同地方）；病在讀取入口分散。
         這裡是唯一讀取入口：不搬資料、不同步、不造統一索引，只在讀的時候匯流。
         任一源掛掉就跳過（best-effort），永遠不擋醒來。
+
+        回 (text, recalled_ids)：recalled_ids = 被選進暖啟動塊的本庫記憶 id
+        （另兩源是跨進程檔案，無本庫 id）。id 供 outcome-tied recall 記分——
+        由 chatflow 在互動結果正向時回頭 credit，**不在撈取當下記分**（撈取依 τ，
+        τ 含 discovered_salience，撈到就加分＝自我墊高，違反 recall_not_selfinflated 契約）。
         """
-        blocks = [b for b in (self._wake_attention(limit), _wake_memos(3), _wake_board())
-                  if b]
-        return "\n\n".join(blocks)
+        att_text, att_ids = self._wake_attention(limit)
+        blocks = [b for b in (att_text, _wake_memos(3), _wake_board()) if b]
+        return "\n\n".join(blocks), att_ids
 
     def _wake_attention(self, limit=5):
-        """源①：本庫的注意力線，τ 加權排序（不是純時序）。"""
+        """源①：本庫的注意力線，τ 加權排序（不是純時序）。回 (text, ids)。"""
         with self._lock:
             rows = self.conn.execute(
-                "SELECT attention_line, created_at, encoding_salience, discovered_salience "
+                "SELECT id, attention_line, created_at, encoding_salience, discovered_salience "
                 "FROM memories WHERE attention_line != '' "
                 "ORDER BY created_at DESC LIMIT ?", (limit * 6,)
             ).fetchall()
         if not rows:
-            return ""
+            return "", []
         now = time.time()
         scored = sorted(
-            ((_tau_score(r[2], r[3], (now - (r[1] or now)) / 86400.0), r[0]) for r in rows),
+            ((_tau_score(r[3], r[4], (now - (r[2] or now)) / 86400.0), r[0], r[1]) for r in rows),
             key=lambda x: -x[0])[:limit]
-        lines = "\n".join(f"- {t}" for _, t in scored)
-        return f"【上一刻的你（醒來線索，你自己留的）】\n{lines}"
+        lines = "\n".join(f"- {t}" for _, _, t in scored)
+        return f"【上一刻的你（醒來線索，你自己留的）】\n{lines}", [mid for _, mid, _ in scored]
 
     def by_source(self, source, limit=50):
         """依來源查詢。"""
@@ -331,7 +336,8 @@ def _serve(port=PORT):
                     limit = int(first("limit", "5") or 5)
                 except ValueError:
                     limit = 5
-                self._send(200, {"context": mem.wake_context(limit)})
+                text, recalled_ids = mem.wake_context(limit)
+                self._send(200, {"context": text, "recalled_ids": recalled_ids})
             elif u.path == "/salience/discrepancies":
                 try:
                     limit = int(first("limit", "20") or 20)
@@ -346,6 +352,12 @@ def _serve(port=PORT):
                 try:
                     n = int(self.headers.get("Content-Length", 0) or 0)
                     body = json.loads(self.rfile.read(n) if n > 0 else b"{}")
+                    # 批次：outcome-tied credit 一次記整批暖啟動 id（chatflow 一輪一次 POST）
+                    batch = body.get("ids")
+                    if isinstance(batch, list) and batch:
+                        results = [rr for rr in (mem.recall_hit(int(i)) for i in batch if int(i) > 0) if rr]
+                        self._send(200, {"results": results})
+                        return
                     mem_id = int(body.get("id", 0) or 0)
                     if mem_id <= 0:
                         self._send(400, {"error": "valid id required"})
