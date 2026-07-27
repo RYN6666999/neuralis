@@ -192,11 +192,8 @@ _BOARD_PATH = os.path.expanduser(
     "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md")
 _BOOTSTRAP_TTL = 300.0        # 同 process 內快取，避免每次 session-start 重讀
 _BOOTSTRAP_MIN_GAP = 120.0    # 兩次注入最小間隔（web 是無狀態通道，防每則訊息重打；壓低讓 probe 可測）
-_bootstrap_cache: dict = {"ts": 0.0, "lines": []}
+_bootstrap_cache: dict = {"ts": 0.0, "lines": [], "wake_ids": []}
 _last_bootstrap_ts: float = 0.0
-# outcome-tied recall：wake 撈進暖啟動塊的記憶 id，暫存待「下一個真使用者回合」
-# 才 credit（= 暖啟動有用、對話真的續下去）。選擇(wake τ)與獎勵(續談)脫鉤，不自賺分。
-_pending_recall_ids: list = []
 
 
 def _credit_recall_async(ids: list) -> None:
@@ -252,13 +249,14 @@ def _session_bootstrap_memories() -> list:
         wake = _wj.get("context") or ""
         if wake.strip():
             lines.append(f"【上一刻的你（注意力線索）】{wake[:300]}")
-        # 暫存被撈記憶 id，待下個真回合才 credit（outcome-tied，不在撈取當下自賺分）
-        global _pending_recall_ids
-        _pending_recall_ids = list(_wj.get("recalled_ids") or [])
+        _wake_ids = list(_wj.get("recalled_ids") or [])
     except Exception:
-        pass
+        _wake_ids = []
     _bootstrap_cache["ts"] = now
     _bootstrap_cache["lines"] = list(lines)
+    # 被撈記憶 id 進快取（credit 時機在 _maybe_session_bootstrap 真注入處，
+    # 不在這裡——這函式被 TTL 快取，快取命中不會重跑，記分點綁快取會漏）
+    _bootstrap_cache["wake_ids"] = _wake_ids
     return lines
 
 
@@ -278,6 +276,10 @@ def _maybe_session_bootstrap(messages: list, user_turn: bool, user_msg: str) -> 
     lines = _session_bootstrap_memories()
     if lines:
         _last_bootstrap_ts = now
+        # outcome-tied recall：真使用者開新 session 且暖啟動有注入 = 這些記憶被撈給
+        # 在場的人 → credit（fire-and-forget）。只在真使用者 bootstrap 觸發（Aris 無人
+        # 值守自主醒來走別的 /wake 路徑不經此），MIN_GAP 120s 限速，不自賺分於無人時。
+        _credit_recall_async(_bootstrap_cache.get("wake_ids") or [])
     return lines
 
 
@@ -471,13 +473,6 @@ def _make_chat_handler(orig_handler):
                     ag.note_interaction()
             except Exception:
                 pass
-            # outcome-tied recall：真使用者回合 = 對話續下去 = 暖啟動有用 →
-            # 對上次撈進的記憶記 recall（此 hook 在 bootstrap 之前跑，故只會在
-            # 「續談的回合」credit，不會在觸發 bootstrap 的首輪自我墊高）。fire-and-forget。
-            global _pending_recall_ids
-            if _pending_recall_ids:
-                _credit_recall_async(_pending_recall_ids)
-                _pending_recall_ids = []
 
         # 工具模式：scream agent 迴圈（作者管線不懂 tools → LLM 語言皮質直達）
         if body.get("tools"):
