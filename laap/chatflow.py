@@ -47,6 +47,18 @@ def _content_text(c) -> str:
     return ""
 
 
+def _usage(prompt_tokens: int, completion_tokens: int) -> dict:
+    """OpenAI 相容的 usage。total 一律由兩者相加算出，不准寫死。
+
+    2026-07-27：兩處都把 total_tokens 寫死成 0，於是 Scream TUI 底下的
+    context 累積 % 永遠停在 0 不跳動（它拿 total/max_context_size 算）。
+    這是「常數被寫死而非推導」的典型 —— 只有一個真值來源時就別另外填一個。
+    """
+    return {"prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens}
+
+
 def _extract_user_msg(body: dict) -> str:
     for m in reversed(body.get("messages", []) or []):
         if m.get("role") == "user":
@@ -416,8 +428,7 @@ def _build_response(content: str, engine: str, model: str, prompt_chars: int) ->
         "choices": [{"index": 0,
                      "message": {"role": "assistant", "content": content},
                      "finish_reason": "stop"}],
-        "usage": {"prompt_tokens": prompt_chars // 4,
-                  "completion_tokens": len(content) // 4, "total_tokens": 0},
+        "usage": _usage(prompt_chars // 4, len(content) // 4),
         "engine": engine,
     }
 
@@ -819,9 +830,7 @@ def _build_tool_response(result: dict, model: str, prompt_chars: int) -> dict:
         "model": model,
         "choices": [{"index": 0, "message": out_msg,
                      "finish_reason": result.get("finish_reason", "stop")}],
-        "usage": result.get("usage") or {
-            "prompt_tokens": prompt_chars // 4,
-            "completion_tokens": content_len // 4, "total_tokens": 0},
+        "usage": result.get("usage") or _usage(prompt_chars // 4, content_len // 4),
         "engine": "psi-llm-tools",
     }
 

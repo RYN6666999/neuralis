@@ -107,6 +107,20 @@ _LLM_ENABLED = os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "
 _LLM_MODEL = os.environ.get("NEURALIS_LLM_MODEL", "deepseek-v4-flash")
 _LLM_BASE_URL = os.environ.get("NEURALIS_LLM_BASE_URL", "https://openrouter.ai/api/v1")
 _LLM_TIMEOUT = int(os.environ.get("NEURALIS_LLM_TIMEOUT", 15))
+# OpenRouter provider 偏好:排除 fp4 激進量化,鎖 fp8 底線。deepseek-v4-flash 在 OpenRouter
+# 無 fp16 provider（原生即 fp8），裸路由會偶爾落 fp4 掉質量。env NEURALIS_LLM_QUANT 可調
+# （逗號分隔，設空字串則不帶 provider 偏好）。不換模型、不降智力，只鎖精度底線。
+_LLM_QUANTIZATIONS = [q.strip() for q in os.environ.get("NEURALIS_LLM_QUANT", "fp8").split(",") if q.strip()]
+# provider 排序:在合格(fp8)provider 裡挑最快。throughput|latency|price；空字串=不排序。
+# 安全前提:quantizations 已鎖 fp8,throughput 只在同精度內選最快,不會掉到 fp4。
+_PROVIDER_SORT = os.environ.get("NEURALIS_LLM_PROVIDER_SORT", "throughput").strip()
+_PROVIDER_PREF: Optional[dict] = None
+if _LLM_QUANTIZATIONS or _PROVIDER_SORT:
+    _PROVIDER_PREF = {}
+    if _LLM_QUANTIZATIONS:
+        _PROVIDER_PREF["quantizations"] = _LLM_QUANTIZATIONS
+    if _PROVIDER_SORT:
+        _PROVIDER_PREF["sort"] = _PROVIDER_SORT
 # 健康檢查 timeout（短於 LLM timeout，快速失敗不死等）
 _HEALTH_TIMEOUT = int(os.environ.get("NEURALIS_HEALTH_TIMEOUT", 5))
 
@@ -313,6 +327,7 @@ def _call_llm(messages: list) -> Optional[str]:
         "messages": messages,
         "max_tokens": 1000,
         "temperature": 0.8,
+        **({"provider": _PROVIDER_PREF} if _PROVIDER_PREF else {}),
     }).encode()
 
     req = urllib.request.Request(
@@ -400,6 +415,7 @@ def respond_tools(body: dict, psi_state: dict = None,
         "messages": messages,
         "max_tokens": _TOOL_MAX_TOKENS,
         "temperature": body.get("temperature", 0.7),
+        **({"provider": _PROVIDER_PREF} if _PROVIDER_PREF else {}),
     }
     for k in ("tools", "tool_choice", "parallel_tool_calls",
               "response_format", "stop", "top_p"):
@@ -535,6 +551,7 @@ def _call_llm_stream(messages: list, tools: list = None, model: str = None,
         "max_tokens": max_tokens or _STREAM_MAX_TOKENS,
         "temperature": 0.8,
         "stream": True,
+        **({"provider": _PROVIDER_PREF} if _PROVIDER_PREF else {}),
     }
     if tools:
         payload["tools"] = tools
