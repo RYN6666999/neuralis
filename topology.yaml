@@ -56,7 +56,7 @@ nodes:
   # 沒有 edge，因為 probe 驗不到別人的 repo；改用 brain/drift.py 監測版本漂移。
 
   - id: scream
-    at: /opt/homebrew/lib/node_modules/scream-code  # npm 全域，非原始碼
+    at: https://github.com/LIUTod/scream-code  # npm 全域安裝，見 note
     repo: LIUTod/scream-code
     owned: false
     owns: [身體執行, 檔案讀寫, git 操作]
