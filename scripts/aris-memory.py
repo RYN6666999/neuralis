@@ -587,66 +587,45 @@ class ArisMemory:
             return {"route": route, "success_rate": 0, "samples": 0, "recommendation": "無歷史資料"}
 
     def session_replay(self, session_id="", limit=20):
-        """從事件日誌和決策記錄重建上下文（Session replay）。
-        
-        對應 Claude Managed Agents 的 session 設計：
-          session 是 append-only 的事件流
-          harness 可以 crash，新的 harness 從日誌恢復
-        
-        我們從兩個來源重建：
-          1. aris-scream-channel.jsonl（事件日誌）
-          2. decision_log（決策記錄）
-        """
+        """從事件日誌和決策記錄重建上下文（Session replay）。"""
         import json, time
         from pathlib import Path
         
         channel_path = Path("/tmp/aris-scream-channel.jsonl")
-        replay = {
-            "session_id": session_id or f"replay-{int(time.time())}",
-            "events": [],
-            "decisions": [],
-            "summary": {},
-        }
+        replay = {"session_id": session_id or ("replay-" + str(int(time.time()))), "events": [], "decisions": [], "summary": {}}
         
-        # 1. 從 channel 讀取最近事件
-        if channel_path.exists():
+        # 1. 從 channel 讀取（含例外處理）
+        events = []
+        try:
+            if channel_path.exists():
+                with open(channel_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            events.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        except Exception:
             events = []
-            with open(channel_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        events.append(entry)
-                    except json.JSONDecodeError:
-                        continue
-            
-            # 取最近 limit 筆
-            recent_events = events[-limit:]
-            replay["events"] = [{"type": e.get("type","?"), "tool": e.get("tool",""), "ts": e.get("ts",0)} for e in recent_events]
-            
-            # 統計
-            tool_counts = {}
+        
+        recent = events[-limit:] if events else []
+        replay["events"] = [{"type": e.get("type","?"), "tool": e.get("tool",""), "ts": e.get("ts",0)} for e in recent]
+        if events:
+            tc = {}
             for e in events:
                 t = e.get("tool", "?")
-                tool_counts[t] = tool_counts.get(t, 0) + 1
+                tc[t] = tc.get(t, 0) + 1
             replay["summary"]["channel_events"] = len(events)
-            replay["summary"]["tool_usage"] = tool_counts
+            replay["summary"]["tool_usage"] = tc
+            replay["summary"]["last_event_ts"] = recent[-1]["ts"] if recent else 0
         
-        # 2. 從 decision_log 讀取決策記錄
+        # 2. 從 decision_log 讀取
         with self._lock:
-            rows = self.conn.execute(
-                "SELECT route, count(*) as cnt, avg(success) as sr, avg(psi_energy) as en FROM decision_log GROUP BY route ORDER BY cnt DESC LIMIT ?",
-                (limit,)
-            ).fetchall()
-            replay["decisions"] = [{"route": r[0], "count": r[1], "success_rate": round(r[2] or 0, 3), "avg_energy": round(r[3] or 0, 2)} for r in rows]
-            
-            total = self.conn.execute("SELECT count(*) FROM decision_log").fetchone()[0]
-            replay["summary"]["total_decisions"] = total
-        
-        # 3. 標記上次 session 的結尾
-        replay["summary"]["last_event_ts"] = recent_events[-1]["ts"] if recent_events else 0
+            rows = self.conn.execute("SELECT route,count(*),avg(success),avg(psi_energy) FROM decision_log GROUP BY route ORDER BY count(*) DESC LIMIT ?", (limit,)).fetchall()
+            replay["decisions"] = [{"route":r[0],"count":r[1],"success_rate":round(r[2] or 0,3),"avg_energy":round(r[3] or 0,2)} for r in rows]
+            replay["summary"]["total_decisions"] = self.conn.execute("SELECT count(*) FROM decision_log").fetchone()[0]
         
         return replay
 
@@ -779,6 +758,12 @@ def _serve(port=PORT):
                 self._send(200, mem.lookahead(rt, en, co))
             elif u.path == "/session/replay":
                 self._send(200, mem.session_replay(first("session_id", ""), int(first("limit", "20") or 20)))
+            elif u.path == "/session/replay":
+                try:
+                    limit = int(first("limit", "20") or 20)
+                except ValueError:
+                    limit = 20
+                self._send(200, mem.session_replay(first("session_id", ""), limit))
             elif u.path == "/decision/stats":
                 try:
                     min_en = float(first("min_energy", "0") or 0)
