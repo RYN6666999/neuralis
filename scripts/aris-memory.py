@@ -449,7 +449,9 @@ class ArisMemory:
                     "WHEN 'green' THEN 2 ELSE 0 END >= ?"
                 )
                 params.append(threshold)
-            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged, mood_note FROM memories WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?"
+            # 2026-07-30 修復：salience 影響排序（encoding_salience 高的優先）
+            # 讓 encoding_salience 從裝飾品變成實際影響 recall 順序
+            sql = f"SELECT id, source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged, mood_note FROM memories WHERE {' AND '.join(clauses)} ORDER BY encoding_salience DESC, created_at DESC LIMIT ?"
             params.append(limit)
             rows = self.conn.execute(sql, params).fetchall()
             return [{"id": r[0], "source": r[1], "source_id": r[2], "content": r[3],

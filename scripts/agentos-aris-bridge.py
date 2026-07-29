@@ -390,6 +390,48 @@ def _build_keyword_routes() -> None:
     ]
 
 
+def _get_psi_behavior_modifier() -> dict:
+    """讀取 PSI 狀態，返回行為調節參數。
+    
+    2026-07-30 修復：讓 energy/needs 從裝飾品變成實際影響行為的參數。
+    
+    Returns:
+        exploration_boost: -0.2~0.2（低能量時減少探索）
+        complexity_tolerance: 0.5~1.5（低勝任時避開複雜任務）
+        proactivity: -0.2~0.2（低成長時減少主動發起）
+    """
+    import json, urllib.request
+    try:
+        req = urllib.request.Request('http://localhost:11546/v1/cognitive_state',
+            data=json.dumps({'input':'status'}).encode(),
+            headers={'Content-Type':'application/json'})
+        resp = urllib.request.urlopen(req, timeout=3)
+        d = json.loads(resp.read())
+        s = d.get('state', {})
+        n = s.get('needs', {})
+        
+        energy = s.get('energy', 5.0)
+        competence = n.get('competence', 0.5)
+        growth = n.get('growth', 0.5)
+        
+        # 能量低時減少探索
+        exploration_boost = (energy - 5.0) / 25.0  # 2.0→-0.12, 10.0→+0.2
+        
+        # 勝任低時避開複雜任務
+        complexity_tolerance = 0.5 + competence  # 0.5~1.0→1.0~1.5
+        
+        # 成長低時減少主動
+        proactivity = (growth - 0.5) * 0.4  # 0.5→0.0, 0.9→+0.16
+        
+        return {
+            'exploration_boost': round(exploration_boost, 3),
+            'complexity_tolerance': round(complexity_tolerance, 3),
+            'proactivity': round(proactivity, 3),
+        }
+    except Exception:
+        return {'exploration_boost': 0, 'complexity_tolerance': 1.0, 'proactivity': 0}
+
+
 def _classify_by_route(task_desc: str) -> str:
     """使用 AgentOS routes + 關鍵字表分類任務。回傳 route_key。"""
     desc_lower = task_desc.lower()
