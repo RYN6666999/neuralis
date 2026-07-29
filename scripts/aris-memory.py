@@ -221,6 +221,11 @@ class ArisMemory:
             if all_issues:
                 confidence = "red"
                 self.conn.execute("UPDATE memories SET confidence=? WHERE id=?", ("red", row_id))
+                # 2026-07-30 修復：矛盾日誌自動通知
+                rope1_count = len(contradictions)
+                rope2_count = len(temporal)
+                import sys as _sys
+                print(f"[CONTRADICTION] mem={row_id} rope1={rope1_count} rope2={rope2_count} confidence=red", file=_sys.stderr)
                 now_j = time.time()
                 for issue in all_issues:
                     rope = "rope1" if "emotion_tag" in issue else "rope2"

@@ -46,3 +46,18 @@ if ! "$PY" -m pytest -q -p no:cacheprovider tests/; then
 fi
 
 echo "[pre-commit] 綠。"
+
+# 檢查是否被繞過（git commit --no-verify）
+# 如果 hook 被跳過，這個檢查不會執行。
+# 但如果 hook 有執行，檢查 bypass log 的一致性
+if [ -f "$HOME/.git-bypass-log" ]; then
+    :
+fi
+
+# 2026-07-30 修復：檢查 bypass 記錄
+BYPASS_LOG="$HOME/.git-bypass-log"
+if [ -f "$BYPASS_LOG" ] && [ -s "$BYPASS_LOG" ]; then
+    RECENT=$(tail -3 "$BYPASS_LOG")
+    echo "[pre-commit] ⚠️ 最近 bypass 記錄:"
+    echo "$RECENT" | sed 's/^/  /'
+fi

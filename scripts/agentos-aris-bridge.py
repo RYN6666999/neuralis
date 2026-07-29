@@ -423,10 +423,23 @@ def _get_psi_behavior_modifier() -> dict:
         # 成長低時減少主動
         proactivity = (growth - 0.5) * 0.4  # 0.5→0.0, 0.9→+0.16
         
+        # arousal 高時決策更快（但可能更草率）
+        arousal = s.get('arousal', 0.5)
+        decision_speed = 0.5 + arousal * 0.5  # 0.5~1.0
+        
+        # valence 低時傾向保守
+        valence = s.get('valence', 0.0)
+        risk_tolerance = 0.5 + valence * 0.5  # 0.05~0.95
+        
         return {
             'exploration_boost': round(exploration_boost, 3),
             'complexity_tolerance': round(complexity_tolerance, 3),
             'proactivity': round(proactivity, 3),
+            'decision_speed': round(decision_speed, 3),
+            'risk_tolerance': round(risk_tolerance, 3),
+            '_raw_energy': energy,
+            '_raw_arousal': arousal,
+            '_raw_valence': valence,
         }
     except Exception:
         return {'exploration_boost': 0, 'complexity_tolerance': 1.0, 'proactivity': 0}
