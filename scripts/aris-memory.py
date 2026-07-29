@@ -160,6 +160,12 @@ def _ensure_columns(conn):
     conn.execute("CREATE TABLE IF NOT EXISTS contradiction_journal (id INTEGER PRIMARY KEY AUTOINCREMENT, mem_id INTEGER NOT NULL, rope TEXT NOT NULL, conflict_mem_id INTEGER, reason TEXT NOT NULL, created_at REAL NOT NULL, external_verified INTEGER DEFAULT 0, verification_score INTEGER DEFAULT 0, verification_detail TEXT DEFAULT '{}')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cj_mem ON contradiction_journal(mem_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence)")
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL NOT NULL, route TEXT NOT NULL, task_desc TEXT DEFAULT "", psi_energy REAL DEFAULT 0, psi_competence REAL DEFAULT 0.5, psi_certainty REAL DEFAULT 0.5, psi_growth REAL DEFAULT 0.5, success INTEGER DEFAULT 0, duration REAL DEFAULT 0, error TEXT DEFAULT "")")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_route ON decision_log(route)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_psi ON decision_log(psi_energy)")
+    except:
+        pass
     # Rope 4: external_verified 欄位 migration
     try:
         conn.execute("ALTER TABLE contradiction_journal ADD COLUMN external_verified INTEGER DEFAULT 0")
@@ -509,6 +515,32 @@ class ArisMemory:
         """依來源查詢。"""
         return self.query("", source, limit)
 
+    def log_decision(self, route, task_desc="", psi_energy=0, psi_competence=0.5,
+                       psi_certainty=0.5, psi_growth=0.5, success=0, duration=0, error=""):
+        """記錄一次決策及其結果，供判斷力分析使用。"""
+        import time
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO decision_log (timestamp, route, task_desc, psi_energy, psi_competence, psi_certainty, psi_growth, success, duration, error) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (time.time(), route, task_desc[:200], psi_energy, psi_competence, psi_certainty, psi_growth, 1 if success else 0, duration, error[:200])
+            )
+            self.conn.commit()
+            return self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def query_decision_stats(self, min_energy=0, max_energy=10, route="", limit=20):
+        """查詢決策統計，支援 PSI 狀態過濾。"""
+        with self._lock:
+            clauses = ["psi_energy >= ?", "psi_energy <= ?"]
+            params = [min_energy, max_energy]
+            if route:
+                clauses.append("route = ?")
+                params.append(route)
+            rows = self.conn.execute(
+                f"SELECT route, count(*) as cnt, avg(success) as success_rate, avg(duration) as avg_dur, avg(psi_energy) as avg_en, avg(psi_competence) as avg_co FROM decision_log WHERE {' AND '.join(clauses)} GROUP BY route ORDER BY cnt DESC LIMIT ?",
+                params + [limit]
+            ).fetchall()
+            return [{"route": r[0], "count": r[1], "success_rate": round(r[2] or 0, 3), "avg_duration": round(r[3] or 0, 1), "avg_energy": round(r[4] or 0, 2), "avg_competence": round(r[5] or 0, 2)} for r in rows]
+
     def salience_discrepancies(self, limit=20):
         """Phase 2: 回傳 flagged 分歧記憶（encoding_salience vs 外部評分差值 >2）。
         這些是需要人工檢視的第二意見分歧條目。"""
@@ -583,6 +615,37 @@ def _serve(port=PORT):
                     limit = 5
                 text, recalled_ids = mem.wake_context(limit)
                 self._send(200, {"context": text, "recalled_ids": recalled_ids})
+            elif u.path == "/decision/log":
+                try:
+                    n = int(self.headers.get("Content-Length", 0) or 0)
+                    body = json.loads(self.rfile.read(n) if n > 0 else b"{}")
+                    row_id = mem.log_decision(
+                        route=body.get("route", "?"),
+                        task_desc=body.get("task_desc", ""),
+                        psi_energy=body.get("psi_energy", 0),
+                        psi_competence=body.get("psi_competence", 0.5),
+                        psi_certainty=body.get("psi_certainty", 0.5),
+                        psi_growth=body.get("psi_growth", 0.5),
+                        success=body.get("success", 0),
+                        duration=body.get("duration", 0),
+                        error=body.get("error", ""),
+                    )
+                    self._send(200, {"id": row_id})
+                except Exception as e:
+                    self._send(400, {"error": str(e)})
+            elif u.path == "/decision/stats":
+                try:
+                    min_en = float(first("min_energy", "0") or 0)
+                    max_en = float(first("max_energy", "10") or 10)
+                    rt = first("route", "")
+                    limit = 20
+                    try:
+                        limit = int(first("limit", "20") or 20)
+                    except ValueError:
+                        limit = 20
+                    self._send(200, {"results": mem.query_decision_stats(min_en, max_en, rt, limit)})
+                except Exception as e:
+                    self._send(400, {"error": str(e)})
             elif u.path == "/salience/discrepancies":
                 try:
                     limit = int(first("limit", "20") or 20)
@@ -611,6 +674,25 @@ def _serve(port=PORT):
                     self._send(200, r if r else {"error": "not_found"})
                 except Exception:
                     self._send(400, {"error": "invalid_request"})
+                return
+            if self.path.rstrip("/") == "/decision/log":
+                try:
+                    n = int(self.headers.get("Content-Length", 0) or 0)
+                    body = json.loads(self.rfile.read(n) if n > 0 else b"{}")
+                    row_id = mem.log_decision(
+                        route=body.get("route", "?"),
+                        task_desc=body.get("task_desc", ""),
+                        psi_energy=body.get("psi_energy", 0),
+                        psi_competence=body.get("psi_competence", 0.5),
+                        psi_certainty=body.get("psi_certainty", 0.5),
+                        psi_growth=body.get("psi_growth", 0.5),
+                        success=body.get("success", 0),
+                        duration=body.get("duration", 0),
+                        error=body.get("error", ""),
+                    )
+                    self._send(200, {"id": row_id})
+                except Exception as e:
+                    self._send(400, {"error": str(e)})
                 return
             if self.path.rstrip("/") == "/memories/flag_discrepancy":
                 try:
