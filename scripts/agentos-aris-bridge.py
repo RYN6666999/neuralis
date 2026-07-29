@@ -440,6 +440,7 @@ def _get_psi_behavior_modifier() -> dict:
             '_raw_energy': energy,
             '_raw_arousal': arousal,
             '_raw_valence': valence,
+            '_raw_competence': competence,
         }
     except Exception:
         return {'exploration_boost': 0, 'complexity_tolerance': 1.0, 'proactivity': 0}
@@ -1720,6 +1721,19 @@ def process_entry(entry: dict) -> dict:
     # ── ① Route Classification ──
     route_key = _classify_by_route(task_desc)
     route_tool = _get_route_tool(route_key)
+    
+    # 2026-07-30 修復：PSI 參數綁定實際行為
+    # 低能量時不接複雜任務，低勝任時避開高難度任務
+    psi = _get_psi_behavior_modifier()
+    if psi['exploration_boost'] < -0.1 and route_key in ('video', 'html-video', 'motion', 'design'):
+        log.info(f"  ① PSI 調節: energy={psi['_raw_energy']:.1f} → 跳過探索類任務 {route_key}")
+        route_key = 'read'
+        route_tool = _get_route_tool(route_key)
+    if psi['complexity_tolerance'] < 1.1 and route_key in ('code', 'engineer', 'compile'):
+        log.info(f"  ① PSI 調節: competence={psi['_raw_competence']:.2f} → 跳過複雜任務 {route_key}")
+        route_key = 'research'
+        route_tool = _get_route_tool(route_key)
+    
     log.info(f"  ① Route: {route_key} → {route_tool}")
 
     # ── ② Brain Context Lookup ──
