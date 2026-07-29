@@ -221,6 +221,8 @@ _ROUTE_TRUTH_TABLE: dict[str, dict[str, str]] = {
     "glob": {"tool": "find / fd (file globbing)", "task_class": "compute_draft"},
     "grep": {"tool": "ripgrep / rg (text search)", "task_class": "compute_draft"},
     "fetch-url": {"tool": "curl (URL fetch)", "task_class": "network_call"},
+    "gbrain": {"tool": "gbrain (Aris memory)", "task_class": "gbrain_read"},
+    "scream-ask": {"tool": "scream-ask (Aris query)", "task_class": "compute_draft"},
     "kick-aris": {"tool": "kick-aris.py (push to Aris)", "task_class": "compute_draft"},
 }
 
@@ -379,6 +381,10 @@ def _build_keyword_routes() -> None:
         (re.compile(r"grep|搜尋.*內容|rg|ripgrep|全文搜尋|搜尋.*文字|找.*文字|查.*內容"), "grep"),
         # 抓取 URL
         (re.compile(r"fetch.?url|抓.*網頁|curl|下載.*內容|http.?get|讀.*網址|請求.*url"), "fetch-url"),
+        # gbrain（Aris 記憶操作）
+        (re.compile(r"gbrain|記憶|腦庫|長期記憶"), "gbrain"),
+        # Aris 提問 Scream
+        (re.compile(r"scream-ask|問scream|問 Scream|ask.*scream"), "scream-ask"),
         # 踢 Aris
         (re.compile(r"踢.*aris|kick.*aris|喚醒.*aris|傳話.*aris|告訴.*aris|push.*aris"), "kick-aris"),
     ]
@@ -1646,7 +1652,11 @@ def _shadow_call_to_mcp(
 
 def process_entry(entry: dict) -> dict:
     """處理單一條 Aris 通道條目，完整走 AgentOS pipeline。"""
-    task_desc = entry.get("content", "")
+    task_desc = entry.get("content", "") or ""
+    tool = entry.get("tool", "") or ""
+    desc = entry.get("description", "") or ""
+    if not task_desc and tool:
+        task_desc = f"{tool}: {desc}"[:200]
     entry_type = entry.get("type", "unknown")
     entry_id = entry.get("id", "?")
 
