@@ -37,6 +37,73 @@ BRIDGE_PLIST = Path(os.path.expanduser("~/Library/LaunchAgents")).glob("com.neur
 CANARY_PLIST = Path(os.path.expanduser("~/Library/LaunchAgents/com.neuralis.task-executor.plist"))
 
 
+# ── 送達邊 ──────────────────────────────────────────────────────────────
+# 在此之前 redline 只寫 log。判定為 critical 時沒有任何人會知道 ——
+# bridge_env 連喊 477 次無人回應，就是這條邊不存在造成的。
+#
+# 只在「狀態轉換」時寫留言板，不是每輪寫。每 5 分鐘寫一次的話，
+# 477 次會把留言板洗爛，等於另一種形式的沒人看。
+BOARD_PATH = Path(os.environ.get(
+    "SAFETY_REDLINE_BOARD_PATH",
+    os.path.expanduser(
+        "~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md"),
+))
+DELIVERY_STATE_PATH = Path(os.environ.get(
+    "SAFETY_REDLINE_DELIVERY_STATE",
+    "/tmp/neuralis-safety-redline-delivery.json"))
+
+
+def _last_delivered() -> str:
+    try:
+        return json.loads(DELIVERY_STATE_PATH.read_text()).get("status", "unknown")
+    except (OSError, ValueError):
+        return "unknown"
+
+
+def _record_delivered(status: str) -> None:
+    try:
+        DELIVERY_STATE_PATH.write_text(json.dumps({
+            "status": status, "at": time.strftime("%Y-%m-%dT%H:%M:%S")}))
+    except OSError as e:
+        print(f"[deliver] 狀態寫入失敗: {e}")
+
+
+def _board_entry(status: dict[str, Any], recovered: bool) -> str:
+    ts = time.strftime("%Y-%m-%d %H:%M")
+    if recovered:
+        return (f"\n---\n\n## 🟢 safety-redline 恢復 · {ts}\n\n"
+                f"先前的 critical 已解除，目前 status={status['status']}。\n")
+    bad = [c for c in status.get("checks", [])
+           if c.get("severity") == "critical"]
+    lines = [f"\n---\n\n## 🔴 safety-redline CRITICAL · {ts}\n",
+             "自動送達（狀態轉換時才寫，不是每輪）。",
+             f"完整狀態：`{DELIVERY_STATE_PATH.parent}/neuralis-safety-redlines-status.json`\n"]
+    for c in bad:
+        lines.append(f"- **{c.get('name')}** — {c.get('message')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _deliver_to_board(status: dict[str, Any]) -> None:
+    """critical 進出時各寫一次留言板。best-effort：失敗不影響檢查本身。"""
+    now = status.get("status", "unknown")
+    prev = _last_delivered()
+    if now == prev:
+        return                                  # 沒轉換，不吵
+    is_crit, was_crit = now == "critical", prev == "critical"
+    if not is_crit and not was_crit:
+        _record_delivered(now)                  # warning<->ok 不值得驚動人
+        return
+    try:
+        with open(BOARD_PATH, "a", encoding="utf-8") as f:
+            f.write(_board_entry(status, recovered=was_crit and not is_crit))
+    except OSError as e:
+        # 送不到要出聲，不可以靜默 —— 這正是原本那條邊的死法
+        print(f"[deliver] 留言板寫入失敗 ({BOARD_PATH}): {e}")
+        return
+    _record_delivered(now)
+
+
 @dataclass
 class CheckResult:
     name: str
@@ -324,6 +391,7 @@ def main() -> int:
     ]
     status = _build_status(checks, rows_1h, rows_24h)
     _write_status(status)
+    _deliver_to_board(status)
 
     print(f"status={status['status']} rows_1h={len(rows_1h)} rows_24h={len(rows_24h)}")
     for check in checks:
