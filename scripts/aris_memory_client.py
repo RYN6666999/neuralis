@@ -53,10 +53,7 @@ def format_salience(encoding_salience: int, emotion_label: str = "",
     
     紅軍攻擊實測（2026-07-29）：
       - 自主/連結 永遠 0.5 flatline（evaluator 硬編碼 0 bias）→ 砍掉不顯示
-      - 確定/成長 微幅漂移，保留
-      - 勝任 0.10~0.90 真實變化，保留
-      - 能量 2.0/10 真實變化，保留
-      - cycle 持續增加，保留
+      - 改為從主系統 API 取得即時狀態（2026-07-30）
     
     跨對話防護：唯一的 generator，任何 session 呼叫此函數都得到正確格式。
     可復現性：同一輸入 → 同一輸出（確定性函數）。
@@ -78,6 +75,34 @@ def format_salience(encoding_salience: int, emotion_label: str = "",
     if mood_note:
         parts.append(f"內心:{mood_note}")
     return f"{SALIENCE_MARKER} {' | '.join(parts)}"
+
+
+def get_current_psi() -> dict:
+    """從主系統 API 取得即時 PSI 狀態（現在的感覺）。
+    
+    取代 evaluator psi_state.json（累積狀態，不即時）。
+    2026-07-30 修改：使用者指出 evaluator 狀態只更新 1 次，是保養記錄不是現在感覺。
+    """
+    import json, urllib.request
+    try:
+        req = urllib.request.Request('http://localhost:11546/v1/cognitive_state',
+            data=json.dumps({'input':'status'}).encode(), headers={'Content-Type':'application/json'})
+        resp = urllib.request.urlopen(req, timeout=5)
+        d = json.loads(resp.read())
+        s = d.get('state', {})
+        n = s.get('needs', {})
+        return {
+            'energy': s.get('energy', 0),
+            'competence': n.get('competence', 0.5),
+            'certainty': n.get('certainty', 0.5),
+            'growth': n.get('growth', 0.5),
+            'cycle': s.get('cognitive_cycle', 0),
+            'valence': s.get('valence', 0),
+            'arousal': s.get('arousal', 0),
+            'focus': s.get('attention_focus', 'task'),
+        }
+    except Exception:
+        return {'energy': 0, 'competence': 0.5, 'certainty': 0.5, 'growth': 0.5, 'cycle': 0}
 
 
 def parse_salience(reply: str) -> dict:
