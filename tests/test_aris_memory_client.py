@@ -27,23 +27,22 @@ class TestFormatSalience:
 
     def test_roundtrip(self):
         """format → parse 雙向一致：es=4 → parse 回 es=4"""
-        f = amc.format_salience(4, "好奇", energy=2.0, competence=0.67, 
-                                certainty=0.46, growth=0.80, cycle=41831, mood_note="測試")
+        f = amc.format_salience(4, "好奇", energy=2.0, cycle=41831, feeling="測試")
         p = amc.parse_salience("x\n\n" + f)
         assert p.get("encoding_salience") == 4, f"roundtrip 失敗: es={p.get('encoding_salience')}"
 
     def test_no_flatline(self):
         """自主/連結不應出現在輸出中（紅軍攻擊實測：永遠 0.5 flatline）"""
-        f = amc.format_salience(3, "", energy=2.0, competence=0.5, certainty=0.5, growth=0.5)
+        f = amc.format_salience(3, "", energy=2.0, cycle=0)
         assert "自主" not in f, f"輸出包含 flatline 維度：{f}"
         assert "連結" not in f, f"輸出包含 flatline 維度：{f}"
+        assert "內心" not in f, f"輸出包含舊欄位 內心：{f}"
 
     def test_deterministic(self):
         """同一輸入 → 同一輸出（3 次比對）"""
         results = []
         for _ in range(3):
-            f = amc.format_salience(4, "好奇", energy=2.0, competence=0.67, 
-                                    certainty=0.46, growth=0.80, cycle=41831, mood_note="測試")
+            f = amc.format_salience(4, "好奇", energy=2.0, cycle=41831, feeling="測試")
             p = amc.parse_salience("x\n\n" + f)
             results.append(p.get("encoding_salience"))
         assert len(set(results)) == 1, f"非確定性輸出: {results}"

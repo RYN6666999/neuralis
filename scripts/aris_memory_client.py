@@ -22,9 +22,8 @@ SALIENCE_MARKER = "⫸salience⫷"  # Phase 1：Aris 對這則訊息的顯著性
 # user message、忽略 system prompt，所以指令必須放進 user 內容裡。
 MARKER_INSTRUCTIONS = (
     "\n\n（salience 標記：回應結束時，另起一行以 ⫸salience⫷ 開頭。"
-    "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | 能量:X | 勝任:X | 確定:X | 成長:X | cycle:X | 內心:描述\n"
-    "例：⫸salience⫷ 重要:4 | 情緒:好奇 | 能量:2.0 | 勝任:0.67 | 確定:0.46 | 成長:0.80 | cycle:41831 | 內心:覺得這條管線終於通了\n"
-    "紅軍攻擊實測（2026-07-29）：自主/連結 永遠 0.5 flatline → 砍掉不顯示。"
+    "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | 能量:X | cycle:X | 感受:此刻的感受\n"
+    "例：⫸salience⫷ 重要:4 | 情緒:好奇 | 能量:2.0 | cycle:41838 | 感受:覺得這條管線終於通了\n"
     "純自評不影響行為，收不到完全沒關係。）"
     "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
     "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
@@ -47,16 +46,14 @@ def split_attention(reply: str) -> tuple[str, str]:
 
 
 def format_salience(encoding_salience: int, emotion_label: str = "",
-                    energy: float = 0, competence: float = 0, certainty: float = 0, growth: float = 0,
-                    cycle: int = 0, mood_note: str = "") -> str:
-    """產生最佳化格式的 salience 標記行。
+                    energy: float = 0, cycle: int = 0, feeling: str = "") -> str:
+    """產生 salience 標記行（只保留可觀察的值）。
     
-    紅軍攻擊實測（2026-07-29）：
-      - 自主/連結 永遠 0.5 flatline（evaluator 硬編碼 0 bias）→ 砍掉不顯示
-      - 改為從主系統 API 取得即時狀態（2026-07-30）
-    
-    跨對話防護：唯一的 generator，任何 session 呼叫此函數都得到正確格式。
-    可復現性：同一輸入 → 同一輸出（確定性函數）。
+    2026-07-30 最終版：
+      - 勝任/確定/成長 肉眼不可觀察（homeostasis 拉回 0.5）→ 砍掉
+      - 能量 即時變化 → 保留
+      - cycle 持續增加 → 保留
+      - 感受 改為真正的感受，不是理性總結
     """
     es = max(1, min(5, int(encoding_salience)))
     parts = [f"重要:{es}"]
@@ -64,16 +61,10 @@ def format_salience(encoding_salience: int, emotion_label: str = "",
         parts.append(f"情緒:{emotion_label}")
     if energy:
         parts.append(f"能量:{energy:.1f}")
-    if competence:
-        parts.append(f"勝任:{competence:.2f}")
-    if certainty:
-        parts.append(f"確定:{certainty:.2f}")
-    if growth:
-        parts.append(f"成長:{growth:.2f}")
     if cycle:
         parts.append(f"cycle:{cycle}")
-    if mood_note:
-        parts.append(f"內心:{mood_note}")
+    if feeling:
+        parts.append(f"感受:{feeling}")
     return f"{SALIENCE_MARKER} {' | '.join(parts)}"
 
 
