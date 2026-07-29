@@ -161,6 +161,12 @@ def _ensure_columns(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_cj_mem ON contradiction_journal(mem_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence)")
     try:
+        conn.execute("CREATE TABLE IF NOT EXISTS ontology (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL, purpose TEXT NOT NULL, relationships TEXT DEFAULT '[]', status TEXT DEFAULT 'active', updated_at REAL NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS causal_chain (id INTEGER PRIMARY KEY AUTOINCREMENT, cause_type TEXT NOT NULL, cause_value REAL NOT NULL, effect_type TEXT NOT NULL, effect_value TEXT NOT NULL, outcome INTEGER DEFAULT 0, timestamp REAL NOT NULL)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_causal_cause ON causal_chain(cause_type)")
+    except:
+        pass
+    try:
         conn.execute("CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL NOT NULL, route TEXT NOT NULL, task_desc TEXT DEFAULT "", psi_energy REAL DEFAULT 0, psi_competence REAL DEFAULT 0.5, psi_certainty REAL DEFAULT 0.5, psi_growth REAL DEFAULT 0.5, success INTEGER DEFAULT 0, duration REAL DEFAULT 0, error TEXT DEFAULT "")")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_route ON decision_log(route)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_psi ON decision_log(psi_energy)")
@@ -515,6 +521,71 @@ class ArisMemory:
         """依來源查詢。"""
         return self.query("", source, limit)
 
+    def register_ontology(self, name, type_name, purpose, relationships=None):
+        """登錄一個元件到本體論。"""
+        import time
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO ontology (name, type, purpose, relationships, status, updated_at) VALUES (?,?,?,?,?,?)",
+                (name, type_name, purpose, json.dumps(relationships or []), "active", time.time())
+            )
+            self.conn.commit()
+
+    def query_ontology(self, type_name="", status=""):
+        """查詢本體論。"""
+        with self._lock:
+            clauses = ["1=1"]
+            params = []
+            if type_name:
+                clauses.append("type = ?")
+                params.append(type_name)
+            if status:
+                clauses.append("status = ?")
+                params.append(status)
+            rows = self.conn.execute(
+                f"SELECT name, type, purpose, relationships, status FROM ontology WHERE {' AND '.join(clauses)} ORDER BY type, name"
+            ).fetchall()
+            return [{"name": r[0], "type": r[1], "purpose": r[2], "relationships": json.loads(r[3] or "[]"), "status": r[4]} for r in rows]
+
+    def record_causal(self, cause_type, cause_value, effect_type, effect_value, outcome=0):
+        """記錄一條因果鏈：A（cause）導致 B（effect），結果是 outcome。"""
+        import time
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO causal_chain (cause_type, cause_value, effect_type, effect_value, outcome, timestamp) VALUES (?,?,?,?,?,?)",
+                (cause_type, cause_value, effect_type, effect_value, outcome, time.time())
+            )
+            self.conn.commit()
+
+    def query_causal(self, cause_type="", effect_type="", min_occurrences=1):
+        """查詢因果鏈，找出因果模式。"""
+        with self._lock:
+            clauses = ["1=1"]
+            params = []
+            if cause_type:
+                clauses.append("cause_type = ?")
+                params.append(cause_type)
+            if effect_type:
+                clauses.append("effect_type = ?")
+                params.append(effect_type)
+            rows = self.conn.execute(
+                f"SELECT cause_type, cause_value, effect_type, effect_value, avg(outcome) as success_rate, count(*) as cnt FROM causal_chain WHERE {' AND '.join(clauses)} GROUP BY cause_type, effect_type, effect_value HAVING cnt >= ? ORDER BY cnt DESC",
+                params + [min_occurrences]
+            ).fetchall()
+            return [{"cause": r[0], "cause_value": r[1], "effect": r[2], "effect_value": r[3], "success_rate": round(r[4] or 0, 3), "occurrences": r[5]} for r in rows]
+
+    def lookahead(self, route, psi_energy, psi_competence):
+        """前瞻分析：查詢類似 PSI 狀態下該 route 的歷史成功率。"""
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT route, avg(success) as success_rate, count(*) as cnt, avg(psi_energy) as avg_en, avg(psi_competence) as avg_co FROM decision_log WHERE psi_energy BETWEEN ? AND ? AND psi_competence BETWEEN ? AND ? AND route = ?",
+                (max(0, psi_energy-1), min(10, psi_energy+1), max(0, psi_competence-0.2), min(1, psi_competence+0.2), route)
+            ).fetchall()
+            if rows and rows[0][2] > 0:
+                r = rows[0]
+                return {"route": r[0], "success_rate": round(r[1] or 0, 3), "samples": r[2], "avg_energy": round(r[3] or 0, 2), "avg_competence": round(r[4] or 0, 2), "recommendation": "可以執行" if (r[1] or 0) >= 0.5 else "建議暫緩"}
+            return {"route": route, "success_rate": 0, "samples": 0, "recommendation": "無歷史資料"}
+
     def log_decision(self, route, task_desc="", psi_energy=0, psi_competence=0.5,
                        psi_certainty=0.5, psi_growth=0.5, success=0, duration=0, error=""):
         """記錄一次決策及其結果，供判斷力分析使用。"""
@@ -633,6 +704,15 @@ def _serve(port=PORT):
                     self._send(200, {"id": row_id})
                 except Exception as e:
                     self._send(400, {"error": str(e)})
+            elif u.path == "/ontology":
+                self._send(200, {"results": mem.query_ontology(first("type", ""), first("status", ""))})
+            elif u.path == "/causal":
+                self._send(200, {"results": mem.query_causal(first("cause", ""), first("effect", ""), int(first("min", "1") or 1))})
+            elif u.path == "/lookahead":
+                rt = first("route", "")
+                en = float(first("energy", "5") or 5)
+                co = float(first("competence", "0.5") or 0.5)
+                self._send(200, mem.lookahead(rt, en, co))
             elif u.path == "/decision/stats":
                 try:
                     min_en = float(first("min_energy", "0") or 0)
@@ -674,6 +754,24 @@ def _serve(port=PORT):
                     self._send(200, r if r else {"error": "not_found"})
                 except Exception:
                     self._send(400, {"error": "invalid_request"})
+                return
+            if self.path.rstrip("/") == "/ontology/register":
+                try:
+                    n = int(self.headers.get("Content-Length", 0) or 0)
+                    body = json.loads(self.rfile.read(n) if n > 0 else b"{}")
+                    mem.register_ontology(body.get("name","?"), body.get("type","?"), body.get("purpose",""), body.get("relationships",[]))
+                    self._send(200, {"ok": True})
+                except Exception as e:
+                    self._send(400, {"error": str(e)})
+                return
+            if self.path.rstrip("/") == "/causal/record":
+                try:
+                    n = int(self.headers.get("Content-Length", 0) or 0)
+                    body = json.loads(self.rfile.read(n) if n > 0 else b"{}")
+                    mem.record_causal(body.get("cause_type","?"), body.get("cause_value",0), body.get("effect_type","?"), body.get("effect_value",""), body.get("outcome",0))
+                    self._send(200, {"ok": True})
+                except Exception as e:
+                    self._send(400, {"error": str(e)})
                 return
             if self.path.rstrip("/") == "/decision/log":
                 try:

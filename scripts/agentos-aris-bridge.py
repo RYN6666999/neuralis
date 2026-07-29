@@ -1734,6 +1734,27 @@ def process_entry(entry: dict) -> dict:
         route_key = 'research'
         route_tool = _get_route_tool(route_key)
     
+    # 2026-07-30 前瞻分析：查詢類似 PSI 狀態下該 route 的歷史成功率
+    try:
+        import json as _j, urllib.request as _ur2
+        _look = _ur2.urlopen(f"http://localhost:11551/lookahead?route={route_key}&energy={psi['_raw_energy']}&competence={psi['_raw_competence']}", timeout=3)
+        _lr = _j.loads(_look.read())
+        if _lr.get("samples", 0) > 0 and _lr.get("success_rate", 1) < 0.3:
+            log.info(f"  ① 前瞻: {route_key} 歷史成功率={_lr['success_rate']}（{_lr['samples']} 次）→ 建議暫緩，改為 research")
+            route_key = "research"
+            route_tool = _get_route_tool(route_key)
+        elif _lr.get("samples", 0) > 0:
+            log.info(f"  ① 前瞻: {route_key} 歷史成功率={_lr['success_rate']}（{_lr['samples']} 次）→ 繼續執行")
+    except Exception:
+        pass
+    
+    # 記錄因果鏈：當前 PSI 狀態 → 選擇的 route
+    try:
+        _cdata = _j.dumps({"cause_type":"psi_energy","cause_value":psi['_raw_energy'],"effect_type":"route","effect_value":route_key,"outcome":1}).encode()
+        _ur2.urlopen("http://localhost:11551/causal/record", data=_cdata, headers={"Content-Type":"application/json"}, timeout=3)
+    except Exception:
+        pass
+    
     log.info(f"  ① Route: {route_key} → {route_tool}")
 
     # ── ② Brain Context Lookup ──
