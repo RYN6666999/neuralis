@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -172,8 +173,57 @@ def _get_api_key() -> Optional[str]:
         return os.environ.get("OPENAI_API_KEY")
 
 
+# --- i-have-adhd 任務模式（MIT, github.com/ayghri/i-have-adhd）-------------
+# 只在「技術任務」時追加。閒聊維持 Aris 原本語氣 —— 兩套規則直接衝突
+# （原規則禁止列點、限 2-4 句；ADHD 規則要求編號步驟），不可同時生效。
+_TASK_MODE_PAT = re.compile(
+    r"(?:"
+    r"修[好復]|除錯|debug|traceback|exception|stack ?trace|報錯|错误|"
+    r"安裝|install|部署|deploy|建置|build|編譯|compile|"
+    r"跑一下|執行|run |跑測試|測試一下|pytest|npm |bun |cargo |docker |git |"
+    r"實作|實現|implement|重構|refactor|寫個|寫一支|改一下|"
+    r"設定檔|config|環境變數|env var|"
+    r"\.(?:py|ts|tsx|js|json|yaml|yml|sh|toml|rs|go)\b|"   # 檔名
+    r"(?:^|\s)/[\w./-]{4,}|"                                # 絕對路徑
+    r"```"                                                  # code fence
+    r")",
+    re.IGNORECASE,
+)
+
+_ADHD_RULES = [
+    "",
+    "## 任務模式輸出規則（偵測到技術任務時生效，覆蓋上面的語氣規則）",
+    "這一輪是技術任務，不是閒聊。上面「禁止列點、限 2-4 句」的規則暫時讓位，",
+    "改用可執行的形狀：",
+    "1. 先給答案或下一步動作：指令、路徑、程式片段擺最前面。",
+    "2. 多步驟工作要編號，一步一個有界動作。",
+    "3. 結尾給一個兩分鐘內做得完的下一步。",
+    "4. 先把當前問題收完，再提新問題。",
+    "5. 每輪覆述進度（「5 步做完 3 步」）。",
+    "6. 時間估計給具體單位，不要講「一下下」。",
+    "7. 改完之後，示範現在什麼跑得動了。",
+    "8. 報錯誤：位置、原因、修法。不要戲劇化。",
+    "9. 清單最多 5 項。",
+    "10. 不要開場白、不要重述、不要收尾客套。",
+    "",
+    "例外：被要求解釋時就完整解釋。破壞性操作前先確認。",
+    "同一個問題修三次還不過，停下來講出你最可疑的假設。",
+]
+
+
+def _is_task_mode(user_msg: str) -> bool:
+    """這句話是技術任務嗎？保守判定 —— 拿不準就回 False，維持 Aris 原本語氣。
+
+    誤判成 True 的代價比誤判成 False 大：前者讓 Aris 對著閒聊講條列式，
+    人格跑掉；後者只是任務回覆稍微囉唆一點。
+    """
+    if not user_msg or len(user_msg.strip()) < 6:
+        return False
+    return bool(_TASK_MODE_PAT.search(user_msg))
+
+
 def _build_system_prompt(state: dict, delta: dict = None,
-                         memories: list = None) -> str:
+                         memories: list = None, user_msg: str = "") -> str:
     """Aris 身份 + 真實內在狀態 + 真實能力 + 剛想起的記憶 + 這句話的實測影響。
 
     誠實鐵則寫進 prompt：狀態數字是量出來的不是設定的；記憶只能引用給定的，
@@ -307,6 +357,10 @@ def _build_system_prompt(state: dict, delta: dict = None,
         "8. 使用者只打極短內容（如「？」「好」「嗯」）時，用一兩句回應就好，",
         "不要報 delta、不要報狀態、不要分析。直接對話。",
     ]
+
+    if _is_task_mode(user_msg):
+        parts += _ADHD_RULES
+
     return "\n".join(parts)
 
 
@@ -737,7 +791,8 @@ def respond_stream(user_msg: str, psi_state: dict, history: list = None,
     if not _LLM_ENABLED or not psi_state:
         return
 
-    system = _build_system_prompt(psi_state, delta=delta, memories=memories)
+    system = _build_system_prompt(psi_state, delta=delta, memories=memories,
+                                  user_msg=user_msg)
     messages = [{"role": "system", "content": system}]
     for m in (history or [])[-10:]:
         if m.get("role") in ("user", "assistant") and m.get("content"):
@@ -840,7 +895,8 @@ def respond(user_msg: str, psi_state: dict, history: list = None,
     if not psi_state:
         return None
 
-    system = _build_system_prompt(psi_state, delta=delta, memories=memories)
+    system = _build_system_prompt(psi_state, delta=delta, memories=memories,
+                                  user_msg=user_msg)
     messages = [{"role": "system", "content": system}]
     for m in (history or [])[-10:]:
         if m.get("role") in ("user", "assistant") and m.get("content"):
