@@ -1706,6 +1706,38 @@ def _shadow_call_to_mcp(
 
 # ── 主處理流程 ───────────────────────────────────────────
 
+def _llm_judge_route(route_key: str, task_desc: str, psi_energy: float, psi_competence: float) -> dict:
+    """用獨立 LLM 驗證路由決策（鐵律三：產出者不得自驗）。
+    
+    呼叫 GLM-5.2（不是本地模型），避免 circular validation。
+    回傳 {"verdict": "合理"/"不合理"/"error", "reason": "..."}
+    """
+    import json, subprocess, urllib.request, time, os
+    try:
+        key = subprocess.run(["security", "find-generic-password", "-s", "openrouter-api-key", "-w"],
+            capture_output=True, text=True, timeout=5).stdout.strip()
+        if not key:
+            return {"verdict": "unknown", "reason": "no api key"}
+        
+        prompt = f"You are an independent route validator. Current AI state: energy={psi_energy:.1f}/10, competence={psi_competence:.2f}. It chose route={route_key} for task: {task_desc[:100]}. Is this choice reasonable? Reply only: reasonable/unreasonable."
+        
+        data = json.dumps({"model": "z-ai/glm-5.2", "messages": [{"role": "user", "content": prompt}], "max_tokens": 32}).encode()
+        req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=data,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                     "HTTP-Referer": "https://github.com/ryan/aris-evaluator"})
+        resp = urllib.request.urlopen(req, timeout=20)
+        r = json.loads(resp.read())
+        c = (r["choices"][0]["message"].get("content") or "").strip().lower()
+        
+        if "unreasonable" in c:
+            return {"verdict": "不合理", "reason": c[:100]}
+        elif "reasonable" in c:
+            return {"verdict": "合理", "reason": c[:100]}
+        return {"verdict": "unknown", "reason": c[:100]}
+    except Exception as e:
+        return {"verdict": "error", "reason": str(e)[:100]}
+
+
 def process_entry(entry: dict) -> dict:
     """處理單一條 Aris 通道條目，完整走 AgentOS pipeline。"""
     task_desc = entry.get("content", "") or ""
@@ -1754,6 +1786,18 @@ def process_entry(entry: dict) -> dict:
         _ur2.urlopen("http://localhost:11551/causal/record", data=_cdata, headers={"Content-Type":"application/json"}, timeout=3)
     except Exception:
         pass
+    
+    # ② LLM-as-a-Judge：用獨立模型驗證路由決策（鐵律三）
+    try:
+        _jr = _llm_judge_route(route_key, task_desc, psi['_raw_energy'], psi['_raw_competence'])
+        if _jr['verdict'] == '不合理':
+            log.warning(f"  ② Judge: {route_key} 不合理 → 改為 research ({_jr['reason']})")
+            route_key = 'research'
+            route_tool = _get_route_tool(route_key)
+        else:
+            log.info(f"  ② Judge: {route_key} → {_jr['verdict']}")
+    except Exception as _je:
+        log.debug(f"  ② Judge 失敗: {_je}")
     
     log.info(f"  ① Route: {route_key} → {route_tool}")
 
