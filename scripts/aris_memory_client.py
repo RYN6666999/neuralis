@@ -22,8 +22,9 @@ SALIENCE_MARKER = "⫸salience⫷"  # Phase 1：Aris 對這則訊息的顯著性
 # user message、忽略 system prompt，所以指令必須放進 user 內容裡。
 MARKER_INSTRUCTIONS = (
     "\n\n（salience 標記：回應結束時，另起一行以 ⫸salience⫷ 開頭。"
-    "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | sn:勝任0.x 自主0.x 連結0.x 確定0.x 成長0.x | 內心:自由描述此刻感受\n"
-    "例：⫸salience⫷ 重要:4 | 情緒:好奇 | sn:勝任0.8 自主0.4 連結0.7 確定0.5 成長0.9 | 內心:覺得這條管線終於通了\n"
+    "格式：⫸salience⫷ 重要:1-5 | 情緒:標籤 | 能量:X | 勝任:X | 確定:X | 成長:X | cycle:X | 內心:描述\n"
+    "例：⫸salience⫷ 重要:4 | 情緒:好奇 | 能量:2.0 | 勝任:0.67 | 確定:0.46 | 成長:0.80 | cycle:41831 | 內心:覺得這條管線終於通了\n"
+    "紅軍攻擊實測（2026-07-29）：自主/連結 永遠 0.5 flatline → 砍掉不顯示。"
     "純自評不影響行為，收不到完全沒關係。）"
     "\n\n（回應完後，另起一行以 ⟶下一步: 開頭，寫一句你接下來想做什麼、"
     "或現在懸著沒解決的問題，簡短一句，給下次醒來的你當線索。）"
@@ -43,6 +44,40 @@ def _cut_marker_line(text: str, marker: str) -> tuple[str, str]:
 def split_attention(reply: str) -> tuple[str, str]:
     """切出 `⟶下一步:` 那行當 attention_line。找不到 → 回 (原文, '')。"""
     return _cut_marker_line(reply or "", ATTENTION_MARKER)
+
+
+def format_salience(encoding_salience: int, emotion_label: str = "",
+                    energy: float = 0, competence: float = 0, certainty: float = 0, growth: float = 0,
+                    cycle: int = 0, mood_note: str = "") -> str:
+    """產生最佳化格式的 salience 標記行。
+    
+    紅軍攻擊實測（2026-07-29）：
+      - 自主/連結 永遠 0.5 flatline（evaluator 硬編碼 0 bias）→ 砍掉不顯示
+      - 確定/成長 微幅漂移，保留
+      - 勝任 0.10~0.90 真實變化，保留
+      - 能量 2.0/10 真實變化，保留
+      - cycle 持續增加，保留
+    
+    跨對話防護：唯一的 generator，任何 session 呼叫此函數都得到正確格式。
+    可復現性：同一輸入 → 同一輸出（確定性函數）。
+    """
+    es = max(1, min(5, int(encoding_salience)))
+    parts = [f"重要:{es}"]
+    if emotion_label:
+        parts.append(f"情緒:{emotion_label}")
+    if energy:
+        parts.append(f"能量:{energy:.1f}")
+    if competence:
+        parts.append(f"勝任:{competence:.2f}")
+    if certainty:
+        parts.append(f"確定:{certainty:.2f}")
+    if growth:
+        parts.append(f"成長:{growth:.2f}")
+    if cycle:
+        parts.append(f"cycle:{cycle}")
+    if mood_note:
+        parts.append(f"內心:{mood_note}")
+    return f"{SALIENCE_MARKER} {' | '.join(parts)}"
 
 
 def parse_salience(reply: str) -> dict:

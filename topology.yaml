@@ -18,7 +18,7 @@
 #    加邊必須同時加 probe 函式，否則全套驗證癱瘓。跨 repo 節點只加 node，不加 edge。
 
 version: 1
-updated: 2026-07-27
+updated: 2026-07-29
 
 nodes:
   - id: board
@@ -90,6 +90,20 @@ nodes:
           所以不寫行號 —— 行號會漂，而且這裡驗不到）
       ⚠️ ~/Desktop/agent-sandbox 是 2026-06-28 的舊 checkout 且有未提交改動，
       不要讀那份。本尊以 at: 為準。
+
+  - id: psi-evaluator
+    at: ~/.aris-evaluator/psi_evaluator.py
+    owns: [PSI 評估, 需求驅力分析, need_bias 計算]
+    note: |
+      讀 session log → 算 need_bias → 直接修改 PSI state → 輸出報告。
+      2026-07-29 建，係數 provisional。
+
+  - id: cloud-evaluator
+    at: ~/.aris-evaluator/cloud_evaluator.py
+    owns: [雲端 LLM 評估, 雙模型評分, OpenRouter 路由]
+    note: |
+      用 OpenRouter API 呼叫 GLM-5.2 / Kimi K3 評估 session log。
+      2026-07-29 建，取代失敗的 GenSpark 瀏覽器方案。
 
 edges:
   - id: board_to_channel
@@ -173,3 +187,26 @@ edges:
     contract: /wake 三源內容必須真的進到 system prompt
     note: wake_reads_three 只驗源頭有出東西，沒驗有沒有到終點。這條補另一半。
     check: 塞哨兵 attention_line → 問 Aris 懸著什麼 → 回覆含哨兵
+
+  # ── 雙體驗證邊（2026-07-29 加）─────────────────────────
+
+  - id: psi_evaluator_state
+    from: psi-evaluator
+    to: psi-evaluator
+    via: PsiBridge.save_state
+    contract: 注入 need_bias → psi_state.json 的 needs 值正確更新
+    check: "寫 competence=0.1 → 讀回 0.1（probe.py: probe_psi_state）"
+
+  - id: evaluator_audit
+    from: [psi-evaluator, cloud-evaluator]
+    to: psi-evaluator
+    via: evaluate.py 的 audit 寫入
+    contract: "每次評估寫一筆到 audit/，JSON schema 正確"
+    check: "寫測試報告 → 讀回驗證 schema（probe.py: probe_audit_write）"
+
+  - id: dual_evaluation_compare
+    from: psi-evaluator
+    to: cloud-evaluator
+    via: evaluate.py 的 compare_reports
+    contract: "同一份 log，PSI 和 Cloud 各自評估，比對不一致"
+    check: "跑 evaluate.py → 不一致分析檔案非空"
