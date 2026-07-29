@@ -214,20 +214,47 @@ def _check_bridge_env() -> CheckResult:
         issues.append("pydantic import failed — canary scoring disabled")
 
     # 2. single bridge process
+    #
+    # LC_ALL=C 是必要的，不是保險：在 UTF-8 locale 下 pgrep 會對某些進程的
+    # command line 解碼失敗，吐 "Regular expression evaluation error
+    # (illegal byte sequence)" 並以 exit 3 收場。C locale 走逐位元組比對，免疫。
+    # 這個 bug 讓本檢查連續誤報 477 次 "no bridge process running"，
+    # 而 bridge 其實一直活著（task-executor 起的，uptime 2 天以上）。
+    #
+    # exit code 語義必須分開：0=找到、1=真的沒有、>=2=pgrep 自己壞了。
+    # 舊版把三者一律當成 count=0，於是「工具故障」被報成「bridge 掛了」。
+    import subprocess
+    bridge_probe_failed = False
     try:
-        import subprocess
-        raw = subprocess.check_output(
-            ["pgrep", "-f", "agentos-aris-bridge.py"], text=True, timeout=5
-        ).strip()
-        pids = [p.strip() for p in raw.splitlines() if p.strip()]
-        bridge_count = len(pids)
-        details["bridge_pids"] = pids
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
-        bridge_count = 0
-        details["bridge_pids"] = []
+        proc = subprocess.run(
+            ["pgrep", "-f", "agentos-aris-bridge.py"],
+            capture_output=True, text=True, timeout=5,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+        if proc.returncode >= 2:
+            bridge_probe_failed = True
+            pids = []
+            details["bridge_probe_error"] = (
+                f"pgrep exit={proc.returncode}: {proc.stderr.strip()[:120]}")
+        else:
+            # returncode 0 = 有 match；1 = 沒 match（stdout 空）
+            pids = [p.strip() for p in proc.stdout.splitlines() if p.strip()]
+    except subprocess.TimeoutExpired:
+        bridge_probe_failed = True
+        pids = []
+        details["bridge_probe_error"] = "pgrep timeout after 5s"
 
+    bridge_count = len(pids)
+    details["bridge_pids"] = pids
     details["bridge_process_count"] = bridge_count
-    if bridge_count == 0:
+    details["bridge_probe_failed"] = bridge_probe_failed
+
+    if bridge_probe_failed:
+        # 探測壞掉 != bridge 掛掉。照實說，不要假裝知道。
+        issues.append(
+            f"bridge probe failed, process state unknown "
+            f"({details['bridge_probe_error']})")
+    elif bridge_count == 0:
         issues.append("no bridge process running")
     elif bridge_count > 1:
         issues.append(f"{bridge_count} bridge processes running — expected 1")
