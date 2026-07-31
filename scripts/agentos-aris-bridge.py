@@ -225,6 +225,9 @@ _ROUTE_TRUTH_TABLE: dict[str, dict[str, str]] = {
     "scream-ask": {"tool": "scream-ask (Aris query)", "task_class": "compute_draft"},
     "kick-aris": {"tool": "kick-aris.py (push to Aris)", "task_class": "compute_draft"},
     "vision": {"tool": "image-preprocessor (OpenAI GPT-4o → text)", "task_class": "network_call"},
+    "js-render": {"tool": "obscura fetch (render JS pages)", "task_class": "network_call"},
+    "page-extract": {"tool": "obscura fetch --dump markdown", "task_class": "network_call"},
+    "scrape-parallel": {"tool": "obscura scrape --concurrency 25", "task_class": "network_call"},
 }
 
 # 傳輸層 route，不是動作類 —— agentos.json 裡它們的 tool 就是 bridge 自己。
