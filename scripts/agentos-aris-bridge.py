@@ -224,7 +224,16 @@ _ROUTE_TRUTH_TABLE: dict[str, dict[str, str]] = {
     "gbrain": {"tool": "gbrain (Aris memory)", "task_class": "gbrain_read"},
     "scream-ask": {"tool": "scream-ask (Aris query)", "task_class": "compute_draft"},
     "kick-aris": {"tool": "kick-aris.py (push to Aris)", "task_class": "compute_draft"},
+    "vision": {"tool": "image-preprocessor (OpenAI GPT-4o → text)", "task_class": "network_call"},
 }
+
+# 傳輸層 route，不是動作類 —— agentos.json 裡它們的 tool 就是 bridge 自己。
+# 這些 key 沒有 task_class 不是漏掉，是本來就不該有：分類的對象是「要做什麼」，
+# 不是「訊息從哪條線進來」。硬塞一個 task_class 等於憑空發明分類。
+# 真正的動作在訊息內容被 keyword route 解析後才決定，那時才進 scoring。
+_TRANSPORT_ROUTES: frozenset[str] = frozenset({
+    "aris-channel", "aris-request", "aris-task",
+})
 
 # 預設路由（當 agentos.json 不存在或損壞時使用）
 _DEFAULT_ROUTES: dict[str, str] = {
@@ -861,6 +870,8 @@ def _validate_scoring_mappings() -> None:
     unknown_routes: list[str] = []
     missing: list[str] = []
     for route_key in sorted(_ROUTES.keys()):
+        if route_key in _TRANSPORT_ROUTES:
+            continue  # 傳輸層，沒有動作可分類（見 _TRANSPORT_ROUTES 註解）
         task_class = _task_class_for_route(route_key)
         if task_class == "unknown":
             unknown_routes.append(route_key)
@@ -871,8 +882,10 @@ def _validate_scoring_mappings() -> None:
             missing.append(f"{route_key}->{task_class}")
 
     if unknown_routes:
+        # 注意：unknown 不是漏網 —— classify_reversibility("unknown") = escaping
+        # → lane=human，fail-closed。這行是「該補分類」的提醒，不是安全警報。
         log.warning(
-            "Scoring mapping unresolved routes (defaulting legacy path): "
+            "Scoring mapping unresolved routes (fail-closed to human lane): "
             + ", ".join(unknown_routes)
         )
 
