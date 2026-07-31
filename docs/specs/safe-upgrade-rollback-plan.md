@@ -95,12 +95,12 @@ fi
 
 | 升級項 | 現有 spec | code | state 快照 | 副作用擋 | kill switch |
 |---|---|---|---|---|---|
-| 多模態收尾（圖片路徑） | `real-path-plan.md` A1 | ✅ | — | — | — |
+| 多模態收尾（圖片路徑） | `parked/real-path-plan.md` A1 | ✅ | — | — | — |
 | 導入 openspace repo（外部） | 無 | ✅ | — | 供應鏈：先讀碼不直跑 | — |
 | 學白龍馬 agent（外部 repo） | 無 | ✅ | — | 同上 | — |
-| LINE / TG 接入 | `line-private-terminal-plan.md` | ✅ | — | webhook 簽章必驗 | 建議 |
+| LINE / TG 接入 | `parked/line-private-terminal-plan.md` | ✅ | — | webhook 簽章必驗 | 建議 |
 | 分工路由 | `ecosystem-architecture.md` + 光錐 S2 | ✅ | ✅ | propose | ✅ |
-| 量子推理引擎 | `quantum-engine-spec.md` | ✅ | — | ⚠️ 撞 ROADMAP「不投推理層」 | — |
+| 量子推理引擎 | `parked/quantum-engine-spec.md` | ✅ | — | ⚠️ 撞 ROADMAP「不投推理層」 | — |
 | 完全體認知光錐（S3 真自主） | `cognitive-light-cone-plan.md` | ✅ | ✅ | **四樣全上** | ✅ 必須 |
 
 **判準線：** 只碰 code 的（前三項）branch 就夠。碰 state / 真自主的（分工路由、光錐 S3）

@@ -39,7 +39,7 @@
 | 概念 | 定義 | 出處 | 狀態 |
 |------|------|------|------|
 | **三繩驗證** | 三條審查線：ontology 結構 / 降解內容 / 網路交叉 | `LB-arcanum` + 討論 | 設計中 |
-| **牽引繩** | 三繩的統稱，保證結論可追溯、可驗證 | `gbrain-aris-loop.md:198` | 設計中 |
+| **牽引繩** | 三繩的統稱，保證結論可追溯、可驗證 | `parked/gbrain-aris-loop.md:198` | 設計中 |
 | **退相干三階段** | 🔴 初步 / 🟡 推測 / 🟢 確定，類比量子退相干 | 量子理論啟發 | 設計中 |
 | **confidence() 函數** | 根據 n/t/c/d 四維度計算可信度 | `LB-arcanum` spec | 設計中 |
 | **CONF_GATE** | 進入強化迴圈的可信度門檻（預設 0.8） | spec | 待校準 |
@@ -88,9 +88,9 @@
 
 | 關鍵字 | 語境 A | 語境 B | 如何區分 |
 |--------|--------|--------|---------|
-| **fable5** | Anthropic Claude Fable 5（2026 前沿模型，WorkBench 98%） | `neuralis/docs/specs/fable5-minimal-design.md`（Zero-LLM 極簡 PSI 核心） | 提及「模型」「聲帶」「能力」→ A；提及「PSI」「Zero-LLM」「純 Python」→ B |
+| **fable5** | Anthropic Claude Fable 5（2026 前沿模型，WorkBench 98%） | `neuralis/docs/specs/parked/fable5-minimal-design.md`（Zero-LLM 極簡 PSI 核心） | 提及「模型」「聲帶」「能力」→ A；提及「PSI」「Zero-LLM」「純 Python」→ B |
 | **lorry** | `lorryjovens-hub`（LAAP 原作者，Aris 的創造者） | 英文名詞「卡車」 | 提及「上游」「laap-AGI」「父親」→ A |
-| **牽引繩** | 三繩驗證系統（ontology/降解/網路） | `gbrain-aris-loop.md:198` 的「追溯鏈完整性」 | 提及「驗證」「可信度」「三繩」→ 第一種；提及「追溯」「軌跡」→ 第二種 |
+| **牽引繩** | 三繩驗證系統（ontology/降解/網路） | `parked/gbrain-aris-loop.md:198` 的「追溯鏈完整性」 | 提及「驗證」「可信度」「三繩」→ 第一種；提及「追溯」「軌跡」→ 第二種 |
 | **煞車** | 行為層限制器（cycle_guard / rate cap / constitution） | S3 學習的「持久化煞車邏輯」 | `agency.py` 參數 → 第一種；`cognitive-light-cone-plan.md:255` → 第二種 |
 | **ontology** | 資訊科學：明確定義領域概念與關聯的規則系統 | 哲學：存在論／存有學 | 提及「形狀合法」「Palantir」「領域分類」→ 第一種 |
 | **memory** | gbrain（長期，跨 session） | MemoryStore（本機 process） | Scream Memory（CLI 記憶） | OB vault（Obsidian） | 看存取方式：gbrain_client / memory_bridge / MemoryLookup / Read |

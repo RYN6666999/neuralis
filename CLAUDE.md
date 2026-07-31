@@ -42,7 +42,7 @@ dbp risk <檔案>           # 動手前：這個檔以前在哪摔過
    `scripts/check-*.py` 自檢。
 5. 沒有 benchmark 不得宣稱效能提升。
 6. 不得把 QRE / QuantumVM 描述為真正的量子運算 — 那是高維向量幾何的
-   比喻（見 `docs/specs/quantum-engine-spec.md`）。
+   比喻（見 `docs/specs/parked/quantum-engine-spec.md`）。
 7. 安全閘必須先於能力：自主寫入、命令執行與 RSI 開放前，對應的
    safety/approval 閘必須先存在並通過自檢。
 8. 高風險工具預設拒絕（`laap/safety_gate.py`）。不能為了測試方便降低

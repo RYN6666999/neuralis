@@ -154,7 +154,7 @@ gbrain，每 5 次行動 checkpoint。重啟後權重續用，不歸零。這是
   東西，不是「會改變自己想追什麼」的東西。
 - `laap/agi/{causal,world_model,analogical}` 是 dict-based，非真 AGI —— 策略性
   維持現狀。`psilang_v2` QuantumVM 是 dict/random stub。**「量子」是高維向量幾何的
-  比喻，不是量子計算**（見 `docs/specs/quantum-engine-spec.md`）。
+  比喻，不是量子計算**（見 `docs/specs/parked/quantum-engine-spec.md`）。
 - LLM 回應與工具選擇由外部 LLM 生成，psi 狀態經 prompt 塑形 —— 這是 prompt 塑形
   不是認知。
 - RPE 品質綁死 gbrain 分數線：降級 lex-only 時訊號消失且會被永久累積成垃圾。

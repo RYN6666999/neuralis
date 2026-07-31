@@ -5,7 +5,7 @@
 > 參考來源：
 > - **上游 repo**：`lorryjovens-hub/laap-AGI`（branch `feat/env-config-hermes`）— Lorry 的純認知架構
 > - **本地 repo**：`RYN6666999/neuralis`（branch `main`）— Ryan 的 overlay，含安全閘、agency、Scream 整合
-> - 既有 spec：`safe-self-evolution-route.md`, `core-architecture.md`, `cognitive-light-cone-plan.md`
+> - 既有 spec：`safe-self-evolution-route.md`, `parked/core-architecture.md`, `cognitive-light-cone-plan.md`
 > - 實際讀碼：`safety_gate.py`, `agency.py`, `constitution.py`, `cost_ledger.py`, `snapshot.py`, `laap/agi/*.py`
 
 ---

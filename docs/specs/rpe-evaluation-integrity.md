@@ -1,7 +1,7 @@
 ---
 title: RPE 評分完整性 — 反作弊評分（借鑑 AIDE² 但隔離 RSI）
 date: 2026-07-17
-status: planned (未執行)
+status: design-intent（本檔只描述設計意圖；落地狀態一律查 git log / probe / scripts/aris-status.py，不看這行）
 tags: [rpe, evaluation, anti-gaming, agency, aide2, plan]
 ---
 

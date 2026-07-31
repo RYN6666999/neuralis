@@ -5,6 +5,11 @@
 
 ## 動手前先讀這兩條（所有 agent 通用，不分廠牌）
 
+### Step 0: 載入跨對話承諾
+```bash
+bash ~/check-commitments.sh
+```
+
 **鐵律一：事實只能推導，不能複製。** 抄一次 = 預約未來某天的一個謊。
 **鐵律二：0 信心路由 —— 預設第一次就有問題，換一條路驗過才算數。** 產出者不得自驗。
 
@@ -70,7 +75,7 @@ API 常駐 `:11546`（launchd → watchdog → 完整 Aris 三層守護）。
 
 - `laap/agi/{causal,world_model,analogical}` 是 dict-based，非真 AGI —
   策略性維持現狀；psilang_v2 QuantumVM 是 dict/random stub（見
-  `docs/specs/quantum-engine-spec.md`：「量子」是高維向量幾何的比喻，
+  `docs/specs/parked/quantum-engine-spec.md`：「量子」是高維向量幾何的比喻，
   不是量子計算）。
 - LLM 回應與工具選擇由外部 LLM 生成，psi 狀態經 prompt 塑形 — 這是
   prompt 塑形不是認知，被問本質時誠實回答。

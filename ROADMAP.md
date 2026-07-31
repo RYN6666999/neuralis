@@ -20,7 +20,7 @@ Aris 有：動態需求（PsiCore 心跳）、真實記憶（gbrain 1891 頁）�
 |---|---|---|
 | 0 | 底座校正（overlay 缺陷修復、MCP 打通） | — |
 | 1 | gbrain 記憶後端（跨 session 不遺忘） | `check-memory-gbrain.py` |
-| 1.5 | 理論溯源 + PSI Core 實作 + 80/20 槓桿 | `docs/specs/core-architecture.md` |
+| 1.5 | 理論溯源 + PSI Core 實作 + 80/20 槓桿 | `docs/specs/parked/core-architecture.md` |
 | 2 | PSI Core 深度化（五維需求 + 情緒梯度 + 心跳） | `check-psi-response.py` |
 | 3 | psilang_v2 + AGIKernel 四層引擎解鎖 | ⚠️ dict/random stub，見警語 |
 | 4a | 安全閘（工具分級 + 內容掃描 + DENY 審計） | `check-safety.py` |

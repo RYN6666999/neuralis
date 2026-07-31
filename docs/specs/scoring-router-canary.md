@@ -1,7 +1,7 @@
 ---
 title: 評分路由 + 沙箱 canary + 信任 ratchet — 甲的「人類最小決策」機制
 date: 2026-07-24
-status: bridge-connected (2026-07-24, neuralis bridge live, SCORING_ROUTER_ENABLED=0 default-off)
+status: design-intent（本檔只描述設計意圖；落地狀態一律查 git log / probe / scripts/aris-status.py，不看這行）
 tags: [self-evolution, safety, routing, canary, sandbox, ratchet, plan]
 ---
 

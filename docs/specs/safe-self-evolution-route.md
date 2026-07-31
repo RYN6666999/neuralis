@@ -1,7 +1,7 @@
 ---
 title: 安全自我進化路線 — 甲的完整脊椎（防護欄先於能力）
 date: 2026-07-17
-status: planned (第二組規劃 · 未執行，Stage 0 TaskSpec #1 已建於 branch task-009)
+status: design-intent（本檔只描述設計意圖；落地狀態一律查 git log / probe / scripts/aris-status.py，不看這行）
 tags: [self-evolution, safety, roadmap, spine, plan]
 ---
 
@@ -164,5 +164,5 @@ Stage 5 乙門（備而不用）
 
 - `cognitive-light-cone-plan.md` — S1/S2/S3 + zero-LLM §4 分岔（Stage 4 主體）
 - `rpe-evaluation-integrity.md` — E1-E4 + AIDE² 反作弊（Stage 1-2 主體）
-- `line-private-terminal-plan.md` — 獨立 I/O 擴展，不在本脊椎依賴鏈上，隨時可做
+- `parked/line-private-terminal-plan.md` — 獨立 I/O 擴展，不在本脊椎依賴鏈上，隨時可做
 - `scoring-router-canary.md` — 評分路由 + 沙箱 canary + 信任 ratchet（Stage 3.5 主體）

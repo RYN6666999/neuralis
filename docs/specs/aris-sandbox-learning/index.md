@@ -51,7 +51,7 @@ aris-sandbox-learning/
 ## 相關文件
 
 - [`safe-self-evolution-route.md`](../safe-self-evolution-route.md) — 前期安全自主演化路線
-- [`core-architecture.md`](../core-architecture.md) — Neuralis 核心架構
+- [`core-architecture.md`](../parked/core-architecture.md) — Neuralis 核心架構
 - [`ecosystem-architecture.md`](../ecosystem-architecture.md) — 生態系統架構
 
 ## 名詞對照

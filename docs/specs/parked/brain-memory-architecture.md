@@ -156,7 +156,7 @@ contradicts / mentions / attended / founded / works_at / invested_in / advises /
 
 ## 相關
 
-- `docs/specs/gbrain-aris-loop.md`（L1 台帳 + L2 校準，本份的可信度側）
+- `docs/specs/parked/gbrain-aris-loop.md`（L1 台帳 + L2 校準，本份的可信度側）
 - `docs/specs/safe-self-evolution-route.md`（甲脊椎、E1.1/E1.2 效用信號）
 - gbrain: `wiki/projects/gbrain-neural-arch-v2`、`wiki-from-ai/projects/gbrain-circadian`、
   `ai記憶優化專案`、`gbrain/now`

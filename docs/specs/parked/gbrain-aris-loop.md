@@ -224,6 +224,6 @@ affective 態只接到「輸出的篤定語氣」，**絕不接到「事實判�
 
 - `docs/specs/safe-self-evolution-route.md`（甲脊椎、E1.1/E1.2/E2）
 - `docs/specs/rpe-evaluation-integrity.md`（反刷分，第三繩自洽拷問同源）
-- `docs/specs/brain-memory-architecture.md`（三層記憶，L1 台帳的儲存側）
+- `docs/specs/parked/brain-memory-architecture.md`（三層記憶，L1 台帳的儲存側）
 - gbrain: `ai記憶優化專案`、`gbrain/now` 3b 段
 - neuralis: `laap/affective.py`、`laap/constitution.py`

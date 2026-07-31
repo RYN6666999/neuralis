@@ -2,7 +2,7 @@
 title: 認知光錐補齊計劃 — S_span × T_reach
 date: 2026-07-17
 updated: 2026-07-17（整合外部研究報告）
-status: planned (未執行 · 含待拍板的戰略分岔)
+status: design-intent（本檔只描述設計意圖；落地狀態一律查 git log / probe / scripts/aris-status.py，不看這行）
 tags: [cognitive-light-cone, s-span, t-reach, agency, rpe, plan]
 ---
 
