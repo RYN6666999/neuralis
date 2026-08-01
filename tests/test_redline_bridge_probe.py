@@ -34,9 +34,21 @@ def captured_env(monkeypatch):
     seen = {}
 
     def fake_run(cmd, **kw):
+        # 2026-08-01：本來只記「最後一次」呼叫，_check_bridge_env 後來多了
+        # 一個 launchctl 呼叫，就把 pgrep 的紀錄蓋掉，害「pgrep 有沒有帶
+        # LC_ALL」這條測試改成在問 launchctl。逐條記，別讓後來的蓋前面的。
+        seen.setdefault("calls", []).append({"cmd": cmd, "env": kw.get("env") or {}})
         seen["cmd"] = cmd
         seen["env"] = kw.get("env") or {}
         return seen["result"]
+
+    def env_of(prog):
+        """拿指定指令那一次的 env —— 不是最後一次的。"""
+        for c in seen.get("calls", []):
+            if c["cmd"] and prog in c["cmd"][0]:
+                return c["env"]
+        return {}
+    seen["env_of"] = env_of
 
     # 受測碼是在函式內 `import subprocess`，所以要 patch 真正的模組，
     # 不是 redline 的屬性（那個不存在）。
@@ -48,8 +60,9 @@ def test_pgrep_runs_under_c_locale(captured_env):
     """LC_ALL=C 沒帶上的話，UTF-8 環境會重現原本的 illegal byte sequence。"""
     captured_env["result"] = _Proc(0, stdout="7576\n")
     redline._check_bridge_env()
-    assert captured_env["env"].get("LC_ALL") == "C"
-    assert "pgrep" in captured_env["cmd"][0]
+    assert captured_env["env_of"]("pgrep").get("LC_ALL") == "C"
+    # 同理：不要問「最後一次呼叫是不是 pgrep」，問「有沒有呼叫過 pgrep」
+    assert any("pgrep" in c["cmd"][0] for c in captured_env["calls"])
 
 
 def test_found_one_bridge_is_healthy(captured_env):

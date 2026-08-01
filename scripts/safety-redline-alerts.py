@@ -347,6 +347,35 @@ def _check_bridge_env() -> CheckResult:
     if not has_canary_plist:
         issues.append("com.neuralis.task-executor.plist missing — bridge won't survive reboot")
 
+    # 4. launchd job 到底有沒有被載入（2026-08-01 加）
+    #
+    # 為什麼「數 process」不夠：8/1 那次 bridge 死了 3 小時。
+    # plist 在、格式合法、KeepAlive=true —— 但 job 被 bootout 了，
+    # 所以 launchd 根本不會重啟它。
+    #
+    # 這兩種情況的後果天差地遠，必須分開講：
+    #   · job 有載入 + process 掛了  → KeepAlive 會自己拉起來，等一下就好
+    #   · job 沒載入                 → 永遠不會自己回來，要人 bootstrap
+    # 只報「no bridge process running」的話，看的人會以為前者。
+    job_loaded = None
+    try:
+        # LC_ALL=C 同 pgrep：解析外部指令輸出前先把 locale 釘死
+        lst = subprocess.run(["launchctl", "list"], capture_output=True,
+                             text=True, timeout=5,
+                             env={**os.environ, "LC_ALL": "C"})
+        if lst.returncode == 0:
+            job_loaded = any("com.neuralis.task-executor" in ln
+                             for ln in lst.stdout.splitlines())
+    except Exception as e:
+        details["job_loaded_probe_error"] = str(e)[:120]
+    details["task_executor_job_loaded"] = job_loaded
+    if job_loaded is False:
+        issues.append(
+            "com.neuralis.task-executor job NOT loaded in launchd — "
+            "KeepAlive 救不了，要手動 "
+            "`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/"
+            "com.neuralis.task-executor.plist`")
+
     severity = "critical" if issues else "ok"
     return CheckResult(
         name="bridge_env",
