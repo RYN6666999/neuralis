@@ -34,6 +34,12 @@ fi
 
 export PYTHONPATH="$NEURALIS_DIR:$LAAP"
 export LAAP_AGI_DIR="$LAAP"
+# 2026-08-01 停用：RustPsiBackend 只實作 start/healthy/stop，沒有 get_state /
+# process_input / get_state_label。開下去 API 一啟動就
+# AttributeError: 'RustPsiBackend' object has no attribute 'get_state' → :11546 全掛
+# → scream 顯示 [provider.connection_error]。M3（docs/specs/psi-backend-m3-plan.md）
+# 把缺的方法補完、且有 Python↔Rust 對拍測試之後再開。
+# export NEURALIS_PSI_BACKEND=rust
 echo "[neuralis] ❤️ PsiCore + LAAP Brain API :$PORT (venv=$VENV)"
 
 exec "$VENV/bin/python" -u - "$PORT" <<'PYEOF'

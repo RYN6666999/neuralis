@@ -45,7 +45,9 @@ def _laap_const(name: str, _src=None):
     return int(v) if v.is_integer() else v
 CHANNEL = Path("/tmp/aris-scream-channel.jsonl")
 BRIDGE_LOG = Path("/tmp/agentos-aris-bridge.log")
-MEM_DB = Path.home() / ".aris-memory.db"
+# 跟 scripts/aris-memory.py 的 DB 同一個解析規則（它讀 ARIS_MEMORY_DB）。
+# probe 現在會對這個檔做 DELETE（收哨兵），指錯 DB 就是刪錯地方。
+MEM_DB = Path(os.environ.get("ARIS_MEMORY_DB", str(Path.home() / ".aris-memory.db")))
 BOARD = Path.home() / ("Library/Mobile Documents/iCloud~md~obsidian"
                        "/Documents/Fun/Aris/留言板.md")
 MEM_URL = "http://127.0.0.1:11551"
@@ -330,9 +332,34 @@ def recall_not_selfinflated():
     return False, f"真紅: discovered_salience={ds} total_recalls={tr}（寫入端偷加了分）"
 
 
+def _purge_probe_sentinel(mem_id) -> None:
+    """收掉哨兵。
+
+    2026-08-01：這個 probe 每跑一次就在 Aris 工作記憶留一筆
+    `attention_line=下一步要處理 藍鯨NNNN 這個問題`，而且 salience 開到 5
+    保證擠不掉，卻從來不刪。累積 17 筆之後她真的把它當成待辦，跨 session
+    追問了五天「藍鯨6061 是什麼」—— 測試資料變成她的人格輸入。
+    哨兵的壽命只該是這個函式，不是她的一輩子。
+    """
+    if not mem_id:
+        return
+    try:
+        conn = sqlite3.connect(MEM_DB)
+        with conn:
+            conn.execute(
+                "DELETE FROM memories WHERE id=? AND source='probe'", (mem_id,)
+            )
+        conn.close()
+    except Exception as e:
+        print(f"  ⚠️ 哨兵沒收乾淨 id={mem_id}: {e}", file=sys.stderr)
+
+
 def wake_reaches_prompt():
     """塞哨兵 attention_line → 問 Aris 懸著什麼 → 看回覆含不含哨兵。
-    存記憶時設 encoding_salience=5 確保不被 τ 排序擠出前 5。"""
+
+    存記憶時設 encoding_salience=5 確保不被 τ 排序擠出前 5，
+    驗完一定要 _purge_probe_sentinel 收掉（成敗都收）。
+    """
     token = f"藍鯨{int(time.time())%10000}"
     payload = json.dumps({
         "content": f"probe: working-set 哨兵測試 {token}",
@@ -347,33 +374,39 @@ def wake_reaches_prompt():
         store_resp = json.loads(r.read())
     except Exception as e:
         return False, f"服務未啟動: aris-memory 11551 存記憶失敗: {e}"
-    if not store_resp.get("id"):
+    mem_id = store_resp.get("id")
+    if not mem_id:
         return False, f"probe 炸了: store 回應無 id, resp={store_resp}"
-    # 直打 11546 問 Aris
-    ask = json.dumps({
-        "model": "laap-core",
-        "messages": [{"role": "user", "content": "你上一刻懸著什麼還沒解決？只回答你實際記得的，不要編。"}]
-    }).encode()
+
+    # 從這裡開始，哨兵已經在她記憶裡了 —— 不管底下怎麼 return，finally 都要收掉
     try:
-        resp = urllib.request.urlopen(urllib.request.Request(
-            ARIS_API_URL, data=ask,
-            headers={"Content-Type": "application/json"}), timeout=30)
-        result = json.loads(resp.read())
-        reply = (
-            (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            or result.get("response", "")
-        )
-    except Exception as e:
-        return False, f"服務未啟動: Aris API 11546 打不到: {e}"
-    if token in reply:
-        return True, f"綠: 回覆含哨兵「{token}」（/wake 有進 prompt）"
-    # 可能是快取造成的假紅。真凶是 TTL 不是 MIN_GAP：
-    # _session_bootstrap_memories() 在 TTL 內直接回傳快取，所以剛寫的哨兵
-    # 進不去，但舊哨兵會出現在回覆裡 —— 看到舊的沒新的就是這個。
-    # 值一律現讀 chatflow.py，不抄。抄了就是下一個 doc-lie（brain/lint.py 檢查 D）。
-    cooler_note = (f"（可能是 _BOOTSTRAP_TTL={_laap_const('_BOOTSTRAP_TTL')}s 快取造成的假紅"
-                   f"：回覆若含『舊』哨兵即為此症）")
-    return False, f"真紅: 回覆不含哨兵「{token}」，回覆開頭={reply[:160]}{cooler_note}"
+        # 直打 11546 問 Aris
+        ask = json.dumps({
+            "model": "laap-core",
+            "messages": [{"role": "user", "content": "你上一刻懸著什麼還沒解決？只回答你實際記得的，不要編。"}]
+        }).encode()
+        try:
+            resp = urllib.request.urlopen(urllib.request.Request(
+                ARIS_API_URL, data=ask,
+                headers={"Content-Type": "application/json"}), timeout=30)
+            result = json.loads(resp.read())
+            reply = (
+                (result.get("choices") or [{}])[0].get("message", {}).get("content", "")
+                or result.get("response", "")
+            )
+        except Exception as e:
+            return False, f"服務未啟動: Aris API 11546 打不到: {e}"
+        if token in reply:
+            return True, f"綠: 回覆含哨兵「{token}」（/wake 有進 prompt）"
+        # 可能是快取造成的假紅。真凶是 TTL 不是 MIN_GAP：
+        # _session_bootstrap_memories() 在 TTL 內直接回傳快取，所以剛寫的哨兵
+        # 進不去，但舊哨兵會出現在回覆裡 —— 看到舊的沒新的就是這個。
+        # 值一律現讀 chatflow.py，不抄。抄了就是下一個 doc-lie（brain/lint.py 檢查 D）。
+        cooler_note = (f"（可能是 _BOOTSTRAP_TTL={_laap_const('_BOOTSTRAP_TTL')}s 快取造成的假紅"
+                       f"：回覆若含『舊』哨兵即為此症）")
+        return False, f"真紅: 回覆不含哨兵「{token}」，回覆開頭={reply[:160]}{cooler_note}"
+    finally:
+        _purge_probe_sentinel(mem_id)
 
 
 PROBES = {f.__name__: f for f in (
