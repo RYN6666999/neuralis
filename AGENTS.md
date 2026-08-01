@@ -1,6 +1,7 @@
 # neuralis — AGENTS.md
 
-> 最後校準：2026-07-17。每個「已完成」都指向實際檔案與自檢腳本。
+> 本檔是**地圖**：哪個能力住哪、用哪支腳本驗。
+> 不放狀態、不放數字（測試數/工具數/通過率）—— 那些寫下就開始腐敗，一律現跑。
 > 沒有證據的宣稱不准寫進本檔。
 
 ## 動手前先讀這兩條（所有 agent 通用，不分廠牌）
@@ -17,7 +18,7 @@ bash ~/check-commitments.sh
 法條正文在 `brain/lint.py` 檔頭（唯一權威，這裡不複述）。動手前跑：
 
 ```bash
-python3 brain/lint.py     # 六道檢查，每道對應一個真實踩過的坑
+python3 brain/lint.py     # 每道檢查對應一個真實踩過的坑（幾道以輸出為準）
 ```
 
 紅了就是你弄壞了 —— 修掉再 commit，不要 `--no-verify` 硬過。
@@ -44,13 +45,20 @@ API 常駐 `:11546`（launchd → watchdog → 完整 Aris 三層守護）。
 - 多 AI 平行作業：改 `chatflow.py`/`llm_respond.py` 前先 `git status` +
   `python -m py_compile` 確認基線（2026-07-17 一天內撞上兩次同檔平行編輯）。
 
-## 現況（2026-07-17，逐項可驗證）
+## 地圖（不是狀態）
 
-| 系統 | 檔案 | 證據 |
+下表是**哪個能力住在哪個檔、用哪支腳本驗**。它不告訴你那個能力現在是不是活的 ——
+狀態一律現跑：`python3 scripts/aris-status.py`、`python3 brain/lint.py`、
+`python3 scripts/probe.py`。
+
+寫死在文件裡的數字（測試數、工具數、通過率）一律不留，那是最快腐敗的東西。
+要數字就跑證據欄那支腳本。
+
+| 系統 | 檔案 | 怎麼驗 |
 |---|---|---|
 | PsiCore 心跳（1s tick，五維需求 + EmotionGradient + AffectiveState） | `laap/psi_core.py` | `check-psi-response.py` |
-| PSI backend v1 抽象（M1 adapter + M2 呼叫點遷移完成） | `laap/psi_backend.py`、`docs/contracts/psi-backend.md` | `pytest tests/` — 142 passed, 2 xfailed |
-| **Rust PsiEngine v2（2000Hz fast loop，未接 Python）** | `rust/psi-engine/` | `cargo test` 45 passed；`psi-bench` exit=0（2000.0/s、0% miss、p99 4µs） |
+| PSI backend v1 抽象（M1 adapter + M2 呼叫點遷移完成） | `laap/psi_backend.py`、`docs/contracts/psi-backend.md` | `pytest tests/`（數字現跑，不寫死） |
+| **Rust PsiEngine v2（fast loop，⚠️ 仍未接上 Python）** | `rust/psi-engine/` | `cargo test`、`psi-bench`。注意 `RustPsiBackend` 只有 start/healthy/stop，缺 get_state —— 開 `NEURALIS_PSI_BACKEND=rust` 會讓 API 啟動即死（2026-08-01 實際發生） |
 | 需求憲法（range/單次上限/來源小時預算） | `laap/constitution.py` + `need_constitution.json` | `check-constitution.py` |
 | 5 維情緒引擎（耦合矩陣 + 1/f 噪聲 + 認知偏差） | `laap/affective.py` | `check-affective.py` |
 | 對話流攔截（餵 psi + executor 卸載 + 三路 RACE） | `laap/chatflow.py` + `llm_respond.py` | `check-chatflow.py`、`check-psi-response.py` |
@@ -68,8 +76,7 @@ API 常駐 `:11546`（launchd → watchdog → 完整 Aris 三層守護）。
 | Scream TUI 通道（狀態列 + aris-mode 流式 + 時間軸） | `tool_executor.py` → `/tmp/laap-tool-status.json`；4 個 dist 補丁 | patch 後 `node --check` + scream 實跑 |
 | 可觀測儀表 | `laap/status.py` → `status.json`；`aris-status.py`、`morning-brief.py` | 實跑輸出 |
 
-**工具**：45（7 內建 `gbrain/qmd/file-search/http-get/scream-ask/scream-task/stream-test`
-+ 38 AgentOS）。實際名單以 `list_tools()` 為準，不要相信文件裡的數字。
+**工具**：數量不寫在這裡。以 `list_tools()` 為準，或看 bridge 啟動 log 的「路由: N 條」。
 
 ## 已知限制（誠實標記）
 
@@ -108,11 +115,11 @@ API 常駐 `:11546`（launchd → watchdog → 完整 Aris 三層守護）。
 ## 驗證
 
 ```bash
-# pytest（契約 + characterization）— 142 passed, 2 xfailed
+# pytest（契約 + characterization）
 PYTHONPATH="$PWD:${LAAP_ROOT:-../laap-AGI}" \
   "${LAAP_PYTHON:-python3}" -m pytest tests/ -q
 
-# 自檢腳本（21 個，部分需 :11546 在線）
+# 自檢腳本（ls scripts/check-*.py 看有幾支，部分需 :11546 在線）
 PYTHONPATH="$PWD:${LAAP_ROOT:-../laap-AGI}" \
   "${LAAP_PYTHON:-python3}" scripts/check-<name>.py
 
