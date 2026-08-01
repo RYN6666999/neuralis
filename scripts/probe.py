@@ -51,6 +51,11 @@ MEM_DB = Path(os.environ.get("ARIS_MEMORY_DB", str(Path.home() / ".aris-memory.d
 BOARD = Path.home() / ("Library/Mobile Documents/iCloud~md~obsidian"
                        "/Documents/Fun/Aris/留言板.md")
 MEM_URL = "http://127.0.0.1:11551"
+# probe 結果落地。放 ~/.neuralis/ 不放 /tmp：/tmp 重開機清空，
+# 而讀這份檔的 aris_growth_check 是 topology 的永久邊。
+RESULTS = Path(os.environ.get(
+    "NEURALIS_PROBE_RESULTS", str(Path.home() / ".neuralis" / "probe-last.json")))
+RESULTS_FRESH_SEC = 3600
 BRIDGE_PLIST = Path.home() / "Library/LaunchAgents/com.neuralis.task-executor.plist"
 
 
@@ -102,6 +107,21 @@ def _bridge_python_fallback() -> str:
     except Exception:
         pass
     return ""
+
+
+def _record_result(eid: str, ok: bool, msg: str) -> None:
+    """每條邊跑完就落地。best-effort，寫不進去不影響 probe 本身。"""
+    try:
+        RESULTS.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = json.loads(RESULTS.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            data = {}
+        data[eid] = {"ok": bool(ok), "msg": str(msg)[:200], "ts": time.time()}
+        RESULTS.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+    except OSError as e:
+        print(f"  ⚠️ probe 結果沒寫進去 {RESULTS}: {e}", file=sys.stderr)
 
 
 def _rows() -> int:
@@ -566,24 +586,41 @@ def rust_compare_python():
 
 
 def aris_growth_check():
-    """邊：aris-api → aris-api 綜合成長指標。
-    
-    PSI 引擎活著 + 記憶持續累積 + probe 整體維持綠燈。
-    委託 scripts/aris-growth-check.py 執行三項檢查。
+    """邊：綜合成長指標 —— PSI 活著 + 記憶累積 + 關鍵邊維持綠燈。
+
+    2026-08-01 重寫：本來是在 probe 裡面再 subprocess 跑 6 條 probe，
+    巢狀執行必然超過 30s timeout，於是這條邊永遠紅，紅的原因還跟
+    「成長」無關（是它自己的架構）。假紅跟假綠一樣有害 ——
+    人會學會忽略它。
+
+    改成讀 `_record_result` 落地的結果檔。誰跑的不重要，重要的是
+    那些邊最近一次的真實結果。讀不到 / 太舊就照實說「不知道」，
+    不要拿舊資料當現況。
     """
-    # 2026-08-01：本來指向 /tmp，重開機就消失、這條邊會靜默斷掉。
-    # topology 是永久契約，不能引用暫存路徑。
-    script = str(ROOT / "scripts" / "aris-growth-check.py")
-    if not Path(script).is_file():
-        return False, "找不到成長檢查腳本"
+    required = ["rust_b1_read", "rust_b2_write", "recall_not_selfinflated",
+                "wake_reads_three", "psi_evaluator_state"]
     try:
-        r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=35)
-        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-        summary = lines[-1] if lines else f"exit={r.returncode}"
-        ok = r.returncode == 0
-        return ok, f"{'✅' if ok else '❌'} {summary}"
-    except subprocess.TimeoutExpired:
-        return False, "成長檢查超時 35s"
+        data = json.loads(RESULTS.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, f"沒有 probe 結果檔（{RESULTS}）—— 先跑一次 probe.py"
+
+    now = time.time()
+    missing, stale, red = [], [], []
+    for eid in required:
+        r = data.get(eid)
+        if not r:
+            missing.append(eid)
+        elif now - r.get("ts", 0) > RESULTS_FRESH_SEC:
+            stale.append(eid)
+        elif not r.get("ok"):
+            red.append(eid)
+
+    if missing or stale:
+        return False, (f"結果不完整：缺 {missing or '—'} / 過期 {stale or '—'}"
+                       f"（>{RESULTS_FRESH_SEC//60} 分鐘不採信）")
+    if red:
+        return False, f"關鍵邊紅著: {', '.join(red)}"
+    return True, f"{len(required)} 條關鍵邊近期皆綠"
 
 
 PROBES = {f.__name__: f for f in (
@@ -634,6 +671,7 @@ def main(argv=None) -> int:
         else:
             mark = "❌"
             fails += 1
+        _record_result(eid, ok, msg)
         print(f"{mark} {eid:22} {msg}")
     print(f"\n{len(targets)} 條邊，{fails} 條非預期斷線")
     return 1 if fails else 0
