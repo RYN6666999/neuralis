@@ -409,11 +409,69 @@ def wake_reaches_prompt():
         _purge_probe_sentinel(mem_id)
 
 
+# ── evaluator 三條邊（跨 repo：~/.aris-evaluator） ──────────────────────
+# 這三條的 probe 早就寫好在 ~/.aris-evaluator/probe.py，只是沒接進來，
+# 於是 topology.yaml 有邊、這裡沒函式 → 漂移檢查 exit 2 → 整組 probe 拒跑。
+# （2026-08-01 發現時已經是啞的。）
+# 下面只做轉接，不抄它的實作 —— 抄一份就是預約一個謊（鐵律一）。
+# 它的函式回 bool 並把原因 print 出來，這裡把 stdout 接回來當 message，
+# 才不會自己另編一句理由。
+_EVALUATOR_PROBE = Path.home() / ".aris-evaluator" / "probe.py"
+
+
+def _run_evaluator_probe(func_name: str):
+    """呼叫 ~/.aris-evaluator/probe.py 裡的某條 probe，轉成 (ok, message)。"""
+    import contextlib
+    import importlib.util
+    import io
+
+    if not _EVALUATOR_PROBE.exists():
+        return False, f"服務未啟動: 找不到 {_EVALUATOR_PROBE}"
+    try:
+        spec = importlib.util.spec_from_file_location("aris_evaluator_probe", _EVALUATOR_PROBE)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["aris_evaluator_probe"] = mod
+        spec.loader.exec_module(mod)
+    except Exception as e:
+        return False, f"probe 炸了: 載入 evaluator probe 失敗: {e}"
+
+    fn = getattr(mod, func_name, None)
+    if fn is None:
+        return False, f"probe 炸了: {_EVALUATOR_PROBE.name} 沒有 {func_name}()"
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            ok = fn()
+    except Exception as e:
+        return False, f"probe 炸了: {func_name}() 拋出 {type(e).__name__}: {e}"
+
+    lines = [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
+    detail = lines[-1] if lines else f"{func_name}() 無輸出"
+    return bool(ok), ("綠: " if ok else "真紅: ") + detail
+
+
+def psi_evaluator_state():
+    """邊：注入 need_bias → psi_state.json 的 needs 值正確更新。"""
+    return _run_evaluator_probe("probe_psi_state")
+
+
+def evaluator_audit():
+    """邊：每次評估寫一筆到 audit/，JSON schema 正確。"""
+    return _run_evaluator_probe("probe_audit_write")
+
+
+def dual_evaluation_compare():
+    """邊：同一份 log，PSI 與 Cloud 各自評估，比對不一致。"""
+    return _run_evaluator_probe("probe_dual_evaluation")
+
+
 PROBES = {f.__name__: f for f in (
     board_to_channel, channel_to_aris, aris_to_memory,
     webchat_to_memory, memos_to_gbrain, wake_reads_three,
     bridge_scoring_router, relay_remembers_turn,
-    recall_not_selfinflated, wake_reaches_prompt)}
+    recall_not_selfinflated, wake_reaches_prompt,
+    psi_evaluator_state, evaluator_audit, dual_evaluation_compare)}
 
 
 def main(argv=None) -> int:
