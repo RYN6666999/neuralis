@@ -48,15 +48,21 @@ def _content_text(c) -> str:
 
 
 def _usage(prompt_tokens: int, completion_tokens: int) -> dict:
-    """OpenAI 相容的 usage。total 一律由兩者相加算出，不准寫死。
+    """OpenAI + OpenRouter 相容的 usage。total 一律由兩者相加算出，不准寫死。
 
-    2026-07-27：兩處都把 total_tokens 寫死成 0，於是 Scream TUI 底下的
-    context 累積 % 永遠停在 0 不跳動（它拿 total/max_context_size 算）。
-    這是「常數被寫死而非推導」的典型 —— 只有一個真值來源時就別另外填一個。
+    雙格式輸出（2026-08-01 補）：
+      · prompt_tokens / completion_tokens / total_tokens — OpenAI 標準
+      · input / output / total — OpenRouter 格式（Scream TUI 讀這個）
+    Scream 的 context 累積 % 讀的是 event.usage.input + event.usage.output，
+    OpenRouter 回 input/output，OpenAI 回 prompt_tokens/completion_tokens。
+    之前只送 OpenAI 格式，Scream 永遠看到 undefined→0，所以 bar 不動。
     """
     return {"prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens}
+            "total_tokens": prompt_tokens + completion_tokens,
+            "input": prompt_tokens,
+            "output": completion_tokens,
+            "total": prompt_tokens + completion_tokens}
 
 
 def _extract_user_msg(body: dict) -> str:
@@ -64,6 +70,41 @@ def _extract_user_msg(body: dict) -> str:
         if m.get("role") == "user":
             return _content_text(m.get("content"))[:500]
     return ""
+
+
+_HISTORY_TURNS = 6          # 帶幾輪（一輪 = user + assistant）
+_HISTORY_CHARS = 300        # 每則截多長 —— 夠喚起，不夠灌爆 prompt
+
+
+def _format_history(messages: list) -> list[str]:
+    """把先前輪次濃縮成可注入的文字。沒有先前輪次就回空。
+
+    存在理由見呼叫處：Path B（上游 process_with_laap）只讀最後一則 user，
+    歷史不從這裡帶就永遠到不了她眼前。
+
+    只取 user/assistant，跳過最後一則（那是這次要問的），
+    並且**跳過已經被注入過的內容**（含 marker 或 hydration 前綴的），
+    否則每輪都會把上一輪的注入再包一層，滾雪球。
+    """
+    prior = [m for m in (messages or [])
+             if m.get("role") in ("user", "assistant") and m.get("content")][:-1]
+    if not prior:
+        return []
+    out = []
+    for m in prior[-(_HISTORY_TURNS * 2):]:
+        text = _content_text(m.get("content"))
+        # 注入過的痕跡：marker 指令 / 上一輪的歷史區塊本身
+        for cut in ("\n\n（回覆結束時另起一行", "【上一輪對話】"):
+            if cut in text:
+                text = text.split(cut)[0]
+        text = text.strip()
+        if not text:
+            continue
+        who = "Ryan" if m["role"] == "user" else "我"
+        out.append(f"{who}：{text[:_HISTORY_CHARS]}")
+    if not out:
+        return []
+    return ["【上一輪對話】（這是真的發生過的，不是猜測）\n" + "\n".join(out)]
 
 
 def _is_user_turn(body: dict) -> bool:
@@ -87,6 +128,80 @@ def _is_harness_noise(user_msg: str) -> bool:
 
 
 _DUMP = os.environ.get("NEURALIS_DUMP_REQUESTS", "off").lower() in ("on", "1", "true")
+
+
+# ── AgentOS vision pipeline stage ────────────────────────────────
+
+import importlib.util as _import_util
+import os as _os
+
+_IMAGE_PREPROCESSOR_PATH = _os.path.join(
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+    "scripts", "image-preprocessor.py"
+)
+_IMAGE_PREPROCESSOR_ENABLED = _os.environ.get(
+    "NEURALIS_IMAGE_PREPROCESSOR", "on"
+).lower() in ("on", "1", "true")
+
+
+def _load_image_preprocessor():
+    """Lazy-load the image-preprocessor module."""
+    try:
+        spec = _import_util.spec_from_file_location(
+            "image_preprocessor", _IMAGE_PREPROCESSOR_PATH
+        )
+        mod = _import_util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        logger.warning(f"[chatflow] image-preprocessor 載入失敗: {e}")
+        return None
+
+
+_IMAGE_PP_CACHE = None
+
+
+def _preprocess_images(body: dict):
+    """Detect image content in messages and replace with text descriptions.
+
+    AgentOS pipeline stage: runs before LLM routing. If the messages contain
+    image_url parts, calls OpenAI GPT-4o to describe them and replaces the
+    image content with text.
+    """
+    if not _IMAGE_PREPROCESSOR_ENABLED:
+        return
+    global _IMAGE_PP_CACHE
+    if _IMAGE_PP_CACHE is None:
+        _IMAGE_PP_CACHE = _load_image_preprocessor()
+    if _IMAGE_PP_CACHE is None:
+        return
+
+    messages = body.get("messages", [])
+    if not messages:
+        return
+
+    # Quick check: any message with list content (image_url format)?
+    has_image = False
+    for m in messages:
+        content = m.get("content", "")
+        if isinstance(content, list):
+            has_image = True
+            break
+    if not has_image:
+        return
+
+    try:
+        context = _extract_user_msg(body)
+        body["messages"] = _IMAGE_PP_CACHE.preprocess_messages(
+            messages, context=context
+        )
+        logger.info(
+            f"[chatflow] AgentOS vision: 已取代 "
+            f"{sum(1 for m in body['messages'] if 'Image description' in str(m.get('content',''))) }"
+            f" 則訊息中的圖片"
+        )
+    except Exception as e:
+        logger.warning(f"[chatflow] AgentOS vision 失敗: {e}")
 
 
 def _dump_request(body: dict) -> None:
@@ -448,6 +563,9 @@ def _make_chat_handler(orig_handler):
         if _DUMP:
             _dump_request(body)
 
+        # AgentOS vision pipeline stage: detect image content → describe via OpenAI GPT-4o
+        _preprocess_images(body)
+
         # 只有真使用者回合才餵 psi / 加 trust
         # （工具迴圈 round-trip 不算；harness 簿記請求不算）
         user_msg = _extract_user_msg(body)
@@ -546,8 +664,26 @@ def _make_chat_handler(orig_handler):
                 loop.run_in_executor(None, api.process_with_laap, messages, model),
                 timeout=_CHAT_TIMEOUT_S)
 
+        # ── 對話歷史注入（2026-08-01）─────────────────────────────────
+        #
+        # 為什麼要在這裡塞：真人對話一律走 Path B（見下方 user_turn 分支），
+        # 而 Path B 是上游的 process_with_laap —— 它 `for m in reversed(messages)`
+        # 找到第一則 user 就 `break`，**歷史整個丟掉**
+        # （laap-AGI/aris_brain/laap_brain_api.py:110）。
+        #
+        # 所以 relay 那邊回放 10 輪是白做的：送到了，但沒人讀。
+        # 08-01 實測：三則 messages（給代號 → 好 → 代號是什麼）打進 :11546，
+        # 她答「canary」—— 幻覺，因為她根本沒看到前兩則。
+        #
+        # 上游不改（neuralis 是 overlay）。用 chatflow 既有的注入機制：
+        # 把歷史濃縮成文字，接在最後一則 user message 前面 ——
+        # 跟下面 boot_lines 走同一條路，Path B 讀得到的就只有這裡。
+        hist_lines = _format_history(messages)
+
         # 乙的種子：在任務啟動前收集記憶，注入最後一則 user message
         boot_lines = _maybe_session_bootstrap(messages, user_turn, user_msg)
+        if hist_lines:
+            boot_lines = list(boot_lines or []) + hist_lines
         if boot_lines and messages:
             last_user = None
             for i in range(len(messages) - 1, -1, -1):
@@ -629,8 +765,17 @@ def _make_chat_handler(orig_handler):
 
         if content is None:
             # 兩路都失敗 → 最後手段：用記憶餵 _psi_respond
+            #
+            # 2026-08-01：這裡本來沒傳 history。llm_respond 的
+            # `_cache_key(user_msg, history)` 少了 history 就退化成
+            # 「只用最後一則 user 當 key」——**不同對話同一句問法會撞快取**。
+            # 實測：代號 A 問「我剛給你的代號是什麼？」→ A（對）；
+            # 換成代號 B、同一句問法 → 還是回 A（錯，60s TTL 內）；
+            # 只要改一下問法就又對了。這是「同問法 = 同答案」的假記憶。
             try:
-                psi_content = _psi_respond(fed, user_msg, memories=memories)
+                psi_content = _psi_respond(fed, user_msg, memories=memories,
+                                           history=[m for m in messages
+                                                    if m.get("role") in ("user", "assistant")][:-1])
                 if psi_content:
                     content = psi_content
                     engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
@@ -651,7 +796,7 @@ def _make_chat_handler(orig_handler):
             return await _stream_sse(
                 request, web,
                 {"message": {"role": "assistant", "content": content},
-                 "finish_reason": "stop"}, model)
+                 "finish_reason": "stop"}, model, prompt_chars)
         return web.json_response(_build_response(content, engine, model, prompt_chars))
 
     return handler
@@ -835,9 +980,11 @@ def _build_tool_response(result: dict, model: str, prompt_chars: int) -> dict:
     }
 
 
-async def _stream_sse(request, web, result: dict, model: str):
+async def _stream_sse(request, web, result: dict, model: str,
+                       prompt_chars: int = 0):
     """把算好的完整 message（content ± tool_calls）以 OpenAI chunk 格式 SSE 送出。
-    tool_call 先送 id/name 空殼，arguments 分段補 — 與 OpenAI delta 累加語義一致。"""
+    tool_call 先送 id/name 空殼，arguments 分段補 — 與 OpenAI delta 累加語義一致。
+    最後一個 chunk 加 usage 讓 Scream TUI 能顯示上下文條（2026-08-01 補）。"""
     msg = result["message"]
     fin = result.get("finish_reason", "stop")
     resp = web.StreamResponse(headers={
@@ -849,12 +996,13 @@ async def _stream_sse(request, web, result: dict, model: str):
     rid = f"laap-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
-    def chunk(delta: dict, fin_=None) -> bytes:
-        return ("data: " + json.dumps({
-            "id": rid, "object": "chat.completion.chunk", "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": fin_}],
-        }, ensure_ascii=False) + "\n\n").encode()
+    def chunk(delta: dict, fin_=None, usage_=None) -> bytes:
+        d = {"id": rid, "object": "chat.completion.chunk", "created": created,
+             "model": model,
+             "choices": [{"index": 0, "delta": delta, "finish_reason": fin_}]}
+        if usage_:
+            d["usage"] = usage_
+        return ("data: " + json.dumps(d, ensure_ascii=False) + "\n\n").encode()
 
     await resp.write(chunk({"role": "assistant"}))
     content = msg.get("content") or ""
@@ -872,7 +1020,8 @@ async def _stream_sse(request, web, result: dict, model: str):
         for j in range(0, len(args), 256):
             await resp.write(chunk({"tool_calls": [{
                 "index": i, "function": {"arguments": args[j:j + 256]}}]}))
-    await resp.write(chunk({}, fin))
+    usage = _usage(prompt_chars // 4, len(content) // 4)
+    await resp.write(chunk({}, fin, usage))
     await resp.write(b"data: [DONE]\n\n")
     await resp.write_eof()
     return resp
