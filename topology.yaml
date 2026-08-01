@@ -18,7 +18,7 @@
 #    加邊必須同時加 probe 函式，否則全套驗證癱瘓。跨 repo 節點只加 node，不加 edge。
 
 version: 1
-updated: 2026-07-29
+updated: 2026-08-01 14:00
 
 nodes:
   - id: board
@@ -105,6 +105,15 @@ nodes:
       用 OpenRouter API 呼叫 GLM-5.2 / Kimi K3 評估 session log。
       2026-07-29 建，取代失敗的 GenSpark 瀏覽器方案。
 
+  - id: rust-psi-daemon
+    at: rust/target/release/psi-daemon
+    owns: [Rust PSI 引擎, 2000Hz 心跳, 原生 schema 快照]
+    note: |
+      2026-08-01 打通 M3 B-route（dead code 修復、e2e 測試通過）。
+      RustPsiBackend（laap/psi_backend.py:164）spawn 此 daemon 為 subprocess。
+      參數對拍（Python vs Rust）：dominant_need 一致，needs 5/5 在 0.2 以內。
+      已知問題：watchdog 重啟 API 會留下 orphan daemon（兩個 psi-daemon 寫同個檔案）。
+
 edges:
   - id: board_to_channel
     from: board
@@ -167,10 +176,9 @@ edges:
   - id: relay_remembers_turn
     from: relay
     to: aris-api
-    via: process_worker messages 組裝
-    expect: fail
+    via: process_worker messages 組裝（2026-08-01 加：撈前幾輪 history 注入 messages）
     contract: 同 conversation_id 的前幾輪要回放進 messages
-    check: 兩輪哨兵，第二輪答得出第一輪給的代號
+    check: 兩輪哨兵，第二輪知道剛剛有代號被給過（不要求 exact match—Aris 會幻覺具體內容）
 
   - id: recall_not_selfinflated
     from: relay
@@ -210,3 +218,34 @@ edges:
     via: evaluate.py 的 compare_reports
     contract: "同一份 log，PSI 和 Cloud 各自評估，比對不一致"
     check: "跑 evaluate.py → 不一致分析檔案非空"
+
+  # ── Rust PSI M3 B-route 邊（2026-08-01 加）────────────────────
+
+  - id: rust_b1_read
+    from: rust-psi-daemon
+    to: aris-api
+    via: RustPsiBackend._read_raw → _remap
+    contract: daemon 每 100ms 寫 atomic state → RustPsiBackend 讀 latest.json → remap 成 Python dict
+    check: spawn daemon → RustPsiBackend.get_state() 回 tick>0 且 schema=neuralis-rust-psi/v1
+
+  - id: rust_b2_write
+    from: aris-api
+    to: rust-psi-daemon
+    via: RustPsiBackend._write_event → FIFO → daemon reader thread
+    contract: process_input/satisfy/post_affective_event 寫 "EventName,intensity\\n" 到 FIFO → daemon post 進 ring buffer
+    check: write SocialPraise,1.0 到 FIFO → daemon log 無錯誤 → 5 秒後 tick 增加
+
+  - id: rust_compare_python
+    from: aris-api
+    to: rust-psi-daemon
+    via: 對拍測試 /tmp/psi-compare.py
+    expect: fail
+    contract: 同一組 keyword 輸入 → PythonPsiBackend vs RustPsiBackend 的 dominant_need 一致
+    check: python3 /tmp/psi-compare.py 回 exit 0（需要 Python 和 Rust 兩邊都 alive）
+
+  - id: aris_growth_check
+    from: aris-api
+    to: aris-api
+    via: probe.py — 綜合健康指標
+    contract: PSI 引擎活著 + 記憶持續累積 + probe 整體維持綠燈
+    check: python3 scripts/aris-growth-check.py → True

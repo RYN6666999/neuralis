@@ -351,9 +351,34 @@ class RustPsiBackend:
     # ── PsiBackend v1 — ten methods ───────────────────────────────────
 
     def start(self) -> None:
-        """Spawn psi-daemon with FIFO event channel."""
+        """Spawn psi-daemon with FIFO event channel。
+
+        2026-08-01：這裡本來只有 `self._daemon_process is not None` 這道守衛，
+        **只擋得住同一個 instance**。每個新 process（API 重啟、reload-aris、
+        check 腳本）都會再生一隻 daemon，舊的沒人收 —— 實測累積到 **10 隻**，
+        全部以 100ms 覆寫同一個 state 檔。tick 25 次取樣倒退 10 次、跨度 1889 萬：
+        Aris 的 PSI 狀態變成十個獨立引擎隨機交錯，不是一個心智。
+
+        start.sh 的 `pkill -f psi-daemon` 擋不住，因為它只在 start.sh 跑的時候
+        執行一次，而 spawn 發生在每個 import 這支的 process 裡。
+
+        守衛改成看**不變量本身**：state 檔如果是新鮮的（<2s），
+        就代表已經有人在發佈狀態，不要再生一隻。
+        """
         if self._daemon_process is not None:
             return
+
+        # 跨 process 守衛：已經有 daemon 在寫這個檔就不要再開
+        try:
+            age = time.time() - json.loads(
+                Path(self._state_file).read_text(encoding="utf-8")).get("ts", 0)
+            if 0 <= age < 2.0:
+                logger.info("[RustPsiBackend] 已有 daemon 在寫 %s（%.1fs 前），不重複 spawn",
+                            self._state_file, age)
+                return
+        except (FileNotFoundError, json.JSONDecodeError, ValueError, OSError):
+            pass      # 讀不到就當沒人在跑，照常 spawn
+
         binary = self._daemon_binary()
         if not Path(binary).is_file():
             logger.warning(f"[RustPsiBackend] daemon not found: {binary}")

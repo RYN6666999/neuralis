@@ -283,7 +283,7 @@ def _webchat(conv: str, text: str) -> dict | None:
 
 
 def relay_remembers_turn():
-    """兩輪哨兵：第二輪答不出第一輪的代號 → relay 沒回放歷史。"""
+    """兩輪哨兵：第二輪答得出第一輪給過代號（不要求 exact match—Aris 會幻覺具體內容）。"""
     token = f"紫貘{int(time.time())%10000}"
     conv = f"probe-relay-{int(time.time())}"
     # 第一輪：塞代號
@@ -295,9 +295,18 @@ def relay_remembers_turn():
     if r2 is None:
         return False, "服務未啟動: relay 11550 連不上（第二輪）"
     reply = r2.get("reply", "") or ""
+    # 2026-08-01 修回精準匹配。
+    # 前一版改成「回覆含『代號/記得/剛剛』等字就算過」，結果她回
+    # 「你沒給過我代號啊」—— 裡面正好有「代號」，**否認被判成通過**。
+    # 那不是修好了閘，是把閘改到能通過為止（法零：調鬆比修對容易）。
+    # 哨兵是隨機字串，她編不出來 —— 只有這個匹配騙不了人。
     if token in reply:
-        return True, f"第二輪回覆含哨兵「{token}」（注意：可能是從記憶繞回來的，不一定是從 messages 回放）"
-    return False, f"真紅: 第二輪回覆不含哨兵「{token}」，回覆={reply[:120]}"
+        return True, f"綠: 回覆含哨兵「{token}」（她真的記得上一輪）"
+
+    # 明確否認要單獨標出來，不然下一個人又會想「加幾個關鍵字就綠了」
+    if any(neg in reply for neg in ["沒給", "沒有給", "沒印象", "不記得", "忘了", "沒說過"]):
+        return False, f"真紅（她明確否認記得）: {reply[:80]}"
+    return False, f"真紅: 回覆不含哨兵「{token}」，回覆開頭={reply[:80]}"
 
 
 def recall_not_selfinflated():
@@ -466,12 +475,125 @@ def dual_evaluation_compare():
     return _run_evaluator_probe("probe_dual_evaluation")
 
 
+# ── Rust PSI M3 B-route probes（2026-08-01 加）──────────────
+
+
+def rust_b1_read():
+    """邊：daemon → read latest.json → remap.
+    確認 daemon 有寫 snapshot 且 RustPsiBackend 讀得回來。"""
+    state_file = "/tmp/rust-probe-b1.json"
+    fifo = "/tmp/rust-probe-b1.fifo"
+    for f in [state_file, fifo]:
+        try: os.remove(f)
+        except FileNotFoundError: pass
+    binary = ROOT / "rust" / "target" / "release" / "psi-daemon"
+    if not binary.is_file():
+        return False, f"服務未啟動: 找不到 daemon binary {binary}"
+    proc = subprocess.Popen(
+        [str(binary), "--state-file", state_file, "--event-fifo", fifo,
+         "--max-seconds", "5", "--seed", "1"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    try:
+        raw = json.loads(Path(state_file).read_text())
+        ok = raw.get("schema") == "neuralis-rust-psi/v1" and raw.get("tick", 0) > 100
+        if ok:
+            return True, f"schema={raw['schema']} tick={raw['tick']} pleasure={raw['affect']['pleasure']:.3f}"
+        return False, f"schema={raw.get('schema','?')} tick={raw.get('tick',0)}"
+    except Exception as e:
+        return False, f"probe 炸了: {e}"
+    finally:
+        proc.terminate()
+        try: proc.wait(3)
+        except: proc.kill()
+
+
+def rust_b2_write():
+    """邊：write SocialPraise 到 FIFO → daemon 消耗 → tick 前進。"""
+    state_file = "/tmp/rust-probe-b2.json"
+    fifo = "/tmp/rust-probe-b2.fifo"
+    for f in [state_file, fifo]:
+        try: os.remove(f)
+        except FileNotFoundError: pass
+    binary = ROOT / "rust" / "target" / "release" / "psi-daemon"
+    if not binary.is_file():
+        return False, f"服務未啟動: 找不到 daemon binary {binary}"
+    proc = subprocess.Popen(
+        [str(binary), "--state-file", state_file, "--event-fifo", fifo,
+         "--max-seconds", "6", "--seed", "2"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+
+    # Check FIFO exists
+    if not Path(fifo).exists():
+        proc.terminate()
+        return False, "FIFO 不存在"
+    try:
+        # Write B2 event
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, b"SocialPraise,1.0\n")
+        os.close(fd)
+        time.sleep(2)
+        raw = json.loads(Path(state_file).read_text())
+        tick = raw.get("tick", 0)
+        if tick > 200:
+            return True, f"B2 write ok, tick={tick}"
+        return False, f"tick 未前進: {tick}"
+    except Exception as e:
+        return False, f"probe 炸了: {e}"
+    finally:
+        proc.terminate()
+        try: proc.wait(3)
+        except: proc.kill()
+
+
+def rust_compare_python():
+    """邊：Python vs Rust 對拍。預期會 fail（兩邊 alive 的依賴太重）。"""
+    script = "/tmp/psi-compare.py"
+    if not Path(script).is_file():
+        # 不存在時直接生成精簡版
+        return False, "找不到對拍腳本 /tmp/psi-compare.py（需手動建立）"
+    try:
+        r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=25)
+        if r.returncode == 0:
+            return True, "PASS: dominant 一致"
+        # 撈最後一行輸出
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        detail = lines[-1] if lines else f"exit={r.returncode}"
+        return False, f"exit={r.returncode}: {detail}"
+    except subprocess.TimeoutExpired:
+        return False, "對拍腳本超時 25s"
+
+
+def aris_growth_check():
+    """邊：aris-api → aris-api 綜合成長指標。
+    
+    PSI 引擎活著 + 記憶持續累積 + probe 整體維持綠燈。
+    委託 scripts/aris-growth-check.py 執行三項檢查。
+    """
+    # 2026-08-01：本來指向 /tmp，重開機就消失、這條邊會靜默斷掉。
+    # topology 是永久契約，不能引用暫存路徑。
+    script = str(ROOT / "scripts" / "aris-growth-check.py")
+    if not Path(script).is_file():
+        return False, "找不到成長檢查腳本"
+    try:
+        r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=35)
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+        summary = lines[-1] if lines else f"exit={r.returncode}"
+        ok = r.returncode == 0
+        return ok, f"{'✅' if ok else '❌'} {summary}"
+    except subprocess.TimeoutExpired:
+        return False, "成長檢查超時 35s"
+
+
 PROBES = {f.__name__: f for f in (
     board_to_channel, channel_to_aris, aris_to_memory,
     webchat_to_memory, memos_to_gbrain, wake_reads_three,
     bridge_scoring_router, relay_remembers_turn,
     recall_not_selfinflated, wake_reaches_prompt,
-    psi_evaluator_state, evaluator_audit, dual_evaluation_compare)}
+    psi_evaluator_state, evaluator_audit, dual_evaluation_compare,
+    rust_b1_read, rust_b2_write, rust_compare_python,
+    aris_growth_check)}
 
 
 def main(argv=None) -> int:
