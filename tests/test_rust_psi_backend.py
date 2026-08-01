@@ -84,14 +84,20 @@ class TestQuirk1:
     """QUIRK-1：兩個表現層方法讀不同的 valence 欄，這是刻意保留的既有行為。"""
 
     def test_state_label_uses_raw_valence(self, backend):
+        """label 走 _STATE_LABEL_MAP，raw_valence（=affect.pleasure）決定正負面。"""
         b, _ = backend
-        # affect.pleasure=0.4 → raw_valence 0.4 → 正面
-        assert "正面" in b.get_state_label()
+        # dominant=competence、raw_valence=0.4（正）→ 正面那一支
+        assert b.get_state_label() == "confident.helpful"
 
-    def test_injection_uses_endorphin_valence(self, backend):
-        b, _ = backend
-        # endorphin=-0.25 → valence -0.25（跟上面那條相反號，正是 QUIRK-1）
-        assert b.format_state_injection()["valence"] == -0.25
+    def test_injection_shape_is_the_three_string_contract(self, backend):
+        """injection 回的是 state_label/state_snippet/state_tuple 三個字串。
+
+        我第一版斷言它回 {"valence": ...} —— 那是我自己想像的形狀，
+        不是這個 class 的契約。測試要記真行為，不是記我的假設。
+        """
+        inj = b_inj = backend[0].format_state_injection()
+        assert set(inj) == {"state_label", "state_snippet", "state_tuple"}
+        assert isinstance(b_inj["state_snippet"], str)
 
 
 class TestDegradation:
@@ -114,20 +120,36 @@ class TestDegradation:
         assert b.get_state()["tick"] == 42
 
 
-class TestWritePathIsExplicitNoop:
-    """寫入面是 no-op，但**必須明說**。靜默吞掉寫入比 AttributeError 更難查。"""
+class TestWritePathIsB2Fifo:
+    """寫入面**不是** no-op —— 它把事件寫進 daemon 的 FIFO（B2 通道）。
 
-    def test_satisfy_warns_and_does_not_change_state(self, backend, caplog):
-        b, _ = backend
-        before = b.get_state()["needs"]["competence"]["current"]
-        with caplog.at_level("WARNING"):
-            b.satisfy("competence", 0.5, "test")
-        assert b.get_state()["needs"]["competence"]["current"] == before
-        assert any("未生效" in r.message for r in caplog.records)
+    class docstring 原本寫「write methods are no-ops」，那是舊的。
+    這幾條把真行為釘住，免得下一個人（像我今天）照 docstring 推論就寫錯。
+    """
 
-    def test_post_affective_event_returns_false(self, backend):
+    def test_satisfy_writes_mapped_event_to_fifo(self, backend, monkeypatch):
         b, _ = backend
-        assert b.post_affective_event("praise", 1.0) is False
+        sent = []
+        monkeypatch.setattr(b, "_write_event", lambda n, i=1.0: sent.append((n, i)))
+        b.satisfy("competence", 0.5, "test")
+        assert sent and sent[0][0] == "CompetenceSuccess"
+
+    def test_satisfy_unknown_need_writes_nothing(self, backend, monkeypatch):
+        b, _ = backend
+        sent = []
+        monkeypatch.setattr(b, "_write_event", lambda n, i=1.0: sent.append(n))
+        b.satisfy("no_such_need", 0.5, "test")
+        assert sent == []
+
+    def test_post_affective_event_returns_true(self, backend):
+        """未知事件也回 True —— 契約如此（沒有呼叫端真的在看回傳值）。"""
+        b, _ = backend
+        assert b.post_affective_event("praise", 1.0) is True
+
+    def test_missing_fifo_does_not_raise(self, backend):
+        """daemon 沒起來時 FIFO 不存在，寫入必須靜靜失敗而不是炸掉呼叫端。"""
+        b, _ = backend
+        b._write_event("CompetenceSuccess", 1.0)   # 不應拋例外
 
     def test_process_input_records_last_input_only(self, backend):
         b, _ = backend

@@ -167,8 +167,13 @@ class RustPsiBackend:
 
     Reads from the daemon's atomic-write latest.json every call.  Falls back
     to cached state or a default when the file is missing or stale (>2s).
-    Write methods (process_input, satisfy, post_affective_event) are no-ops
-    — the real input channel is B2, this is B1 read-only.
+
+    B1 = read (latest.json)、B2 = write (event FIFO)，兩條都已實作：
+    process_input / satisfy / post_affective_event 會把事件寫進 FIFO，
+    daemon 的 reader thread 撿去 post 進 Rust engine 的 ring buffer。
+    （2026-08-01 更正：這段原本寫「write methods are no-ops」，
+    是舊的。我照這句推論就寫了一版多餘的 no-op 實作 —— docstring 說謊
+    比沒有 docstring 貴。）
 
     QUIRK-1 preserved:
       - get_state_label()  reads ``emotion.raw_valence`` (affect.pleasure)
@@ -395,96 +400,12 @@ class RustPsiBackend:
                 self._daemon_process.wait()
             self._daemon_process = None
 
-    # ── PsiBackend v1 讀取面（2026-08-01 補齊）────────────────────────
-    #
-    # 為什麼是今天才補：這個 class 原本只有 start/healthy/stop，
-    # 缺 get_state 等讀取方法。scripts/start.sh 一開
-    # `NEURALIS_PSI_BACKEND=rust`，API 啟動就
-    # `AttributeError: 'RustPsiBackend' object has no attribute 'get_state'`
-    # → :11546 全掛 → scream 顯示 provider.connection_error（症狀離根因兩層）。
-    #
-    # 零件本來就齊了（_read_raw / _remap / _default_state / _compute_biases），
-    # 缺的只是把公開方法接上去。這裡不新增任何轉換邏輯，只做接線。
-    #
-    # 寫入面（process_input / satisfy / post_affective_event）依 class docstring
-    # 維持 no-op：這是 B1 唯讀路，真正的輸入通道是 B2。**no-op 要明說，
-    # 不能讓呼叫端以為寫進去了** —— 靜默吞掉寫入比 AttributeError 更難查。
-
-    def _current(self) -> dict[str, Any]:
-        """現讀 daemon 狀態；讀不到就退回上次快取，再不行才用預設。"""
-        native = self._read_raw()
-        if native is not None:
-            self._cached_state = self._remap(native)
-        elif not self._cached_state:
-            self._cached_state = self._default_state()
-        return self._cached_state
-
-    def get_state(self) -> dict[str, Any]:
-        return self._current()
-
-    def get_dominant_need(self) -> str:
-        return str(self._current().get("dominant_need", "none"))
-
-    def get_drives(self) -> dict[str, float]:
-        return {n: float(v.get("drive", 0.0))
-                for n, v in self._current().get("needs", {}).items()}
-
-    def get_cognitive_bias(self) -> dict[str, float]:
-        return dict(self._current().get("affective", {}).get("biases", {}))
-
-    def get_last_input(self) -> str:
-        return self._last_input
-
-    def process_input(self, text: str, source: str = "user") -> None:
-        """no-op（B1 唯讀）。只留 last_input 供 get_last_input 用。
-
-        真正餵進 PSI 的通道是 B2 event FIFO，不是這裡。
-        """
-        if _is_human_input(text):
-            self._last_input = text
-        logger.debug("[RustPsiBackend] process_input 是 no-op（B1 唯讀路）")
-
-    def satisfy(self, need: str, amount: float, source: str) -> None:
-        """no-op（B1 唯讀）。故意不靜默：呼叫端有權知道這筆沒有生效。"""
-        logger.warning(
-            "[RustPsiBackend] satisfy(%s) 未生效 —— B1 是唯讀路，"
-            "需求變更要走 B2 event 通道", need)
-
-    def post_affective_event(self, event: str, intensity: float = 1.0) -> bool:
-        """no-op（B1 唯讀）。回 False = 沒被排進佇列，與 Python 端未知事件同義。"""
-        logger.warning(
-            "[RustPsiBackend] post_affective_event(%s) 未生效 —— B1 唯讀路", event)
-        return False
-
-    # ── 表現層（契約 §6）。QUIRK-1 在 _remap 已處理：
-    #    emotion.raw_valence = affect.pleasure、emotion.valence = endorphin。
-
-    def get_state_label(self) -> str:
-        """QUIRK-1：用 raw_valence（= affect.pleasure），不是 valence。"""
-        st = self._current()
-        v = st.get("emotion", {}).get("raw_valence", 0.0)
-        need = st.get("dominant_need", "none")
-        mood = "正面" if v > 0.2 else ("負面" if v < -0.2 else "平穩")
-        return f"{need}／{mood}"
-
-    def format_state_injection(self) -> dict[str, Any]:
-        """QUIRK-1：這裡用 valence（= endorphin），與 get_state_label 不同。"""
-        st = self._current()
-        return {
-            "dominant_need": st.get("dominant_need", "none"),
-            "dominant_drive": st.get("dominant_drive", 0.0),
-            "valence": st.get("emotion", {}).get("valence", 0.0),
-            "arousal": st.get("emotion", {}).get("arousal", 0.5),
-            "attention": st.get("attention", "IDLE"),
-            "biases": st.get("affective", {}).get("biases", {}),
-        }
-
-
-# ── 過濾函式：判斷是否為真人輸入（供兩條 path 共用）──
-def _is_human_input(text: str) -> bool:
-    """False for system-injected inputs (Scream reminders, bridge notifications)."""
-    t = text.strip()
-    return not (t.startswith("<system-reminder>") or "📬 留言板" in text or "【⚠️ Aris 通訊協議" in text)
+    # ── B2 + PsiBackend v1（2026-08-01 復原）───────────────────
+    # 這一整段本來就寫好了，卻被 484 行一個頂格的 `def _is_human_input`
+    # 吞進函式體 —— Python 照樣 parse 得過，只是永遠不會執行。
+    # 於是 class 對外只有 start/healthy/stop，一開 rust flag 就
+    # AttributeError: no attribute 'get_state'（2026-08-01 :11546 全掛）。
+    # 死碼不會叫，比壞掉更難查。
 
 
 # ── B2: keyword→AffectiveEvent mapping (mirrors PsiCore.process_input) ──
@@ -709,3 +630,10 @@ def _is_human_input(text: str) -> bool:
     @attention_focus.setter
     def attention_focus(self, value: str) -> None:
         pass
+
+
+# ── 過濾函式：判斷是否為真人輸入（供兩條 path 共用）──
+def _is_human_input(text: str) -> bool:
+    """False for system-injected inputs (Scream reminders, bridge notifications)."""
+    t = text.strip()
+    return not (t.startswith("<system-reminder>") or "📬 留言板" in text or "【⚠️ Aris 通訊協議" in text)
