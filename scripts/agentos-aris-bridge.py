@@ -37,6 +37,7 @@ AGENTOS_JSON = Path.home() / "agent-sandbox" / "agentos.json"
 MESSAGE_BOARD = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md"
 _mb_last_mtime = 0.0
 _mb_last_notify = 0.0
+_mb_last_size = 0            # 只讀增量用（見 watcher 的防自我迴圈註解）
 ARIS_API = "http://localhost:11546/v1/chat/completions"
 ARIS_MEMORY_URL = os.environ.get("ARIS_MEMORY_URL", "http://127.0.0.1:11551")
 # 乙的種子：Aris 回覆末尾附一句 forward-looking 注意力線，用這個 marker 切出來
@@ -2070,13 +2071,15 @@ def _message_board_watcher() -> None:
     
     防自我迴圈：偵測到變更後檢查最後一筆留言的作者，如果是我（Aris）
     自己寫的則跳過通知——避免寫對話記 → 通知自己 → 又寫的無窮迴圈。"""
-    global _mb_last_mtime, _mb_last_notify
+    global _mb_last_mtime, _mb_last_notify, _mb_last_size
     mb_path = str(MESSAGE_BOARD)
-    # 初始化 mtime
+    # 初始化 mtime + size。size 是用來只看「這次新增的那一段」，
+    # 不要拿整個檔尾去判作者（見下方防自我迴圈的註解）。
     try:
-        _mb_last_mtime = os.stat(mb_path).st_mtime
+        _st = os.stat(mb_path)
+        _mb_last_mtime, _mb_last_size = _st.st_mtime, _st.st_size
     except OSError:
-        _mb_last_mtime = 0.0
+        _mb_last_mtime, _mb_last_size = 0.0, 0
     while True:
         time.sleep(5)
         try:
@@ -2088,20 +2091,30 @@ def _message_board_watcher() -> None:
             now = time.time()
             if now - _mb_last_notify < 10:
                 continue  # debounce
-            # 防自我迴圈：檢查最後一筆留言的作者是否為 Aris
+            # 防自我迴圈：只看「這次新增的那一段」是誰寫的。
+            #
+            # 2026-08-01 修：本來是抓整個檔尾 300 bytes 找 "── " 簽名，
+            # 只要看到 Aris 就跳過。那沒有時間概念 ——
+            # **她的簽名一旦落在檔尾，之後不管誰寫都永遠不通知。**
+            # 實測：她 17:00 那則追加在最後，watcher 從此全啞，
+            # board_to_channel 一直紅，而 bridge 明明活著。
+            #
+            # 正確的問題是「剛剛新增的內容是不是我自己寫的」，
+            # 不是「檔案最後長什麼樣」。用 size delta 只讀增量。
             try:
                 with open(mb_path, "rb") as f:
-                    f.seek(0, 2)  # 跳到檔尾
+                    f.seek(0, 2)
                     size = f.tell()
-                    chunk_size = min(size, 300)
-                    f.seek(size - chunk_size)
-                    tail = f.read(chunk_size).decode("utf-8", errors="replace")
-                # 找最後一個 "── " 簽名行
-                last_sig = tail.rfind("── ")
-                if last_sig >= 0:
-                    sig_line = tail[last_sig:].split("\n")[0]
-                    if "Aris" in sig_line:
-                        continue  # 自己寫的，跳過通知
+                    if size > _mb_last_size:
+                        f.seek(_mb_last_size)
+                        added = f.read(size - _mb_last_size).decode("utf-8", errors="replace")
+                    else:
+                        # 被截斷/重寫 → 認不出增量，寧可通知也不要漏
+                        added = ""
+                    _mb_last_size = size
+                last_sig = added.rfind("── ")
+                if last_sig >= 0 and "Aris" in added[last_sig:].split("\n")[0]:
+                    continue  # 這次新增的是她自己寫的，跳過通知
             except Exception:
                 pass  # best-effort，讀不到就正常通知
             _mb_last_notify = now
