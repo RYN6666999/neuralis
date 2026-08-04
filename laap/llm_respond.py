@@ -943,19 +943,30 @@ def _detect_attention_input(user_msg: str) -> str:
 
 
 def _save_attention_line(text: str) -> bool:
-    """儲存注意力線索到 aris-memory。"""
-    import urllib.request, json
-    payload = json.dumps({"attention": text, "ts": time.time()}).encode()
+    """儲存注意力線索到 aris-memory 的 /memories/store。"""
+    import urllib.request, json, urllib.error
+    payload = json.dumps({
+        "source": "aris_nd",
+        "content": text,
+        "attention_line": text,
+        "origin": "auto_generated",
+        "confidence": "yellow",
+        "event_type": "internal_thought",
+    }).encode()
+    req = urllib.request.Request(
+        "http://127.0.0.1:11551/memories/store",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
-        req = urllib.request.Request(
-            "http://127.0.0.1:11551/attention",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=3)
-        return True
-    except Exception:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return 200 <= r.status < 300
+    except urllib.error.HTTPError as e:
+        logger.warning(f"[llm_respond] 注意力線索寫入失敗 HTTP {e.code}: {e.read()[:200]}")
+        return False
+    except Exception as e:
+        logger.warning(f"[llm_respond] 注意力線索寫入異常: {e!r}")
         return False
 
 
