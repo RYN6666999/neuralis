@@ -31,6 +31,21 @@ if [ ! -x "$PY" ]; then
     exit 1
 fi
 
+# 語法閘：擋「改壞了但沒編譯就 commit」。2026-08-04 用 sed 改多行 Python
+# 把 chatflow.py 弄成 IndentationError，因為沒 commit 所以下面的 lint/pytest
+# 一次都沒跑到，壞檔在工作區躺著等下一次重載才爆。這關擋的是那一類。
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+if [ -n "$STAGED_PY" ]; then
+    echo "[pre-commit] 語法 ..."
+    for f in $STAGED_PY; do
+        [ -f "$f" ] || continue
+        if ! "$PY" -m py_compile "$f"; then
+            echo "[pre-commit] $f 無法編譯 —— commit 擋下。" >&2
+            exit 1
+        fi
+    done
+fi
+
 echo "[pre-commit] 情報層守門人 ..."
 if ! "$PY" brain/lint.py; then
     echo "[pre-commit] LINT 失敗 —— commit 擋下。" >&2

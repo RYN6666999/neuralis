@@ -192,6 +192,33 @@ echo "💾  Memory:   $MEM_STATUS  |  API: $API_STATUS"
 echo "🔗  Bridge:   $BRIDGE_STATUS"
 echo "📸  Snapshot: $SNAP_STATUS"
 echo "📋  Handoff:  $HANDOFF_STATUS"
+
+# 進程新鮮度：跑著的 API 是不是磁碟上最新的碼。
+# 「改了檔就當作生效」是實測出來的固定失敗模式，這行把它變成看得見的紅燈。
+# 秒級比對——只比到分鐘會漏掉 55 秒這種差距。
+STALE=$(python3 -c "
+import os, subprocess, glob
+try:
+    pid = subprocess.run(['lsof','-ti','tcp:11546','-sTCP:LISTEN'],
+                         capture_output=True, text=True).stdout.strip().split()
+    if not pid:
+        print('⚪ API 沒在跑'); raise SystemExit
+    out = subprocess.run(['ps','-o','lstart=','-p',pid[0]],
+                         capture_output=True, text=True).stdout.strip()
+    import time as t
+    started = t.mktime(t.strptime(out, '%a %b %d %H:%M:%S %Y'))
+    newer = [f for f in glob.glob('$PWD/laap/*.py') if os.path.getmtime(f) > started]
+    if newer:
+        print('🔴 進程舊於 ' + ', '.join(os.path.basename(f) for f in newer[:3]) +
+              ' —— 跑 scripts/reload-aris.sh')
+    else:
+        print('🟢')
+except SystemExit:
+    pass
+except Exception as e:
+    print('⚪ 無法判定: ' + type(e).__name__)
+" 2>/dev/null || echo "⚪ 檢查失敗")
+echo "♻️  進程碼:   $STALE"
 echo ""
 
 # 摘要
