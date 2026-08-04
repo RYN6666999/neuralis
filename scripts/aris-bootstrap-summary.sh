@@ -195,19 +195,38 @@ echo "📋  Handoff:  $HANDOFF_STATUS"
 
 # 進程新鮮度：跑著的 API 是不是磁碟上最新的碼。
 # 「改了檔就當作生效」是實測出來的固定失敗模式，這行把它變成看得見的紅燈。
-# 秒級比對——只比到分鐘會漏掉 55 秒這種差距。
+#
+# 用 ps -o etime=（純數字 [[dd-]hh:]mm:ss）不用 lstart。
+# lstart 是 "Wed Aug  5 01:37:59 2026" 這種帶月份名的格式，要 strptime 解，
+# 換個環境就 ValueError（2026-08-05 在另一個 shell 實際炸過三次）。
+# etime 沒有語系、沒有月份名、沒有雙空格對齊問題。
+#
+# 錯誤一律連訊息一起印。上一版只印 type(e).__name__，結果現場只看到
+# 「ValueError」一個詞，無法診斷——那是自己違反「錯誤不准降級」。
 STALE=$(python3 -c "
-import os, subprocess, glob
+import os, subprocess, glob, time
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath('$0')))
 try:
     pid = subprocess.run(['lsof','-ti','tcp:11546','-sTCP:LISTEN'],
                          capture_output=True, text=True).stdout.strip().split()
     if not pid:
         print('⚪ API 沒在跑'); raise SystemExit
-    out = subprocess.run(['ps','-o','lstart=','-p',pid[0]],
-                         capture_output=True, text=True).stdout.strip()
-    import time as t
-    started = t.mktime(t.strptime(out, '%a %b %d %H:%M:%S %Y'))
-    newer = [f for f in glob.glob('$PWD/laap/*.py') if os.path.getmtime(f) > started]
+    et = subprocess.run(['ps','-o','etime=','-p',pid[0]],
+                        capture_output=True, text=True).stdout.strip()
+    if not et:
+        print('⚪ 抓不到 pid ' + pid[0] + ' 的 etime'); raise SystemExit
+    days, _, clock = et.rpartition('-')
+    parts = [int(x) for x in clock.split(':')]
+    secs = 0
+    for p in parts:
+        secs = secs * 60 + p
+    if days:
+        secs += int(days) * 86400
+    started = time.time() - secs
+    src = glob.glob(os.path.join(ROOT, 'laap', '*.py'))
+    if not src:
+        print('⚪ 找不到 laap/*.py（ROOT=' + ROOT + '）'); raise SystemExit
+    newer = [f for f in src if os.path.getmtime(f) > started]
     if newer:
         print('🔴 進程舊於 ' + ', '.join(os.path.basename(f) for f in newer[:3]) +
               ' —— 跑 scripts/reload-aris.sh')
@@ -216,8 +235,8 @@ try:
 except SystemExit:
     pass
 except Exception as e:
-    print('⚪ 無法判定: ' + type(e).__name__)
-" 2>/dev/null || echo "⚪ 檢查失敗")
+    print('⚪ 無法判定: ' + type(e).__name__ + ': ' + str(e))
+" || echo "⚪ 檢查失敗")
 echo "♻️  進程碼:   $STALE"
 echo ""
 
