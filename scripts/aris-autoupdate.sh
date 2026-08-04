@@ -141,4 +141,10 @@ if [[ -f "$DEBRIEF_NOTE" ]]; then
     fi
 fi
 
+# 簽名逾期檢查（每 30 分鐘，只在不逾期時沉默）
+cd "${HOME}/Developer/neuralis"
+bash scripts/check-signoff.sh --cron 2>/dev/null || {
+    echo "⚠️  簽名逾期 —— 請簽署 brain/signed-off.md"
+}
+
 exit 0

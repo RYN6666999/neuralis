@@ -65,7 +65,7 @@ PID_SNAP=$!
 
 # 8. handoff P0 items
 python3 -c "
-import re
+import os, re
 path = os.path.expanduser('~/Developer/neuralis/handoff-next-session.md')
 if os.path.exists(path):
     with open(path) as f:
@@ -157,10 +157,11 @@ fi
 # Handoff
 HANDOFF=$(cat /tmp/.aris-boot-handoff.$$ 2>/dev/null || echo "no-handoff")
 if [ "$HANDOFF" = "no-handoff" ]; then HANDOFF_STATUS="⚪ 無"
+elif [ -z "$HANDOFF" ] || [ "$HANDOFF" = "?" ]; then HANDOFF_STATUS="🔴 讀取失敗（空內容）"
 else
     if echo "$HANDOFF" | grep -q "P0="; then
-        P0=$(echo "$HANDOFF" | grep -oP 'P0=\K\d+')
-        P1=$(echo "$HANDOFF" | grep -oP 'P1=\K\d+')
+        P0=$(echo "$HANDOFF" | sed 's/.*P0=//;s/ .*//')
+        P1=$(echo "$HANDOFF" | sed 's/.*P1=//;s/ .*//')
         if [ "${P0:-0}" -gt 0 ]; then HANDOFF_STATUS="🟡 P0=${P0} P1=${P1}"
         elif [ "${P1:-0}" -gt 0 ]; then HANDOFF_STATUS="🟡 P0=0 P1=${P1}"
         else HANDOFF_STATUS="🟢 P0=0"

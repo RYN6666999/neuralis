@@ -515,7 +515,7 @@ def _psi_respond(fed, user_msg: str, memories: list[str] = None,
             if llm:
                 return llm
     except Exception as e:
-        logger.debug(f"[chatflow] LLM respond 跳過: {e}")
+        logger.warning(f"[chatflow] LLM respond 跳過: {e}")
     try:
         if fed:
             return _compose_psi_reply(*fed, memories=memories)
