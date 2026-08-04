@@ -934,11 +934,25 @@ def _build_turn_prompt(intent: str = None, memories: list = None,
     return "\n".join(parts)
 
 
+# 乙的種子 marker —— 唯一權威定義。chatflow 一律 import，不准另抄字面值。
+# PREFIX 供剝離用（舊資料可能只留前綴），完整版供附加用。
+ATTENTION_MARKER_PREFIX = "\n\n（回覆結束時另起一行以 ⟶下一步: 開頭"
+ATTENTION_MARKER = (ATTENTION_MARKER_PREFIX +
+                    "，寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+
+
+def _strip_marker(text: str) -> str:
+    """剝掉 marker 尾巴，回傳純使用者輸入。"""
+    idx = text.find(ATTENTION_MARKER_PREFIX)
+    return text[:idx].strip() if idx != -1 else text.strip()
+
+
 def _detect_attention_input(user_msg: str) -> str:
     """偵測使用者是否在回應「下一步要做什麼」的提示。"""
-    msg = user_msg.lower().strip()
+    clean = _strip_marker(user_msg)
+    msg = clean.lower().strip()
     if any(w in msg for w in ["下一步", "等等", "接下來", "待會", "明天", "next"]):
-        return user_msg[:200]
+        return clean[:200]
     return ""
 
 

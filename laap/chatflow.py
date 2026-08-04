@@ -24,6 +24,9 @@ import uuid
 from collections import deque
 from pathlib import Path
 
+# 乙的種子 marker 的唯一權威定義在 llm_respond，本檔不得另抄字面值。
+from laap.llm_respond import ATTENTION_MARKER, ATTENTION_MARKER_PREFIX
+
 logger = logging.getLogger("laap.chatflow")
 
 _CHAT_PATH = "/v1/chat/completions"
@@ -94,7 +97,7 @@ def _format_history(messages: list) -> list[str]:
     for m in prior[-(_HISTORY_TURNS * 2):]:
         text = _content_text(m.get("content"))
         # 注入過的痕跡：marker 指令 / 上一輪的歷史區塊本身
-        for cut in ("\n\n（回覆結束時另起一行", "【上一輪對話】"):
+        for cut in (ATTENTION_MARKER_PREFIX, "【上一輪對話】"):
             if cut in text:
                 text = text.split(cut)[0]
         text = text.strip()
@@ -497,8 +500,7 @@ def _psi_respond(fed, user_msg: str, memories: list[str] = None,
                  history: list = None) -> str:
     """PsiCore 回應生成：LLM 優先 → delta 模板（含記憶聯想）→ psi_response 通用模板。"""
     # 乙的種子：培植注意力線習慣。每則 user_msg 都附 marker 指令。
-    marker = ("\n\n（回覆結束時另起一行以 ⟶下一步: 開頭，"
-              "寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+    marker = ATTENTION_MARKER
     if marker not in user_msg:
         user_msg = user_msg + marker
     try:
@@ -638,8 +640,7 @@ def _make_chat_handler(orig_handler):
         messages = body.get("messages", [])
         # 乙的種子：培植注意力線習慣——每則 user message 都附 marker 指令
         if messages:
-            marker = ("\n\n（回覆結束時另起一行以 ⟶下一步: 開頭，"
-                      "寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+            marker = ATTENTION_MARKER
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user" and marker not in messages[i].get("content", ""):
                     messages[i] = {**messages[i],
@@ -699,8 +700,7 @@ def _make_chat_handler(orig_handler):
         if messages:
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
-                    marker = ("\n\n（回覆結束時另起一行以 ⟶下一步: 開頭，"
-                              "寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+                    marker = ATTENTION_MARKER
                     messages[i] = {**messages[i],
                                    "content": messages[i].get("content", "") + marker}
                     break
