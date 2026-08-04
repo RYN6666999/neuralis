@@ -23,6 +23,13 @@ python3 brain/lint.py     # 每道檢查對應一個真實踩過的坑（幾道�
 
 紅了就是你弄壞了 —— 修掉再 commit，不要 `--no-verify` 硬過。
 
+### Step 1: 修東西前讀解法設計約束
+
+`brain/fix-constraints.md` —— 五條硬約束（判準來源、觸發覆蓋率、簽名驗證、
+錯誤不准靜音、換路驗證）＋ 交付格式。每條後面掛一個真實踩過的坑。
+
+宣稱「已修復」前，先過該檔末尾的四題自檢。
+
 ## 專案概述
 
 neuralis 是 laap-AGI（Lorry Jovens，Apache 2.0）之上的獨立認知 overlay（MIT）。
