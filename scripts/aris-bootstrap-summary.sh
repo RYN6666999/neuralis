@@ -254,3 +254,14 @@ if [ -n "$ISSUES" ]; then
 else
     echo "✅ 全部正常，直接做事"
 fi
+
+# 「我不確定」的守門。2026-08-05 一天內三次把可查證的事留成懸案：
+# 常數來源不明（git log -S 就有）、ValueError 成因不明（git log 就有）、
+# commit 宣稱是否屬實（git show 就有）。工單裡有防呆，自由對話沒有——
+# 這行補的就是自由對話那段。放在最後一行，是每個 session 的最後一眼。
+echo ""
+echo "🚧 說「不確定」之前，先跑一條："
+echo "   git log -S '<字串>' -- <檔>   誰引進的"
+echo "   git log --oneline -5 -- <檔>  最近誰動過"
+echo "   git show <sha> -- <檔>        那次到底改了什麼"
+echo "   查過還是不確定 → 寫出你查了什麼、為什麼仍不確定。"
