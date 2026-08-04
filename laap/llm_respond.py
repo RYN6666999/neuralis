@@ -960,7 +960,7 @@ def _save_attention_line(text: str) -> bool:
 
 
 def respond_nd(user_msg: str, psi_state: dict, history: list = None,
-               memories: list = None) -> Optional[str]:
+               memories: list = None, delta: dict = None) -> Optional[str]:
     """窄而深三層管線。"""
     if not _LLM_ENABLED or not psi_state:
         return None
@@ -973,6 +973,13 @@ def respond_nd(user_msg: str, psi_state: dict, history: list = None,
     if attention:
         ok = _save_attention_line(attention)
         logger.info(f"[llm_respond] {'✅' if ok else '❌'} 注意力線索: {attention[:60]}")
+
+    # 1b: delta 影響（如果有的話）
+    if delta:
+        moved = {k: v for k, v in delta.items() if abs(v) >= 0.05}
+        if moved:
+            hints = "、".join(f"{k} {v:+.2f}" for k, v in moved.items())
+            state_hint = f"{state_hint}（你對這句話的反應：{hints}）"
 
     matched = []
     if memories:

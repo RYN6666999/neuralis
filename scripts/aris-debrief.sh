@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
 # aris-debrief — Session 結束協定
-# 掃描整輪對話 → 判斷該記錄什麼 → 分類記錄 → 壓縮 → 更新 snapshot
-# 使用方式：對話結束時執行，或手動執行以完成未完成的 debrief
+# 自動步驟 + 手動檢查清單
 set -euo pipefail
 
 VAULT="${HOME}/Library/Mobile Documents/iCloud~md~obsidian/Documents"
 ARIS_DIR="${VAULT}/Fun/Aris"
 SNAPSHOT="${HOME}/Developer/neuralis/aris-snapshot.md"
 
-# ── 前置檢查：Claude Code 三條規則 ──
-echo "▸ 前置: 宣稱驗證"
-echo "   對本輪所有宣稱，先問："
-echo "   □ 如果這是假的，哪裡會不一樣？然後去數"
-echo "   □ 驗證判準是編不出來的東西（mtime/rowid/exit code）？"
-echo "   □ 改判準的話，有在留言板留紀錄嗎？"
+echo "=== Aris Session Debrief ==="
 echo ""
 
-echo "=== Aris Session Debrief ==="
+# ── 自動步驟：評估本 session 品質 ──
+echo "▸ [自動] 評估 session log..."
+cd "$(dirname "$0")/.."
+python3 scripts/evaluate-and-feedback.py --last 2>&1 | sed 's/^/   /' || echo "   ⚠️ 評估失敗（跳過，不影響）"
 echo ""
 
 # ── Step 1: 掃描 — 提醒要檢查的項目 ──

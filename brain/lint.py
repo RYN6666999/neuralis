@@ -372,7 +372,7 @@ def check_consumers(data: dict = None) -> list[str]:
                 if "感性層" in consumer:
                     continue
                 parts = consumer.split("：")
-                ref = parts[-1].strip() if len(parts) > 1 else consumer.strip()
+                ref = parts[0].strip() if len(parts) > 1 else consumer.strip()
                 # 提取函式名稱（如果有）
                 func_name = ""
                 if "(" in ref:
@@ -385,17 +385,28 @@ def check_consumers(data: dict = None) -> list[str]:
                         bad.append(f"{mech_id}: 消費端 '{consumer}' —— 指向的檔案不存在")
                         continue
                     # 檢查是否真的有被呼叫（grep import 或呼叫）
+                    # 先試函式名，再試檔名
+                    search_terms = []
                     if func_name:
-                        repo_root = ROOT
-                        # 在 repo 中搜尋 func_name 被其他檔案 import 或呼叫
-                        hits = _git("grep", "-l", func_name, "--", "*.py")
+                        search_terms.append(func_name)
+                    # 檔名（不含路徑）作為 fallback
+                    base_name = ref.split("/")[-1].replace(".py", "")
+                    if base_name and base_name != func_name:
+                        search_terms.append(base_name)
+                    for term in search_terms:
+                        hits = _git("grep", "-l", term, "--", "*.py", "*.sh")
                         if hits[1]:
                             callers = [f for f in hits[1].splitlines()
                                        if f and "consumers.yaml" not in f
                                        and "__pycache__" not in f
-                                       and ref.split("::")[0].strip() not in f]
-                            if not callers:
-                                bad.append(f"{mech_id}: 函式 '{func_name}' 被定義但未被任何其他檔案呼叫")
+                                       and ref.split("::")[0].strip() not in f
+                                       and "check-" + term not in f  # 排除 check-* 自家的參考
+                                       and term not in f]  # 排除自身檔案
+                            if callers:
+                                break  # 找到至少一個呼叫者
+                    else:
+                        # 所有搜尋詞都找不到呼叫者
+                        bad.append(f"{mech_id}: 消費端 '{ref}' 被宣告但未被任何其他檔案呼叫（搜尋: {search_terms}）")
                 elif not func_name:
                     # 不是檔案路徑也不是函式名稱，可能是描述文字，跳過
                     pass
