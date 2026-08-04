@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+import uuid
 import time
 from pathlib import Path
 
@@ -172,14 +173,18 @@ def check_consumers_gate() -> None:
                "consumers.yaml 找不到突變錨點，條目可能已改名",
                "更新本檢查的 marker")
         return
+    # 函式名必須執行期隨機。寫死的 payload 一旦被 commit 進本檔，
+    # git grep 就會在本檔找到它，閘門判定「有呼叫者」而放行——
+    # 這支腳本會親手讓自己的突變測試失效。2026-08-05 實際發生過。
+    token = "zzcanary" + uuid.uuid4().hex[:10]
     try:
         yaml_p.write_text(original.replace(
-            marker, '- "brain/lint.py::zzz_never_called()：假消費端"'))
+            marker, f'- "brain/lint.py::{token}()：假消費端"'))
         out = sh(["python3", "brain/lint.py", "--check", "consumers"])
-        caught = "zzz_never_called" in out and "未被任何其他檔案呼叫" in out
+        caught = token in out and "未被任何其他檔案呼叫" in out
         record("消費端閘門.突變偵測", caught,
-               next((l.strip() for l in out.splitlines() if "zzz_never_called" in l),
-                    "未觸發"))
+               next((l.strip() for l in out.splitlines() if token in l),
+                    "未觸發（閘門沒抓到零呼叫的假消費端）"))
     finally:
         yaml_p.write_text(original)
         record("消費端閘門.突變已還原", yaml_p.read_text() == original,

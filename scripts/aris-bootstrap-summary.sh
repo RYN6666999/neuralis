@@ -238,6 +238,29 @@ except Exception as e:
     print('⚪ 無法判定: ' + type(e).__name__ + ': ' + str(e))
 " || echo "⚪ 檢查失敗")
 echo "♻️  進程碼:   $STALE"
+
+# 金絲雀新鮮度。顯示的是「上次跑完距今多久」，不是「有沒有失敗」——
+# 它死掉的表現形式是 canary.jsonl 停止增長，沒有人會注意到一個沒有新行的檔案。
+# 沉默必須等於失敗，所以這裡看的是時間戳不是結果。
+CANARY=$(python3 -c "
+import json, os, time
+p = os.path.expanduser('~/.neuralis/canary-state.json')
+if not os.path.exists(p):
+    print('🔴 從未跑過 —— python3 scripts/mutation-canary.py'); raise SystemExit
+try:
+    d = json.load(open(p))
+except Exception as e:
+    print('🔴 狀態檔壞了: ' + type(e).__name__ + ': ' + str(e)); raise SystemExit
+h = (time.time() - d.get('last_run', 0)) / 3600
+if not d.get('control_ok', False):
+    print('🚨 CONTROL 失敗 —— 金絲雀偵測邏輯本身壞了，結果全部作廢')
+elif h > 36:
+    print('🔴 上次 %.0fh 前（超過 36h）—— 排程可能死了' % h)
+else:
+    dead = [k for k, v in (d.get('mechanisms') or {}).items() if not v.get('last_ok')]
+    print(('🟡 %.0fh 前，閘門失效: ' % h) + ', '.join(dead) if dead else '🟢 %.0fh 前' % h)
+" 2>&1 || echo "⚪ 檢查失敗")
+echo "🐤  金絲雀:   $CANARY"
 echo ""
 
 # 摘要
