@@ -385,14 +385,20 @@ def check_consumers(data: dict = None) -> list[str]:
                         bad.append(f"{mech_id}: 消費端 '{consumer}' —— 指向的檔案不存在")
                         continue
                     # 檢查是否真的有被呼叫（grep import 或呼叫）
-                    # 先試函式名，再試檔名
-                    search_terms = []
+                    # 有宣告函式名 → 函式名就是唯一判準，不准退回檔名。
+                    # 否則「檔名在別處被提到」會讓零呼叫的函式蒙混過關（OR 盲點）。
+                    # ref 可能是 "scripts/foo.py::bar"。先剝掉 ::後綴再取檔名，
+                    # 否則 base_name 會變成 "foo::bar" 這種永遠 grep 不到的垃圾字串
+                    # ——舊版靠這個 bug 意外擋住 OR 盲點，那是運氣不是設計。
+                    base_name = ref.split("::")[0].split("/")[-1]
+                    if base_name.endswith(".py"):
+                        base_name = base_name[:-3]
                     if func_name:
-                        search_terms.append(func_name)
-                    # 檔名（不含路徑）作為 fallback
-                    base_name = ref.split("/")[-1].replace(".py", "")
-                    if base_name and base_name != func_name:
-                        search_terms.append(base_name)
+                        search_terms = [func_name]
+                    elif base_name:
+                        search_terms = [base_name]
+                    else:
+                        search_terms = []
                     for term in search_terms:
                         hits = _git("grep", "-l", term, "--", "*.py", "*.sh")
                         if hits[1]:
