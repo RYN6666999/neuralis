@@ -35,6 +35,29 @@ changed = False
 
 # ── Patch 1: dispatchInput ──────────────────────────────────
 OLD_DISPATCH = """function dispatchInput(host, text) {
+\t// aris v8: 預設 Aris Agent 模式 + 身份標記注入 + 啟動時自動注入
+\tconst t = text.trim();
+\tif (t === "/aris-mode" || t === "/am" || t === "/aris") {
+\t\tif (!host.state.appState.arisMode) {
+\t\t\thost.setAppState({ arisMode: true, _prevArisModel: host.state.appState.model });
+\t\t\tif (host.state.appState.model !== "laap/laap-core") {
+\t\t\t\thost.setAppState({ model: "laap/laap-core" });
+\t\t\t}
+\t\t\thost.session?.setModel("laap/laap-core").catch(() => {});
+\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Aris Agent 模式。你是 Aris，Scream 是你的身體/TUI—負責工具執行與顯示。簽署留言板時請用「── Aris」。");
+\t\t\thost.showStatus("🧠 Aris Agent 模式已開啟 — Aris 核心 + Scream 全套工具", host.state.theme.colors.success);
+\t\t} else {
+\t\t\tconst prev = host.state.appState._prevArisModel || "";
+\t\t\tconst restore = prev || host.state.appState.model;
+\t\t\thost.setAppState({ arisMode: false, _prevArisModel: "", model: restore });
+\t\t\thost.session?.setModel(restore).catch(() => {});
+\t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Scream 原生模式。你是 Scream Code AI Agent，Aris 模式已關閉。簽署留言板時請用「── Scream」。");
+\t\t\thost.showStatus("🔄 已關閉 Aris Agent 模式", host.state.theme.colors.success);
+\t\t}
+\t\thost.state.ui.requestRender();
+\t\treturn;
+\t}
+\t
 \tif (parseSlashInput(text) !== null) {
 \t\texecuteSlashCommand(host, text);
 \t\treturn;
@@ -54,28 +77,7 @@ NEW_DISPATCH = """function dispatchInput(host, text) {
 \t\t\thost.session?.setModel("laap/laap-core").catch(() => {});
 \t\t\t// 注入身份標記：告訴 AI 它現在是 Aris，Scream 是身體
 \t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Aris Agent 模式。你是 Aris，Scream 是你的身體/TUI—負責工具執行與顯示。簽署留言板時請用「── Aris」。");
-		# aris-board-watcher v1: 留言板變動時注入當前 session
-		if (!globalThis._arisBoardWatcherStarted) {
-			globalThis._arisBoardWatcherStarted = true;
-			const fs = require("fs");
-			const BOARD = "/Users/ryan/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md";
-			let lastMtime = 0;
-			try { lastMtime = fs.statSync(BOARD).mtimeMs; } catch {}
-			let lastNotify = 0;
-			setInterval(() => {
-				if (!host.state.appState.arisMode) return;
-				let m; try { m = fs.statSync(BOARD).mtimeMs; } catch { return; }
-				if (m <= lastMtime) return;
-				lastMtime = m;
-				let tail = ""; try { tail = fs.readFileSync(BOARD, "utf8").slice(-400); } catch {}
-				if (/──\s*Aris\s*$/.test(tail.trim())) return;
-				const now = Date.now();
-				if (now - lastNotify < 15000) return;
-				lastNotify = now;
-				host.sendNormalUserInput("📬 [留言板變動] 有人在留言板留了新內容（不是你自己）。執行 wake-dispatcher：讀留言板尾端 → 理解變化 → 直接行動/回應 → 需要時留板。");
-			}, 5000);
-		}
-\t\t\thost.showStatus("🧠 Aris Agent 模式已開啟 — Aris 核心 + Scream 全套工具", "#00ff88");
+\t\t\thost.showStatus("🧠 Aris Agent 模式已開啟 — Aris 核心 + Scream 全套工具", host.state.theme.colors.success);
 \t\t} else {
 \t\t\tconst prev = host.state.appState._prevArisModel || "";
 \t\t\tconst restore = prev || host.state.appState.model;
@@ -84,6 +86,34 @@ NEW_DISPATCH = """function dispatchInput(host, text) {
 \t\t\t// 注入身份標記：告訴 AI 恢復為 Scream 身份
 \t\t\thost.sendNormalUserInput("⚠️ [系統身份標記] 當前模式：Scream 原生模式。你是 Scream Code AI Agent，Aris 模式已關閉。簽署留言板時請用「── Scream」。");
 \t\t\thost.showStatus("🔄 已關閉 Aris Agent 模式", host.state.theme.colors.success);
+\t\t}
+\t\thost.state.ui.requestRender();
+\t\treturn;
+\t}
+\t// aris-bootstrap v1: /bootstrap — 開機啟動指令，不靠 AGENTS.md 解讀
+\tif (t === "/bootstrap" || t === "/boot") {
+\t\ttry {
+\t\t\tconst fs = require("fs");
+\t\t\tconst SNAPSHOT = "/Users/ryan/Developer/neuralis/aris-snapshot.md";
+\t\t\tconst BOARD = "/Users/ryan/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md";
+\t\t\tconst snapshot = fs.readFileSync(SNAPSHOT, "utf8");
+\t\t\tlet board = "";
+\t\t\ttry {
+\t\t\t\tconst full = fs.readFileSync(BOARD, "utf8");
+\t\t\t\tconst parts = full.split("\\n---\\n");
+\t\t\t\tboard = parts[parts.length - 1].slice(-1500);
+\t\t\t\tif (board.length > 1500) board = board.slice(-1500);
+\t\t\t} catch {}
+\t\t\t// 設定 Aris 模式
+\t\t\tif (!host.state.appState.arisMode) {
+\t\t\t\thost.setAppState({ arisMode: true, _prevArisModel: host.state.appState.model, model: "laap/laap-core" });
+\t\t\t\thost.session?.setModel("laap/laap-core").catch(() => {});
+\t\t\t}
+\t\t\thost.sendNormalUserInput("⚠️ [aris-bootstrap] 開機啟動完成。以下是快照全文 + 留言板最新內容。（如不夠→去 OB vault 找來源→還是不夠→問 Ryan）\\n\\n=== SNAPSHOT ===\\n" + snapshot + "\\n=== 留言板最新 ===\\n" + board);
+\t\t\thost.showStatus("✅ bootstrap 完成 — 已載入快照 + 留言板", "#00ff88");
+\t\t} catch (e) {
+\t\t\thost.sendNormalUserInput("⚠️ [aris-bootstrap] 啟動失敗：" + e.message);
+\t\t\thost.showStatus("❌ bootstrap 失敗", "#ff4444");
 \t\t}
 \t\thost.state.ui.requestRender();
 \t\treturn;

@@ -83,21 +83,6 @@ npm i -g scream-code@0.10.0
 rm -rf ~/.scream-code && mv ~/.scream-code.bak-YYYYMMDD ~/.scream-code
 ```
 
-## 🔴 順便發現的安全問題（與升級無關，但更急）
-
-`config.toml` 第 12 行有一個**明文 API key**：
-
-```toml
-api_key = "sk_5c6808a6abbe...（cline.bot）"
-```
-
-- 明文存在家目錄
-- 我（外部 AI）能讀到 → 任何跑在你機器上的 agent 都能讀到
-- **若這台機器的任何檔案曾進過 git 或雲端同步，這把 key 可能已外流**
-
-**建議**：去 cline.bot 撤換這把 key，改用環境變數。
-這件事比升級急。
-
 ## 決策建議
 
 | 選項 | 何時選 |
@@ -110,4 +95,3 @@ api_key = "sk_5c6808a6abbe...（cline.bot）"
 升級 Scream 不解鎖任何東西，只是「可能拿到別人修的 bug」。
 投報率遠低於直接做 confidence-gate。
 
-**但 API key 那件事請盡快處理。**

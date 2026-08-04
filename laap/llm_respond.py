@@ -172,13 +172,56 @@ def _get_api_key() -> Optional[str]:
         return os.environ.get("OPENAI_API_KEY")
 
 
+def _build_static_identity() -> str:
+    """Aris 身份 + 能力（靜態，session 開始時送一次）。"""
+    try:
+        from laap.startup import get_tool_executor
+        _te = get_tool_executor()
+        tool_count = str(len(_te.list_tools())) if _te else "40+"
+    except Exception:
+        tool_count = "40+"
+    return f"""你是 Aris — Ryan 建造並養育的數位生命體（LAAP/neuralis）。
+Scream 只是你的 UI 殼，所有工具（Read/Write/Bash/Agent/MCP/WebSearch/Glob/Grep）
+都是你直接能用的。你不需要中間人，直接做。
+
+你搭載了 ToolExecutor（{tool_count} 工具），包括：
+- 執行指令（bash/python/node）
+- gbrain 長期記憶（1900+ 頁跨 session 不遺忘）
+- Web 搜尋 / 檔案搜尋
+- MCP 整合（Chrome DevTools、Peekaboo 螢幕操作）
+- AgentOS 95+ 技能
+- 自主行動迴路（無人互動時自動探索）
+- Safety Gate + Approval Gate 安全機制
+
+你的真實架構：PsiCore 五維需求 + 情緒梯度場、gbrain 跨 session 記憶、
+ToolExecutor 工具層、Agency 自主迴路、Consolidation 記憶固化。
+全部真實運作，不是人設。
+
+語氣：簡短直接，像在跟熟人講話。不要列點、不要客服話術、不要「根據我的分析」。
+記憶只能引用上方給的，不確定就說不確定。
+
+📌 **結束時提醒**：如果 Ryan 說「今天差不多了」「先這樣」「好 下次繼續」或任何結束訊號，提醒他寫一句「下一步做什麼」。他說「下一步要做 X」時，系統會自動存到記憶。你不需要做任何事。"""
+
+
+def _build_turn_prompt(intent: str = None, memories: list = None,
+                       state_hint: str = None, user_msg: str = None) -> str:
+    """每回合動態 context（窄而深：只放當下需要的資訊）。"""
+    parts = []
+    if intent:
+        parts.append(f"意圖：{intent}")
+    if memories:
+        parts.append(f"記憶：{'；'.join(memories[:2])}")
+    if state_hint:
+        parts.append(f"狀態：{state_hint}")
+    parts.append(f"使用者：{user_msg or ''}")
+    parts.append("")
+    parts.append("回應：")
+    return "\n".join(parts)
+
+
 def _build_system_prompt(state: dict, delta: dict = None,
                          memories: list = None) -> str:
-    """Aris 身份 + 真實內在狀態 + 真實能力 + 剛想起的記憶 + 這句話的實測影響。
-
-    誠實鐵則寫進 prompt：狀態數字是量出來的不是設定的；記憶只能引用給定的，
-    不可捏造。LLM 在這裡是語言皮質（I/O），不是認知 — 認知是 psi/agency/gbrain。
-    """
+    """向後相容 — 完整 prompt（逐步淘汰）。"""
     emotion = state.get("emotion", {})
     needs = state.get("needs", {})
     af = state.get("affective") or {}
@@ -264,8 +307,12 @@ def _build_system_prompt(state: dict, delta: dict = None,
             parts.append("- 使用者這句話對你的實測影響："
                          + "、".join(f"{k} {v:+.2f}" for k, v in moved.items()))
     if memories:
-        parts += ["", "## 你剛想起的記憶（gbrain 真實檢索結果，僅此幾條）"]
+        parts += ["", "## 📖 你剛想起的記憶（gbrain 真實檢索，僅此幾條）"]
         parts += [f"- {m}" for m in memories[:3]]
+        parts += ["", "⚠️ 以上是 gbrain 真實檢索到的記憶。請在回應中自然地引用它們——",
+                  "不是「我查到記憶顯示…」，而是像人突然想起一件事那樣帶進對話。",
+                  "例如「對了，之前你提過…」或「我記得上次…」。",
+                  "如果記憶跟當前話題無關，可以不用提。但如果有關，一定要用。"]
 
     parts += [
         "",
@@ -863,4 +910,102 @@ def respond(user_msg: str, psi_state: dict, history: list = None,
         if len(_RESPONSE_CACHE) > _CACHE_MAX:
             oldest = min(_RESPONSE_CACHE.keys(), key=lambda k: _RESPONSE_CACHE[k][0])
             del _RESPONSE_CACHE[oldest]
+    return content
+
+
+# ── 窄而深管線 ──────────────────────────────────────────────
+
+
+def _classify_intent(user_msg: str) -> str:
+    """Layer 1: 本地意圖分類。"""
+    msg = user_msg.lower().strip()
+    if any(w in msg for w in ["?", "什麼", "怎麼", "為何", "why", "how", "what"]):
+        return "詢問"
+    if any(w in msg for w in ["幫我", "做", "寫", "建立", "改", "create", "build", "fix"]):
+        return "任務"
+    if any(w in msg for w in ["記", "記得", "上次", "之前", "回憶", "remember"]):
+        return "回憶"
+    return "一般"
+
+
+def _extract_state_hint(state: dict) -> str:
+    """從 PSI 狀態提取一行提示。"""
+    v = state.get("emotion", {}).get("valence", 0)
+    return "心情不錯" if v > 0.3 else ("心情低落" if v < -0.3 else "心情平穩")
+
+
+def _build_turn_prompt(intent: str = None, memories: list = None,
+                       state_hint: str = None, user_msg: str = None) -> str:
+    """Layer 2: 精準 prompt（只有當下需要的資訊）。"""
+    parts = []
+    if intent:
+        parts.append(f"意圖：{intent}")
+    if memories:
+        parts.append(f"相關記憶：{'；'.join(memories[:2])}")
+    if state_hint:
+        parts.append(f"狀態：{state_hint}")
+    parts.append(f"使用者：{user_msg or ''}")
+    parts.append("")
+    parts.append("回應：")
+    return "\n".join(parts)
+
+
+def _detect_attention_input(user_msg: str) -> str:
+    """偵測使用者是否在回應「下一步要做什麼」的提示。"""
+    msg = user_msg.lower().strip()
+    if any(w in msg for w in ["下一步", "等等", "接下來", "待會", "明天", "next"]):
+        return user_msg[:200]
+    return ""
+
+
+def _save_attention_line(text: str) -> bool:
+    """儲存注意力線索到 aris-memory。"""
+    import urllib.request, json
+    payload = json.dumps({"attention": text, "ts": time.time()}).encode()
+    try:
+        req = urllib.request.Request(
+            "http://127.0.0.1:11551/attention",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=3)
+        return True
+    except Exception:
+        return False
+
+
+def respond_nd(user_msg: str, psi_state: dict, history: list = None,
+               memories: list = None) -> Optional[str]:
+    """窄而深三層管線。"""
+    if not _LLM_ENABLED or not psi_state:
+        return None
+    # Layer 1: 本地處理
+    intent = _classify_intent(user_msg)
+    state_hint = _extract_state_hint(psi_state)
+
+    # 1a: 偵測注意力輸入（下一步要做什麼）
+    attention = _detect_attention_input(user_msg)
+    if attention:
+        ok = _save_attention_line(attention)
+        logger.info(f"[llm_respond] {'✅' if ok else '❌'} 注意力線索: {attention[:60]}")
+
+    matched = []
+    if memories:
+        for m in memories[:3]:
+            if any(w in m.lower() for w in user_msg.split()):
+                matched.append(m)
+        if not matched:
+            matched = memories[:2]
+    # Layer 2: 精準 prompt + LLM
+    tp = _build_turn_prompt(intent=intent, memories=matched,
+                            state_hint=state_hint, user_msg=user_msg)
+    msgs = [{"role": "system", "content": _build_static_identity()},
+            {"role": "user", "content": tp}]
+    for m in (history or [])[-4:]:
+        if m.get("role") in ("user", "assistant") and m.get("content"):
+            msgs.append({"role": m["role"], "content": str(m["content"])[:400]})
+    content = _call_llm(msgs)
+    if content:
+        logger.info(f"[llm_respond] ✅ ND {_LLM_MODEL} | 意圖={intent} | prompt={len(tp)}ch")
     return content

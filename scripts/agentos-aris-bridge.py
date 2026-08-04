@@ -820,6 +820,24 @@ def _build_action_request(entry: dict, route_key: str, task_desc: str) -> "Actio
         log.warning(f"missing canary operation mapping for containable task_class={task_class}")
         return None
 
+    # ── 空 payload 防護 ─────────────────────────────────────────────────────
+    # 沙箱 canary 收到空 payload 的 containable 操作必定失敗，觸發 false
+    # safety-redline CRITICAL。這裡在路由階段就攔下來：
+    #   - compute_draft 需要 content 或 command
+    #   - file_write 需要 path
+    #   - 其他 containable 類至少需要一個 payload 欄位
+    # 如果 payload 只有 route，就回傳 None 讓 bridge 走 legacy_auto。
+    _PAYLOAD_REQUIREMENTS: dict[str, set[str]] = {
+        "compute_draft": {"content", "command"},
+        "file_write": {"path"},
+        "refactor_local": {"path"},
+        "local_test": {"path"},
+    }
+    needed = _PAYLOAD_REQUIREMENTS.get(task_class, set())
+    if needed and not any(k in payload for k in needed):
+        log.info(f"empty payload for {task_class} (route={route_key}) — skipping sandbox, falling back to legacy_auto")
+        return None
+
     declared_reversibility = (
         "containable"
         if task_class in (

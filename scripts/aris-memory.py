@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS memories (
     , last_recalled_at REAL DEFAULT 0 -- 最近一次被 recall 的時間戳
     , flagged INTEGER DEFAULT 0 -- 第二意見分歧旗標：1=Aris自評 vs 外部評分差值 >2
     , mood_note TEXT DEFAULT '' -- Aris 的內心戳記：自由描述當下感受（「覺得踏實 / 有點挫折 / 像學走路」…）
+    , event_type TEXT DEFAULT 'internal_thought' -- 'user_said' | 'tool_called' | 'decision' | 'internal_thought' | 'state_change'
+    , causal_parent_id INTEGER DEFAULT 0 -- 上一筆 event id，串成因果鏈（0=根節點）
 );
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
@@ -154,6 +156,10 @@ def _ensure_columns(conn):
         adds.append("ALTER TABLE memories ADD COLUMN flagged INTEGER DEFAULT 0")
     if "mood_note" not in cols:
         adds.append("ALTER TABLE memories ADD COLUMN mood_note TEXT DEFAULT ''")
+    if "event_type" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN event_type TEXT DEFAULT 'internal_thought'")
+    if "causal_parent_id" not in cols:
+        adds.append("ALTER TABLE memories ADD COLUMN causal_parent_id INTEGER DEFAULT 0")
     for sql in adds:
         conn.execute(sql)
     # confidence 索引在補欄後才建（既有表補欄前該欄不存在）
@@ -197,12 +203,14 @@ class ArisMemory:
               origin="auto_generated", confidence="yellow", provenance="", attention_line="",
               encoding_salience=0, serves_needs=None, psi_state=None,
               discovered_salience=0.0, total_recalls=0, last_recalled_at=0, flagged=0,
-              mood_note=""):
+              mood_note="", event_type="internal_thought", causal_parent_id=0):
         """寫入記憶，立即查得到。origin/confidence 過硬閘（auto 產物封頂 🟡）。
         attention_line：乙的種子，forward-looking「下一步要做什麼/懸著的問題」。
         encoding_salience/serves_needs/psi_state：Phase 1 salience 閘 — 只收集不改行為。
         discovered_salience/total_recalls/flagged：Phase 2 — recall 追蹤 + 第二意見分歧。
-        mood_note：Aris 的自由內心戳記（v2 中文格式）。"""
+        mood_note：Aris 的自由內心戳記（v2 中文格式）。
+        event_type：訊號分類（user_said / tool_called / decision / internal_thought / state_change）
+        causal_parent_id：上一筆 event id，串成因果鏈（0=根節點）"""
         origin, confidence = _normalize_gate(origin, confidence)
         with self._lock:
             now = time.time()
@@ -215,12 +223,14 @@ class ArisMemory:
             lr = float(last_recalled_at or now)
             fl = 1 if flagged else 0
             mn = (mood_note or "").strip()[:500]
+            et = event_type if event_type in ('user_said','tool_called','tool_result','decision','internal_thought','state_change','session_end') else 'internal_thought'
+            cid = max(0, int(causal_parent_id or 0))
             self.conn.execute(
-                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged, mood_note) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO memories (source, source_id, content, tags, emotion_tag, created_at, origin, confidence, provenance, attention_line, encoding_salience, serves_needs, psi_state, discovered_salience, total_recalls, last_recalled_at, flagged, mood_note, event_type, causal_parent_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (source, sid, content, json.dumps(tags or [], ensure_ascii=False), emotion_tag, now,
                  origin, confidence, provenance or "", attention_line or "",
-                 sal, sv, ps, ds, tr, lr, fl, mn)
+                 sal, sv, ps, ds, tr, lr, fl, mn, et, cid)
             )
             self.conn.commit()
             row_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -257,7 +267,8 @@ class ArisMemory:
                     "origin": origin, "confidence": confidence,
                     "encoding_salience": sal, "serves_needs": sv, "psi_state": ps,
                     "discovered_salience": ds, "total_recalls": tr, "flagged": fl,
-                    "mood_note": mn, "contradictions": all_issues}
+                    "mood_note": mn, "contradictions": all_issues,
+                    "event_type": et, "causal_parent_id": cid}
 
 
     def _check_temporal_consistency(self, content: str, exclude_id: int) -> list:
@@ -884,6 +895,8 @@ def _serve(port=PORT):
                 psi_state=body.get("psi_state"),
                 mood_note=body.get("mood_note", ""),
                 flagged=body.get("flagged", 0),
+                event_type=body.get("event_type", "internal_thought"),
+                causal_parent_id=body.get("causal_parent_id", 0),
             )
             self._send(200, r)
 

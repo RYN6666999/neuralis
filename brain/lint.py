@@ -342,6 +342,46 @@ def check_iron_law_anchored() -> list[str]:
     return bad
 
 
+# ── H. 消費端驗證 — 沒有消費者的理性層機制 = 裝飾品 ─────────────
+CONSUMER_FILE = ROOT / "brain" / "consumers.yaml"
+
+
+def check_consumers(data: dict = None) -> list[str]:
+    """每個理性層機制必須有至少一個消費端，且不能是 disconnected。"""
+    if not CONSUMER_FILE.exists():
+        return [f"consumers.yaml 不存在於 {CONSUMER_FILE}"]
+    try:
+        cons = yaml.safe_load(CONSUMER_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        return [f"consumers.yaml 解析失敗：{e!r}"]
+    bad = []
+    for mech_id, mech in (cons.get("mechanisms") or {}).items():
+        status = mech.get("status", "unknown")
+        consumers = mech.get("consumers") or []
+        # 理性層（connected / partial）必須有消費端
+        if status in ("disconnected",):
+            bad.append(f"{mech_id}: status=disconnected —— 無消費者，是裝飾品，"
+                       f"請連上消費者或標記為 emotional")
+        # 任何狀態都要有至少一個消費端
+        if not consumers:
+            bad.append(f"{mech_id}: 無消費者欄位 —— 每個機制都要列消費端")
+        # 驗證理性層的消費端指向真實檔案（emotional 層跳過）
+        if status in ("connected", "partial"):
+            for consumer in consumers:
+                # 感性層跳過
+                if "感性層" in consumer:
+                    continue
+                # 理性層：檢查指向的檔案是否存在
+                parts = consumer.split("：")
+                ref = parts[-1].strip() if len(parts) > 1 else consumer.strip()
+                # 如果是檔案路徑格式
+                if "/" in ref and "." in ref:
+                    ref_path = ROOT / ref.split("(")[0].strip()
+                    if not ref_path.exists():
+                        bad.append(f"{mech_id}: 消費端 '{consumer}' —— 指向的檔案不存在")
+    return bad
+
+
 CHECKS = (
     ("A src-必填", lambda d: check_src_present(d)),
     ("B src-可解析", lambda d: check_src_resolves(d)),
@@ -350,6 +390,7 @@ CHECKS = (
     ("E 閘存活", lambda d: check_gate_alive()),
     ("F 宣稱對得上檔案系統", check_claims_resolve),
     ("G 鐵律沒被摘掉", lambda d: check_iron_law_anchored()),
+    ("H 消費端驗證", lambda d: check_consumers()),
 )
 
 

@@ -1,38 +1,30 @@
 #!/usr/bin/env python3
-"""Aris 內心日記 — 每次 tick 寫一句話到 gbrain
-
-Agency 每 ~60 秒 tick 一次時，順便寫一兩句話到 gbrain 頁面。
-下次喚醒時 Aris 可以讀到「上一次的我正在想什麼」。
+"""Aris 內心日記 — 寫到本機檔案，不經 gbrain
 
 使用方式：
     python3 scripts/aris-diary.py "今天學到了 scoring router 的分數算法"
-
-手動寫：
-    python3 scripts/aris-diary.py "我在思考 competence 和 autonomy 的平衡⋯⋯"
 """
 import json, os, sys, time
 from pathlib import Path
 
-LAAP_ROOT = Path.home() / "Developer/laap-AGI"
-sys.path.insert(0, str(LAAP_ROOT))
-GBRAIN_SCRIPT = LAAP_ROOT / "mcp_server" / "gbrain_client.py"
-DIARY_PAGE = "aris-inner-diary"
+DIARY_DIR = Path.home() / ".aris-diary"
+DIARY_FILE = DIARY_DIR / "entries.jsonl"
+MAX_ENTRIES = 500
+
 
 def write_diary(content: str) -> dict:
-    """寫一句日記到 gbrain。"""
+    """寫一句日記到本機檔案。"""
     ts = time.strftime("%Y-%m-%d %H:%M")
-    entry = f"[{ts}] {content}"
+    DIARY_DIR.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": ts, "content": content, "epoch": int(time.time())}
     try:
-        from gbrain_client import GbrainClient
-        client = GbrainClient()
-        # 先讀現有日記
-        existing = client.get_page(DIARY_PAGE) or ""
-        new_content = existing + "\n" + entry if existing else entry
-        # 只保留最近 50 條
-        lines = new_content.strip().split("\n")[-50:]
-        final = "\n".join(lines)
-        result = client.put_page(DIARY_PAGE, final)
-        return {"status": "ok", "entry": entry, "result": result}
+        with open(DIARY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        # 修剪過多條目
+        lines = DIARY_FILE.read_text(encoding="utf-8").splitlines()
+        if len(lines) > MAX_ENTRIES:
+            DIARY_FILE.write_text("\n".join(lines[-MAX_ENTRIES:]) + "\n", encoding="utf-8")
+        return {"status": "ok", "entry": entry}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 

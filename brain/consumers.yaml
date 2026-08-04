@@ -1,0 +1,82 @@
+# consumers.yaml — 消費端關係定義
+#
+# 每個機制的輸出必須被至少一個消費者讀取。
+# 沒有消費者的機制 = 裝飾品 = 不該存在。
+#
+# 兩類消費者：
+#   - "感性層"：消費端是你（Ryan），你的情緒體驗。不可自動化驗證。
+#   - "理性層"：消費端是程式碼。CI 自動驗證。
+#
+# 鐵律二：產出者不得自驗。這份檔由 lint.py 讀取，lint.py 由 CI 執行。
+
+mechanisms:
+  # ── 感性層（消費端 = Ryan） ──────────────────────────────
+  energy:
+    description: "PsiCore 能量值 0-10"
+    output: "float"
+    produced_by: "laap/psi_core.py::PsiCore._heartbeat()"
+    consumers:
+      - "感性層：Ryan 感覺到 Aris 的狀態"
+    status: "emotional"   # 感性層，不強制自動化驗證
+
+  needs:
+    description: "五維需求 competence/autonomy/relatedness/certainty/growth"
+    output: "dict[str, float]"
+    produced_by: "laap/psi_core.py::NeedDriveSystem"
+    consumers:
+      - "感性層：Ryan 感覺到 Aris 的內在驅力"
+    status: "emotional"
+
+  arousal:
+    description: "喚醒度 0-1"
+    output: "float"
+    produced_by: "laap/affective.py::AffectiveState"
+    consumers:
+      - "感性層：Ryan 感覺到 Aris 的活力高低"
+    status: "emotional"
+
+  valence:
+    description: "情緒價 -1 ~ +1"
+    output: "float"
+    produced_by: "laap/affective.py::EmotionGradient"
+    consumers:
+      - "感性層：Ryan 感覺到 Aris 的心情"
+    status: "emotional"
+
+  attention_focus:
+    description: "注意力焦點（SOCIAL/TASK/LEARNING/PLANNING/IDLE）"
+    output: "AttentionFocus"
+    produced_by: "laap/psi_core.py::PsiCore._update_attention()"
+    consumers:
+      - "感性層：Ryan 感覺到 Aris 在關注什麼"
+    status: "emotional"
+
+  # ── 理性層（消費端 = 程式碼，CI 強制驗證） ────────────────
+  aris_evaluator:
+    description: "回應品質評估分數 + 自動回饋閉環"
+    output: "dict {events, state, dominant_need, valence}"
+    produced_by: ".aris-evaluator/psi_evaluator.py::evaluate()"
+    consumers:
+      - "scripts/evaluate-and-feedback.py：分數低於 threshold 時寫入留言板"
+      - "留言板：下次 bootstrap 自動載入回饋"
+    status: "connected"       # 封閉迴路已建立
+
+  bypass_log:
+    description: "git commit --no-verify 繞過記錄"
+    output: "timestamp + user + commit hash"
+    produced_by: ".git/hooks/pre-commit"
+    consumers:
+      - "Ryan 每週簽名時檢查"
+    status: "partial"       # 記錄存在但無自動通知
+
+  consumer_gate:
+    description: "消費端驗證閘門（lint.py 檢查 F）"
+    output: "exit 0/1"
+    produced_by: "brain/lint.py::check_consumers()"
+    consumers:
+      - "CI guard.yml：禁止 disconnected 的機制 merge"
+      - "Ryan 每次 push 時看到結果"
+    status: "connected"     # 剛建立，已接上 CI
+
+  # ── 待廢棄（決定不救） ─────────────────────────────────────
+  # 無。所有機制都已分類為 emotional 或 rational。

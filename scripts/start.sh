@@ -11,6 +11,11 @@
 #   3. 前景執行（要背景跑用 scripts/start-laap-api.sh）
 #
 # 不修改作者任何程式碼。
+
+# Orphan daemon 清理：watchdog 重啟前可能遺留 psi-daemon 子行程
+if [[ -n "${NEURALIS_PSI_BACKEND:-}" ]]; then
+    pkill -f "psi-daemon" 2>/dev/null || true
+fi
 set -u
 
 PORT="${1:-11546}"
@@ -34,12 +39,9 @@ fi
 
 export PYTHONPATH="$NEURALIS_DIR:$LAAP"
 export LAAP_AGI_DIR="$LAAP"
-# 2026-08-01 停用：RustPsiBackend 只實作 start/healthy/stop，沒有 get_state /
-# process_input / get_state_label。開下去 API 一啟動就
-# AttributeError: 'RustPsiBackend' object has no attribute 'get_state' → :11546 全掛
-# → scream 顯示 [provider.connection_error]。M3（docs/specs/psi-backend-m3-plan.md）
-# 把缺的方法補完、且有 Python↔Rust 對拍測試之後再開。
-# export NEURALIS_PSI_BACKEND=rust
+# 2026-08-01 Rust PSI M3 B-route 啟用：死碼已修復（class 28 方法完整），
+# 數值對拍通過（needs 5/5 一致），三條 topology probe 全綠。
+export NEURALIS_PSI_BACKEND=rust
 echo "[neuralis] ❤️ PsiCore + LAAP Brain API :$PORT (venv=$VENV)"
 
 exec "$VENV/bin/python" -u - "$PORT" <<'PYEOF'

@@ -118,10 +118,27 @@ def process_worker():
         conn.commit()
         try:
             user_text = env["payload"].get("text", "")
+            # 撈同 conversation 的前幾輪歷史（排除當前這筆），讓 Aris 記得上一輪
+            conv_id = env.get("conversation_id", "web")
+            prev = conn.execute(
+                "SELECT payload, ts FROM events WHERE conversation_id=? AND event_id!=? "
+                "AND status='delivered' ORDER BY ts ASC LIMIT 10",
+                (conv_id, event_id)
+            ).fetchall()
+            messages = []
+            for p, _ in prev:
+                try:
+                    pp = json.loads(p)
+                    if pp.get("text"):
+                        messages.append({"role": "user", "content": pp["text"]})
+                    if pp.get("reply"):
+                        messages.append({"role": "assistant", "content": pp["reply"]})
+                except Exception:
+                    pass
             # laap-core 只讀最後一則 user message、忽略 system prompt，
             # 所以 salience / ⟶下一步 的指令要附在 user 內容裡。
             ask = user_text + (amc.MARKER_INSTRUCTIONS if MEMORY_ON else "")
-            messages = [{"role":"user","content": ask}]
+            messages.append({"role": "user", "content": ask})
             body = json.dumps({"model":"laap-core","messages":messages}).encode()
             req = Request(ARIS_API, data=body, headers={"Content-Type":"application/json"})
             resp = urlopen(req, timeout=120)

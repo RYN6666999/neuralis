@@ -55,6 +55,11 @@ jobs:
       - name: Tests
         run: python3 -m pytest -q tests/
 
+      # ---------- 消費端驗證（閘 H） ----------
+      # 每個理性層機制必須有消費者。沒有消費者的機制 = 裝飾品。
+      - name: Consumer · 消費端驗證
+        run: python3 brain/lint.py --check consumers
+
       # ---------- 拓樸結構 ----------
       # topology.yaml 的 edges 與 probe.py 的 PROBES 必須一一對應（對稱差集）。
       # 這段是純結構檢查，不打任何服務，所以 CI 跑得動。
