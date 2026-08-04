@@ -358,6 +358,7 @@ def check_consumers(data: dict = None) -> list[str]:
     for mech_id, mech in (cons.get("mechanisms") or {}).items():
         status = mech.get("status", "unknown")
         consumers = mech.get("consumers") or []
+        produced_by = mech.get("produced_by", "")
         # 理性層（connected / partial）必須有消費端
         if status in ("disconnected",):
             bad.append(f"{mech_id}: status=disconnected —— 無消費者，是裝飾品，"
@@ -368,17 +369,36 @@ def check_consumers(data: dict = None) -> list[str]:
         # 驗證理性層的消費端指向真實檔案（emotional 層跳過）
         if status in ("connected", "partial"):
             for consumer in consumers:
-                # 感性層跳過
                 if "感性層" in consumer:
                     continue
-                # 理性層：檢查指向的檔案是否存在
                 parts = consumer.split("：")
                 ref = parts[-1].strip() if len(parts) > 1 else consumer.strip()
-                # 如果是檔案路徑格式
+                # 提取函式名稱（如果有）
+                func_name = ""
+                if "(" in ref:
+                    func_name = ref.split("(")[0].strip().split("::")[-1]
+                    ref = ref.split("(")[0].strip()
+                # 檢查檔案是否存在
                 if "/" in ref and "." in ref:
-                    ref_path = ROOT / ref.split("(")[0].strip()
+                    ref_path = ROOT / ref.split("::")[0].strip()
                     if not ref_path.exists():
                         bad.append(f"{mech_id}: 消費端 '{consumer}' —— 指向的檔案不存在")
+                        continue
+                    # 檢查是否真的有被呼叫（grep import 或呼叫）
+                    if func_name:
+                        repo_root = ROOT
+                        # 在 repo 中搜尋 func_name 被其他檔案 import 或呼叫
+                        hits = _git("grep", "-l", func_name, "--", "*.py")
+                        if hits[1]:
+                            callers = [f for f in hits[1].splitlines()
+                                       if f and "consumers.yaml" not in f
+                                       and "__pycache__" not in f
+                                       and ref.split("::")[0].strip() not in f]
+                            if not callers:
+                                bad.append(f"{mech_id}: 函式 '{func_name}' 被定義但未被任何其他檔案呼叫")
+                elif not func_name:
+                    # 不是檔案路徑也不是函式名稱，可能是描述文字，跳過
+                    pass
     return bad
 
 

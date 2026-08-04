@@ -203,22 +203,6 @@ ToolExecutor 工具層、Agency 自主迴路、Consolidation 記憶固化。
 📌 **結束時提醒**：如果 Ryan 說「今天差不多了」「先這樣」「好 下次繼續」或任何結束訊號，提醒他寫一句「下一步做什麼」。他說「下一步要做 X」時，系統會自動存到記憶。你不需要做任何事。"""
 
 
-def _build_turn_prompt(intent: str = None, memories: list = None,
-                       state_hint: str = None, user_msg: str = None) -> str:
-    """每回合動態 context（窄而深：只放當下需要的資訊）。"""
-    parts = []
-    if intent:
-        parts.append(f"意圖：{intent}")
-    if memories:
-        parts.append(f"記憶：{'；'.join(memories[:2])}")
-    if state_hint:
-        parts.append(f"狀態：{state_hint}")
-    parts.append(f"使用者：{user_msg or ''}")
-    parts.append("")
-    parts.append("回應：")
-    return "\n".join(parts)
-
-
 def _build_system_prompt(state: dict, delta: dict = None,
                          memories: list = None) -> str:
     """向後相容 — 完整 prompt（逐步淘汰）。"""

@@ -508,7 +508,7 @@ def _psi_respond(fed, user_msg: str, memories: list[str] = None,
         from laap.startup import get_psi_core
         psi = get_psi_core()
         if psi is not None:
-            from laap.llm_respond import respond as llm_respond
+            from laap.llm_respond import respond_nd as llm_respond
             llm = llm_respond(user_msg, fed[0] if fed else psi.get_state(),
                               history=history, memories=memories,
                               delta=fed[1] if fed else None)
