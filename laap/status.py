@@ -60,7 +60,13 @@ def snapshot() -> dict:
             "rpe_count": getattr(agency, "_rpe_count", 0),
             "rpe_avg": round(getattr(agency, "_rpe_total", 0.0) / max(1, getattr(agency, "_rpe_count", 0)), 4),
             "need_stats": {
-                n: {"expected": round(s["expected"], 3), "angle_weights": s.get("angle_weights", {})}
+                ("|".join(map(str, n)) if isinstance(n, tuple) else n): {
+                    "expected": round(s["expected"], 3),
+                    "angle_weights": {
+                        (a if isinstance(a, str) else "|".join(map(str, a))): w
+                        for a, w in s.get("angle_weights", {}).items()
+                    },
+                }
                 for n, s in getattr(agency, "_need_stats", {}).items()
             },
             "trust": dict(getattr(agency, "_trust_scores", {})),

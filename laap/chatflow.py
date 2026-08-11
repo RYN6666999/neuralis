@@ -110,6 +110,9 @@ def _format_history(messages: list) -> list[str]:
     return ["【上一輪對話】（這是真的發生過的，不是猜測）\n" + "\n".join(out)]
 
 
+_STATUS_QUERY = re.compile(r"状态|情況|狀態|你在干嘛|你在幹嘛|在做什么|在做什麼|你现在如何|你現在如何|status|health|心跳|psi状态|psi狀態|qre状态|qre狀態", re.I)
+
+
 def _is_user_turn(body: dict) -> bool:
     """最後一條訊息是 user 才是真的使用者回合。工具迴圈的中間 round-trip
     （最後是 tool）不重複餵 psi、不重複加 trust、不重查記憶 — 否則同一句話
@@ -225,6 +228,19 @@ def _feed(user_msg: str):
     回 (state_after, delta) 或 None。任一沒起就 no-op，絕不擋作者 handler。"""
     if not user_msg:
         return None
+    try:
+        # 功率全開：潛意識（真 V12 引擎）— 首次 feed 時啟動 thread，不擋主流程
+        try:
+            from aris_subconscious import start_subconscious, get_subconscious
+            sc = start_subconscious()
+            sc.feed(user_msg, topics=["一般"])
+        except Exception as _e:
+            logger.debug(f"[chatflow] subconscious feed skip: {_e}")
+        # AGI Kernel daemon：暫不啟動——2026-08-12 實測第一個請求會 hang（watchdog 換進程）。
+        # 接線法＋風險記錄在 skill aris-full-power（可回退範圍內回退）。
+        # 演化閘門（laap.evolve_gate）已建好，未來 daemon 起時提案自動入閘不落地。
+    except Exception:
+        pass
     try:
         from laap.startup import get_psi_core, get_consolidation
         psi = get_psi_core()
@@ -743,7 +759,12 @@ def _make_chat_handler(orig_handler):
                 auth_content = result.get("content", "")
                 auth_engine = result.get("engine", "laap-core")
                 if not (auth_engine == "laap-fallback"
-                        or (auth_engine.startswith("rules:") and re.match(r'^\[.*\]', auth_content.strip()))):
+                        or (auth_engine.startswith("rules:") and (
+                            re.match(r'^\[.*\]', auth_content.strip())
+                            or "QRE无输出" in auth_content
+                            or "QRE無輸出" in auth_content
+                            or not _STATUS_QUERY.search(user_msg)))):
+                    # rules 讀數只在狀態類問題採用（T2 讀數）；一般對話放行給 LLM 散文
                     content = auth_content
                     engine = auth_engine
             except asyncio.TimeoutError:

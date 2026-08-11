@@ -180,6 +180,23 @@ def ensure_status():
     return _status_writer
 
 
+_quantum_writer = None
+
+
+def ensure_quantum():
+    """量子輸出 writer：真實 V12 dense kernel + gbrain 召回 → quantum_output.json。"""
+    global _quantum_writer
+    if _quantum_writer is not None:
+        return _quantum_writer
+    try:
+        from laap.quantum_output import QuantumOutputWriter
+        _quantum_writer = QuantumOutputWriter()
+        _quantum_writer.start()
+    except Exception as e:
+        logger.warning(f"QuantumOutputWriter 啟動失敗: {e}")
+    return _quantum_writer
+
+
 def startup_all():
     """一次啟動所有系統。"""
     ensure_psi_defs()
@@ -188,6 +205,7 @@ def startup_all():
     ensure_agency()
     ensure_consolidation()
     ensure_status()
+    ensure_quantum()
     # 對話流攔截：必須在作者 app.router.add_post 之前 patch（startup 早於 runpy 起 API）
     try:
         from laap.chatflow import install as _install_chatflow
