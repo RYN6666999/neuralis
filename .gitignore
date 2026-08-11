@@ -41,3 +41,6 @@ status.json
 # Rust build artifacts
 rust/target/
 .sandbox-start
+
+# 演化閘門票佇列（runtime 資料，不提交）
+evolve-gate/
