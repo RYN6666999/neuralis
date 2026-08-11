@@ -258,7 +258,10 @@ class AgencyLoop:
         if not self._state_loaded:
             return  # 讀失敗或從未嘗試 → 不蓋掉好資料
         state = {
-            "need_stats": self._need_stats,
+            "need_stats": {
+                (f"{k[0]}|{k[1]}" if isinstance(k, tuple) else k): v
+                for k, v in self._need_stats.items()
+            },
             "trust_scores": self._trust_scores,
             "exploration_rate": self._exploration_rate,
             "task_queue": self._task_queue, "task_index": self._task_index, "goal_spec": self._goal_spec,
@@ -310,6 +313,8 @@ class AgencyLoop:
                     return
                 state = json.loads(body)
                 self._need_stats = state.get("need_stats", self._need_stats)
+                # 遷移舊狀態：舊版 key 是 need(string)，新版是 (need, tool)(tuple)
+                # 有 string key 時不做轉換，pair_key 查不到會冷啟動退回 need 層值
                 self._trust_scores = state.get("trust_scores", self._trust_scores)
                 self._exploration_rate = state.get("exploration_rate", self._exploration_rate)
                 self._task_queue = state.get("task_queue", [])
@@ -652,8 +657,14 @@ class AgencyLoop:
 
         # ── RPE 計算 ──
         outcome = self._score_result(result, tool=tool, query=prompt) if ok else 0.0
-        stats = self._need_stats.setdefault(need, {
-            "expected": 0.3, "rpes": [], "angle_weights": {}})
+        # 粒度修正：expected 按 (need, tool) 存而非僅 need（2026-08-06）
+        # 冷啟動退回：該組合第一次出現 → 用 need 層值當先驗
+        pair_key = (need, tool)
+        if pair_key not in self._need_stats:
+            need_seed = self._need_stats.get(need, {}).get("expected", 0.3)
+            self._need_stats[pair_key] = {
+                "expected": need_seed, "rpes": [], "angle_weights": {}}
+        stats = self._need_stats[pair_key]
         expected = stats["expected"]
         rpe = outcome - expected
         stats["expected"] = 0.9 * expected + 0.1 * outcome  # EMA

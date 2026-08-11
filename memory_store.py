@@ -201,8 +201,7 @@ class MemoryStore:
             return local
         try:
             # hybrid（vec+lex→lex）降級檢索; 無 OPENAI_API_KEY 時 vec 退化只剩 lex
-            from gbrain_client import hybrid_hits
-            hits = hybrid_hits(client, query, max(top_k * 2, 10))
+            hits = hybrid_hits_any(client, query, max(top_k * 2, 10))
         except Exception as e:
             logger.warning(f"[memory_store] gbrain recall 失敗，用 in-process: {e}")
             return local
@@ -218,12 +217,60 @@ class MemoryStore:
     def _recall_local(self, query: str, top_k: int, layer: Optional[str]) -> List[MemoryFragment]:
         pool = [m for m in self._items if layer is None or m.layer == layer]
         if query:
-            q = query.lower()
-            pool = [m for m in pool if q in m.content.lower()]
-            pool.sort(key=lambda m: (m.importance, m.ts), reverse=True)
+            # 2026-08-12 修復：舊版整句 substring→自然問句永遠 0；改用 token 命中
+            toks = _query_tokens(query).split()
+            scored = []
+            for m in pool:
+                c = m.content.lower()
+                hit = sum(1 for t in toks if t in c)
+                if hit > 0:
+                    scored.append((hit, m.importance, m.ts, m))
+            scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+            pool = [m for _, _, _, m in scored]
         else:
             pool.sort(key=lambda m: (m.importance, m.ts), reverse=True)
         return pool[:top_k]
+
+    @staticmethod
+    def _clean_markdown(text: str) -> str:
+        """讀取層清洗：剝掉 markdown 樣板，保留實際內容。
+
+        為什麼修在這裡：gbrain 2251 頁混合 Ryan 知識庫 + Aris 記憶，寫入時清洗會
+        誤傷知識庫原文。讀取時清洗只影響 Aris 記憶注入，立即生效、不用重跑。
+        前科：markdown 分隔線（-----------）被 `[:50]` 切到、callout 語法
+        （> [!note]）、frontmatter、`## Transcript` 標題都被當成記憶內容。
+        """
+        if not text:
+            return text
+        lines = text.split("\n")
+        out = []
+        in_frontmatter = False
+        for ln in lines:
+            s = ln.strip()
+            # frontmatter 區塊：--- 開頭 → --- 結尾
+            if s == "---" and not in_frontmatter and len(out) == 0:
+                in_frontmatter = True
+                continue
+            if in_frontmatter:
+                if s == "---":
+                    in_frontmatter = False
+                continue
+            # callout / blockquote 語法
+            if s.startswith(">"):
+                if "[!" in s:
+                    s = s.split("]", 1)[-1].lstrip(" >")
+                else:
+                    s = s.lstrip("> ")
+            # 純分隔線（全部是 - / = / * 且長度 ≥ 3）
+            if s and set(s.replace(" ", "")) <= set("-=*") and len(s) >= 3:
+                continue
+            out.append(s)
+        # 清洗後完全空 → 回空字串，由消費端決定跳過。
+        # 2026-08-10 原本回「(此記憶內容為格式樣板，無實質文字)」占位句，怕空輸出被
+        # 讀成「沒有」。但那句會一路穿透到 prompt，Aris 於是說「這讓我想起：這段沒有
+        # 內容」—— 比不說更糟。占位句解決的是「訊號歧義」，代價是製造假記憶；
+        # 正解是消費端跳過空的（get_memory_context / _memory_gist 都已處理）。
+        return "\n".join(x for x in out if x).strip()
 
     @staticmethod
     def _hit_to_fragment(hit: Dict) -> MemoryFragment:
@@ -236,7 +283,8 @@ class MemoryStore:
             mem_id, layer = slug, "core"
         return MemoryFragment(
             id=mem_id,
-            content=hit.get("chunk_text", "") or hit.get("title", ""),
+            content=MemoryStore._clean_markdown(
+                hit.get("chunk_text", "") or hit.get("title", "")),
             importance=min(1.0, float(hit.get("score", 0.5))),
             layer=layer,
         )
@@ -297,3 +345,71 @@ if _backend_mode() != "local":
         _install_semantic()
     except Exception as _e:  # 安裝失敗不影響 memory_store 本體
         logger.debug(f"[memory_store] semantic gbrain 掛載跳過: {_e}")
+
+
+def _query_tokens(query: str, limit: int = 8) -> str:
+    """把自然問句轉成 gbrain 可用的關鍵字查詢（2026-08-12）。
+
+    背景：gbrain 搜尋是詞彙型，整句自然語言命中率≈0；token 切法：
+      - 依空白/標點切詞（len>=2）
+      - CJK 長詞（>4 字）補頭尾 2 字片語（「引擎在程式裡叫什麼名字」→「引擎」「名字」）
+    給本地 substring 計分與遠端 gbrain 搜尋共用。
+    """
+    import re as _re
+    toks = [
+        t for t in _re.split(r"[\s\u3000，。！？、；：,.!?;:（）()/\\_'\"\-]+", query.lower())
+        if len(t) >= 2
+    ]
+    out = []
+    for t in toks:
+        out.append(t)
+        if len(t) > 4 and _re.search(r"[\u4e00-\u9fff]", t):
+            out.append(t[:2])
+            out.append(t[-2:])
+    return " ".join(out[:limit])
+
+
+_STOPWORDS = {
+    "告訴我", "告訴", "我們", "哪些", "什麼", "那個", "這個", "一個", "一下",
+    "最近", "有沒有", "可以", "怎麼", "為什麼", "程式裡", "叫什麼", "對話",
+    "全新", "無前文", "前文", "請", "幫我", "說說", "告訴", "想知道",
+    "告訴", "做", "弄", "事", "存在", "沒有", "不是", "就是",
+}
+
+
+def hybrid_hits_any(client, query: str, limit: int) -> list:
+    """先整串查；0 hit 時逐 token 查並去重合併。
+
+    gbrain 搜尋是整串 AND 匹配：長自然句/長 token 串會 0，單一關鍵字反而中。
+    2026-08-12 實測 + 修正：
+      - 停用詞過濾（告訴我/我們/哪些…）→ 只留鑑別性 token
+      - laap/memory/*（Aris 自己的記憶）優先浮現，避免被熱門知識頁淹沒
+    """
+    from gbrain_client import hybrid_hits
+    toks = [t for t in _query_tokens(query).split() if t not in _STOPWORDS]
+    seen = {}
+    def _add(hs):
+        for h in hs or []:
+            sid = h.get("slug")
+            if sid and sid not in seen:
+                seen[sid] = h
+    try:
+        _add(hybrid_hits(client, " ".join(toks[:8]), limit))
+    except Exception:
+        pass
+    for t in toks[:6]:
+        # per-token 上限放大：交集詞多的 token 需較深排名才碰到 laap/memory 頁
+        limit_i = max(limit * 6, 15)
+        try:
+            _add(hybrid_hits(client, t, limit_i))
+        except Exception:
+            continue
+    return _memory_first(list(seen.values()))[:limit]
+
+
+def _memory_first(hits: list) -> list:
+    """laap/memory/*（Aris 自己的記憶頁）排前面；其餘維持原序。"""
+    mem = [h for h in hits if (h.get("slug") or "").startswith("laap/memory")]
+    rest = [h for h in hits if not (h.get("slug") or "").startswith("laap/memory")]
+    return (mem + rest)[: max(len(hits), 10)]
+

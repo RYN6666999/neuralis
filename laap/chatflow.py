@@ -430,20 +430,36 @@ def _maybe_session_bootstrap(messages: list, user_turn: bool, user_msg: str) -> 
 
 
 def _psi_memories_sync(query: str) -> list[str]:
-    """同步查 gbrain 相關記憶，供 psi-respond 織入。timeout 由 caller 處理。
-    去重：近 6 輪引用過的段落不再引（不然同話題每句都想起同一件事，穿幫）。
-    執行前先嘗試取得 gbrain 資源鎖，若鎖被 cron 佔用則跳過（零競爭）。"""
+    """同步查 gbrain 相關記憶，供 psi-respond 織入。
+
+    2026-08-12 修復：
+      - 鎖不擋唯讀召回（讀 gbrain 不衝突，鎖被佔就無鎖進行，別讓記憶黑屏）
+      - 首次呼叫失敗不靜默吞：log INFO + 重試一次（gbrain_client 壞行程會自癒重啟）
+      - 命中數留 INFO 證據（recall start / hits / 失敗原因）
+    """
+    logger.info(f"[chatflow] recall start q={query[:30]!r}")
+    locked = False
     try:
         from laap.resource_lock import acquire, release
-        if not acquire("gbrain", timeout=2, ttl=90):
-            logger.debug("[chatflow] gbrain 鎖被佔用，跳過此輪 recall")
-            return []
+        locked = acquire("gbrain", timeout=2, ttl=90)
+        if not locked:
+            logger.info("[chatflow] recall 鎖被佔用，改無鎖唯讀（不擋召回）")
+    except Exception:
+        pass
+    try:
         try:
-            from gbrain_client import get_client, hybrid_hits
+            from gbrain_client import get_client
             client = get_client()
             if client is None:
+                logger.info("[chatflow] recall gbrain client None，跳過")
                 return []
-            hits = hybrid_hits(client, query[:100], 4)
+            from memory_store import hybrid_hits_any
+            try:
+                hits = hybrid_hits_any(client, query, 4)
+            except Exception as _e:
+                logger.info(f"[chatflow] recall 首次失敗 {_e!r}，重試（client 自癒）")
+                hits = hybrid_hits_any(get_client(), query, 4)
+            logger.info(f"[chatflow] recall query={query[:40]!r} -> {len(hits)} hits")
             out = []
             for h in hits:
                 if h.get("score", 0) < 0.3:
@@ -454,7 +470,6 @@ def _psi_memories_sync(query: str) -> list[str]:
                     continue
                 _quoted_recently.append(key)
                 out.append(t[:80])
-                # E1.2：agency 記憶被 recall 進回應 = 真被用到 → 記下游效用信號
                 try:
                     import re as _re
                     from laap import memory_utility
@@ -467,8 +482,13 @@ def _psi_memories_sync(query: str) -> list[str]:
                     break
             return out
         finally:
-            release("gbrain")
-    except Exception:
+            if locked:
+                try:
+                    release("gbrain")
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.info(f"[chatflow] recall 失敗: {e!r}")
         return []
 
 
@@ -519,6 +539,7 @@ def _psi_respond(fed, user_msg: str, memories: list[str] = None,
     marker = ATTENTION_MARKER
     if marker not in user_msg:
         user_msg = user_msg + marker
+    logger.info(f"[chatflow] _psi_respond 收到 memories={len(memories or [])}")
     try:
         use_psi = os.environ.get("NEURALIS_PSI_RESPOND", "on").lower()
         if use_psi in ("off", "0", "false"):
@@ -783,6 +804,16 @@ def _make_chat_handler(orig_handler):
                         engine = "psi-llm" if os.environ.get("NEURALIS_LLM_RESPOND", "off").lower() in ("on", "1", "true") else "psi-respond"
             except Exception:
                 pass
+
+        if content is None and mem_task is not None and not mem_task.done():
+            # 記憶召回晚到（gbrain 5-9s，作者管線常先完成）：LLM 兜底前短等，
+            # 別讓跨對話記憶永遠落進「下一輪」_pending（單訊息結局=永遠吃不到）
+            try:
+                done3, _ = await asyncio.wait([mem_task], timeout=6.0)
+            except Exception:
+                pass
+            memories = (boot_lines + _collect_memories(mem_task)
+                        + _take_pending_memories())
 
         if content is None:
             # 兩路都失敗 → 最後手段：用記憶餵 _psi_respond
