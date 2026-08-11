@@ -378,34 +378,32 @@ _STOPWORDS = {
 
 
 def hybrid_hits_any(client, query: str, limit: int) -> list:
-    """先整串查；0 hit 時逐 token 查並去重合併。
+    """整串查 + 逐 token 查併集；停用詞過濾；laap/memory 優先（2026-08-12）。
 
-    gbrain 搜尋是整串 AND 匹配：長自然句/長 token 串會 0，單一關鍵字反而中。
-    2026-08-12 實測 + 修正：
-      - 停用詞過濾（告訴我/我們/哪些…）→ 只留鑑別性 token
-      - laap/memory/*（Aris 自己的記憶）優先浮現，避免被熱門知識頁淹沒
+    速度優化（00:5x 實測整串查+6 token×limit15 = 21 秒太慢，LLM 兜底等不到）：
+      - 不做整串查（自然句整串命中率≈0，白燒一次）
+      - 鑑別性 token 優先（含英數的最有辨識度），最多 4 個
+      - per-token limit 縮小
     """
     from gbrain_client import hybrid_hits
     toks = [t for t in _query_tokens(query).split() if t not in _STOPWORDS]
+    if not toks:
+        return []
+    toks.sort(key=lambda t: (not any(ch.isascii() and ch.isalnum() for ch in t), len(t)))
+    toks = toks[:4]
     seen = {}
     def _add(hs):
         for h in hs or []:
             sid = h.get("slug")
             if sid and sid not in seen:
                 seen[sid] = h
-    try:
-        _add(hybrid_hits(client, " ".join(toks[:8]), limit))
-    except Exception:
-        pass
-    for t in toks[:6]:
-        # per-token 上限放大：交集詞多的 token 需較深排名才碰到 laap/memory 頁
-        limit_i = max(limit * 6, 15)
+    limit_i = max(limit * 3, 10)
+    for t in toks:
         try:
             _add(hybrid_hits(client, t, limit_i))
         except Exception:
             continue
     return _memory_first(list(seen.values()))[:limit]
-
 
 def _memory_first(hits: list) -> list:
     """laap/memory/*（Aris 自己的記憶頁）排前面；其餘維持原序。"""

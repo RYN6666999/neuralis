@@ -733,6 +733,23 @@ def _make_chat_handler(orig_handler):
                 old = messages[last_user].get("content", "")
                 messages[last_user] = {**messages[last_user], "content": f"{prefix}\n\n{old}"}
 
+        # 記憶先行（2026-08-12 T1 收尾）：回覆產生前同步等召回（≤6s），
+        # 把跨對話記憶織進最後一則 user message——author 管線與 LLM 兜底
+        # 兩條路都看得到，不再靠「兜底才注入」的時序賭博。
+        if mem_task is not None:
+            try:
+                _m0, _ = await asyncio.wait([mem_task], timeout=6.0)
+            except Exception:
+                pass
+            _mem_lines = _collect_memories(mem_task)
+            if _mem_lines and messages:
+                _block = "\n\n".join(f"相關記憶：{m}" for m in _mem_lines[:3])
+                for _i in range(len(messages) - 1, -1, -1):
+                    if messages[_i].get("role") == "user":
+                        messages[_i] = {**messages[_i],
+                                        "content": f"{_block}\n\n{messages[_i].get('content','')}"}
+                        break
+
         # 培植：每次對話都在尾巴附 marker 指令，讓 Aris 習慣產出注意力線
         if messages:
             for i in range(len(messages) - 1, -1, -1):
