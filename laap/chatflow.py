@@ -466,9 +466,15 @@ def _psi_memories_sync(query: str) -> list[str]:
                     continue
                 t = " ".join((h.get("chunk_text", "") or "").split())
                 key = t[:40]
-                if len(t) < 4 or key in _quoted_recently:
+                if len(t) < 4:
                     continue
-                _quoted_recently.append(key)
+                if key in _quoted_recently:
+                    # 防穿幫去重的保底：這輪還沒引進任何記憶時，允許重引命中
+                    # （否則問法變體會讓相關記憶永遠被擋 → 答「不知道」）。
+                    if out:
+                        continue
+                else:
+                    _quoted_recently.append(key)
                 out.append(t[:80])
                 try:
                     import re as _re
@@ -642,8 +648,31 @@ def _make_chat_handler(orig_handler):
             except Exception:
                 pass
 
-        # 工具模式：scream agent 迴圈（作者管線不懂 tools → LLM 語言皮質直達）
+        # 記憶召回升起：工具模式分支要先走，再普通對話（gbrain hybrid 實測 1-9s）
+        memories = []
+        mem_task = None
+        if user_turn and user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
+            loop = asyncio.get_event_loop()
+            mem_task = loop.run_in_executor(None, _psi_memories_sync, user_msg)
+
+        # 工具模式：scream agent 迴圈（作者管線不懂 tools → LLM 語言皮質直達）。
+        # 2026-08-12 T1：tools 迴圈也織「相關記憶」（短等 2s，不拖慢工具迴圈），
+        # 否則 LLM 會自選 web-search（問題+自編後綴）→ 幻覺名（V12Engine 時代）。
         if body.get("tools"):
+            if mem_task is not None:
+                try:
+                    _m0, _ = await asyncio.wait([mem_task], timeout=2.0)
+                except Exception:
+                    pass
+                _mem_lines = _collect_memories(mem_task)
+                if _mem_lines:
+                    _block = "\n\n".join(f"相關記憶：{m}" for m in _mem_lines[:2])
+                    _msgs = body.get("messages") or []
+                    for _i in range(len(_msgs) - 1, -1, -1):
+                        if _msgs[_i].get("role") == "user":
+                            _msgs[_i] = {**_msgs[_i],
+                                         "content": f"{_block}\n\n{_msgs[_i].get('content', '')}"}
+                            break
             return await _tool_chat(request, web, body, fed)
 
         # 串流管線自測鉤：使用者輸入 stream_test → 直接跑 stream-test 工具，
@@ -664,13 +693,7 @@ def _make_chat_handler(orig_handler):
             if live is not None:
                 return live
 
-        # 記憶聯想：與回應管線「平行」召回（gbrain hybrid 實測 5-9s，序列等 = 延遲牆）。
-        memories = []
-        mem_task = None
-        if user_turn and user_msg and os.environ.get("NEURALIS_PSI_MEMORY", "on").lower() not in ("off", "0", "false"):
-            loop = asyncio.get_event_loop()
-            mem_task = loop.run_in_executor(None, _psi_memories_sync, user_msg)
-
+        # 記憶聯想：mem_task 已在上方（tools 分支前）升起；這裡繼續三路平行。
         # 三路平行：(A) LLM 回應 (B) 作者管線 (C) 記憶召回
         # RACE：誰先出可用內容就用誰，取消慢的那路。
         model = body.get("model", "laap-core")
@@ -774,9 +797,11 @@ def _make_chat_handler(orig_handler):
         content = None
         engine = None
 
-        # 收集記憶（平行記憶最慢，但我們不 blocking 等它）
-        memories = (boot_lines
-                    + _collect_memories(mem_task) + _take_pending_memories())
+        # 收集記憶（平行記憶最慢，但我們不 blocking 等它）。
+        # 2026-08-12 T1：recall 記憶優先於 boot_lines —— respond_nd 只取前 3 筆，
+        # boot（留言板摘要）在前會把相關答案擠出去 → LLM 看不到答案就答「不知道」。
+        memories = (_collect_memories(mem_task)
+                    + (boot_lines or []) + _take_pending_memories())
         if mem_task and not mem_task.done():
             mem_task.add_done_callback(_stash_late_memories)
 
@@ -829,8 +854,8 @@ def _make_chat_handler(orig_handler):
                 done3, _ = await asyncio.wait([mem_task], timeout=6.0)
             except Exception:
                 pass
-            memories = (boot_lines + _collect_memories(mem_task)
-                        + _take_pending_memories())
+            memories = (_collect_memories(mem_task)
+                        + (boot_lines or []) + _take_pending_memories())
 
         if content is None:
             # 兩路都失敗 → 最後手段：用記憶餵 _psi_respond
@@ -1289,6 +1314,22 @@ def install() -> bool:
         if path == _CHAT_PATH:
             handler = _make_chat_handler(handler)
             logger.info(f"[chatflow] 已包住 {path} — 餵 psi + executor 卸載（防 event loop 阻塞）")
+            # 2026-08-12 T1：boot 即預熱 gbrain client（背景，不擋啟動）。
+            # 讓首次 recall 不必 22s 冷啟動 → weave 6s 窗口來得及。
+            try:
+                import threading as _th
+                def _prewarm():
+                    try:
+                        from gbrain_client import get_client
+                        c = get_client()
+                        if c is not None:
+                            c.call("tools/list", {}, timeout=8)
+                            logger.info("[chatflow] gbrain client 預熱完成")
+                    except Exception as _e:
+                        logger.debug(f"[chatflow] gbrain 預熱失敗: {_e}")
+                _th.Thread(target=_prewarm, daemon=True).start()
+            except Exception:
+                pass
             # 同步註冊 HEAD handler（aiohttp 沒 GET handler 時 HEAD 會卡住）
             try:
                 # 用實例呼叫 add_head（避免 class-level 遞迴）

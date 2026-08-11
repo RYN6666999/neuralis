@@ -29,7 +29,9 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger("gbrain_client")
 
 _INIT_TIMEOUT = 20.0
-_CALL_TIMEOUT = 15.0
+# search 對 CJK 逐 token 查詢偏慢（實測 4 token ≈ 15s）；15s 貼邊會 timeout→
+# 誤殺 serve→冷啟動 20s→更超時的惡性循環（2026-08-12 T1）。放寬並延後殺。
+_CALL_TIMEOUT = 20.0
 _RESPAWN_COOLDOWN = 30.0  # 上次啟動失敗後，冷卻期內不再嘗試
 
 
@@ -54,6 +56,8 @@ class GbrainClient:
         self._inbox: "queue.Queue[dict]" = queue.Queue()
         self._next_id = 0
         self._last_spawn_fail = 0.0
+        self._last_ok_ts = time.time()  # 保活用：最近一次成功 call/ping
+        self._keepalive_started = False
 
     # ── lifecycle ──────────────────────────────────────────────
 
@@ -77,7 +81,42 @@ class GbrainClient:
             "clientInfo": {"name": "neuralis", "version": "0.1"},
         }, timeout=_INIT_TIMEOUT)
         self._notify("notifications/initialized")
+        self._last_ok_ts = time.time()
         logger.info("[gbrain_client] connected (%s serve)", self._binary)
+        if not self._keepalive_started:
+            self._keepalive_started = True
+            threading.Thread(target=self._keepalive_loop, daemon=True).start()
+
+    def _keepalive_loop(self) -> None:
+        """30s 保活 ping：gbrain serve 在 ~60-90s 無呼叫時會自行退出
+        （2026-08-12 實測 11546 的 serve 每 1-4 分鐘死一次 → 每次 call 都要
+        22s 冷啟動 → chatflow 6s weave 窗口 miss → T1 記憶端到端失敗）。
+        每 30s 檢查：若 serve 活得夠久沒被 call，發一次 MCP ping 續命；
+        若已死，log 死因並在冷卻後重生（避免下次 call 撞死體）。"""
+        while True:
+            time.sleep(30)
+            try:
+                proc = self._proc
+                if proc is None:
+                    continue
+                if proc.poll() is not None:
+                    logger.warning("[gbrain_client] serve 死亡 rc=%s，重生", proc.returncode)
+                    self._last_spawn_fail = 0.0
+                    try:
+                        self._ensure_alive()
+                    except Exception as e:
+                        logger.warning("[gbrain_client] 保活重生失敗: %s", e)
+                    continue
+                if time.time() - self._last_ok_ts < 20:
+                    continue  # 剛剛才被 call 過，不需要續命
+                with self._lock:
+                    try:
+                        self._rpc("ping", {}, timeout=3)
+                        self._last_ok_ts = time.time()
+                    except Exception:
+                        self._kill()  # ping 失敗 = serve 壞了，下次 call 重生
+            except Exception:
+                pass
 
     def _reader(self, proc: subprocess.Popen, inbox: "queue.Queue[dict]") -> None:
         for line in proc.stdout:
@@ -90,6 +129,9 @@ class GbrainClient:
     def _ensure_alive(self) -> None:
         if self._proc is not None and self._proc.poll() is None:
             return
+        if self._proc is not None:
+            logger.warning("[gbrain_client] 偵測 serve 死亡 rc=%s（上一個 PID %s）",
+                           self._proc.returncode, self._proc.pid)
         now = time.time()
         if now - self._last_spawn_fail < _RESPAWN_COOLDOWN:
             raise GbrainError("gbrain serve 啟動失敗，冷卻中")
@@ -146,8 +188,15 @@ class GbrainClient:
             self._ensure_alive()
             try:
                 result = self._rpc("tools/call", {"name": tool, "arguments": args}, timeout)
+                self._last_ok_ts = time.time()
+                self._call_fail_streak = 0
             except GbrainError:
-                self._kill()  # 讓下一次呼叫觸發重啟
+                # 2026-08-12 T1：timeout 不等於 serve 死（search 本就慢）。
+                # 先記敗績，連 2 次才殺——避免誤殺→冷啟動→更超時的循環。
+                self._call_fail_streak = getattr(self, "_call_fail_streak", 0) + 1
+                if self._call_fail_streak >= 2:
+                    self._kill()
+                    self._call_fail_streak = 0
                 raise
             except Exception as e:
                 # stdin 寫入 BrokenPipe 等非 GbrainError 也要殺行程 + 統一錯誤型別

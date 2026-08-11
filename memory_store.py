@@ -390,19 +390,35 @@ def hybrid_hits_any(client, query: str, limit: int) -> list:
     if not toks:
         return []
     toks.sort(key=lambda t: (not any(ch.isascii() and ch.isalnum() for ch in t), len(t)))
-    toks = toks[:4]
+    # 2026-08-12 T1：4 token × ~3.5s ≈ 15s 貼 timeout 邊緣；縮到 2 token ≈ 7s，
+    # 換更穩的 weave 窗口（6s+）。召回廣度換速度——種子記憶用一個 token 就中。
+    toks = toks[:2]
     seen = {}
     def _add(hs):
         for h in hs or []:
             sid = h.get("slug")
             if sid and sid not in seen:
                 seen[sid] = h
-    limit_i = max(limit * 3, 10)
-    for t in toks:
+    limit_i = max(limit * 2, 6)
+    # 2026-08-12 T1：token 查詢並行（2-4 token × ~4s 序列 = 16s 太久，
+    # weave/respond 窗口等不到）。ThreadPool 並行後 ≈ 單 token 時間。
+    import concurrent.futures as _cf
+
+    def _one(t):
         try:
-            _add(hybrid_hits(client, t, limit_i))
+            return hybrid_hits(client, t, limit_i)
         except Exception:
-            continue
+            return []
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=min(len(toks), 4)) as _ex:
+            for hs in _ex.map(_one, toks):
+                _add(hs)
+    except Exception:
+        for t in toks:
+            try:
+                _add(hybrid_hits(client, t, limit_i))
+            except Exception:
+                continue
     return _memory_first(list(seen.values()))[:limit]
 
 def _memory_first(hits: list) -> list:

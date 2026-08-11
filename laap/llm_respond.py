@@ -926,6 +926,8 @@ def _build_turn_prompt(intent: str = None, memories: list = None,
         parts.append(f"意圖：{intent}")
     if memories:
         parts.append(f"相關記憶：{'；'.join(memories[:2])}")
+        parts.append("⚠️ 若上面的相關記憶已含使用者問題的答案（檔名/日期/決定/數字），"
+                     "必須直接引用記憶內容回答，不要說不知道、不要編造其他名字。")
     if state_hint:
         parts.append(f"狀態：{state_hint}")
     parts.append(f"使用者：{user_msg or ''}")
