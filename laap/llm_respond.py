@@ -940,7 +940,11 @@ def _build_turn_prompt(intent: str = None, memories: list = None,
 # PREFIX 供剝離用（舊資料可能只留前綴），完整版供附加用。
 ATTENTION_MARKER_PREFIX = "\n\n（回覆結束時另起一行以 ⟶下一步: 開頭"
 ATTENTION_MARKER = (ATTENTION_MARKER_PREFIX +
-                    "，寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。）")
+    "，寫一句你接下來想做什麼或懸著的問題，給下次醒來的你。"
+    "⚠️ 這行『只能』是剛才回答內容的直接延伸："
+    "只准引用本回已確認的事實（檔名/數字/決定/專案名）；"
+    "嚴禁虛構任何不存在的檔名、版本號、數字、專案名或他人說過的話；"
+    "若是純延伸、無新事實可寫，就寫「待確認」就好，不要硬湊一句。）")
 
 
 def _strip_marker(text: str) -> str:
