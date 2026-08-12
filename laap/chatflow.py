@@ -19,6 +19,7 @@ import logging
 import asyncio
 import os
 import re
+import threading
 import time
 import uuid
 from collections import deque
@@ -429,6 +430,41 @@ def _maybe_session_bootstrap(messages: list, user_turn: bool, user_msg: str) -> 
     return lines
 
 
+_RECALL_LOCK = threading.Lock()
+_recall_client_obj = None
+
+
+def _recall_client():
+    """chatflow recall 專用的『獨立』gbrain 連線（自己的 serve 子行程）。
+
+    關鍵（2026-08-12 實測）：`gbrain_client.get_client()` 是全 neuralis 共用的
+    單一 stdio 連線 + 單一 threading.Lock——chatflow recall、作者管線的 gbrain
+    tool、agency/consolidation/status 全擠同一把鎖。Q2 變體實測 recall 被作者
+    管線 gbrain tool 餓死到 32s（獨立探針才 6-10s）→ 記憶晚到 → 答『不知道』。
+
+    這裡開一條獨立連線，recall 完全不跟作者管線搶鎖：真並行、~3-6s 就進 weave
+    窗。per-token 快取（memory_store._token_hits）跨連線共用，所以 Q1 查過的
+    token Q2 直接命中、連這條新連線都省掉。
+    """
+    global _recall_client_obj
+    with _RECALL_LOCK:
+        if _recall_client_obj is not None:
+            return _recall_client_obj
+        import gbrain_client as _gbc
+        binary = _gbc._find_binary()
+        if binary is None:
+            return None
+        cl = _gbc.GbrainClient(binary)
+        try:
+            cl._ensure_alive()
+        except Exception as e:
+            logger.info(f"[chatflow] recall 專用連線啟用失敗: {e}")
+            return None
+        _recall_client_obj = cl
+        logger.info("[chatflow] recall 專用 gbrain 連線已建立（與作者管線解耦）")
+        return _recall_client_obj
+
+
 def _psi_memories_sync(query: str) -> list[str]:
     """同步查 gbrain 相關記憶，供 psi-respond 織入。
 
@@ -448,8 +484,7 @@ def _psi_memories_sync(query: str) -> list[str]:
         pass
     try:
         try:
-            from gbrain_client import get_client
-            client = get_client()
+            client = _recall_client()
             if client is None:
                 logger.info("[chatflow] recall gbrain client None，跳過")
                 return []
@@ -458,7 +493,8 @@ def _psi_memories_sync(query: str) -> list[str]:
                 hits = hybrid_hits_any(client, query, 4)
             except Exception as _e:
                 logger.info(f"[chatflow] recall 首次失敗 {_e!r}，重試（client 自癒）")
-                hits = hybrid_hits_any(get_client(), query, 4)
+                c2 = _recall_client()
+                hits = hybrid_hits_any(c2, query, 4) if c2 is not None else []
             logger.info(f"[chatflow] recall query={query[:40]!r} -> {len(hits)} hits")
             out = []
             for h in hits:
