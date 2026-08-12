@@ -377,6 +377,42 @@ _STOPWORDS = {
 }
 
 
+_TOKEN_TTL = float(os.environ.get("NEURALIS_TOKEN_HITS_TTL", 180.0))
+_TOKEN_CACHE_MAX = 64
+_token_cache: dict = {}
+_token_cache_lock = threading.Lock()
+
+
+def _token_hits(client, tok: str, limit: int) -> list:
+    """per-token 檢索結果快取 — 解『120s 內同題變體二次問仍 miss』。
+
+    背景：gbrain_client 是單一 stdio 連線 + threading.Lock，所有 call 序列化
+    （真實測出 `hybrid_hits_any` 2 token 排隊 ≈ 6.2s，頂到 chatflow weave 6s 窗邊緣；
+    併發或冷 gbrain 時 9-16s 直接破窗 → 記憶晚到 → 答『不知道』）。
+
+    這裡以『單一 token』為快取單位（有別於 gbrain_client.hybrid_hits 的 (query,limit) 快取）：
+    同題變體二次問共享鑑別 token（例：'V12 檔名?' 與 'V12 引擎叫什麼' 都含 'v12'），
+    第一問已查出該 token 的 hits → 第二問直接命中快取（不碰單例鎖、不重查），
+    從根上把變體二次問的 recall 從 6-16s 壓到 ~0s。
+    """
+    from gbrain_client import hybrid_hits
+    key = (tok, limit)
+    now = time.time()
+    with _token_cache_lock:
+        cached = _token_cache.get(key)
+        if cached and now - cached[0] < _TOKEN_TTL:
+            return cached[1]
+    try:
+        hs = hybrid_hits(client, tok, limit)
+    except Exception:
+        return []
+    with _token_cache_lock:
+        if len(_token_cache) >= _TOKEN_CACHE_MAX:
+            _token_cache.clear()
+        _token_cache[key] = (now, hs)
+    return hs
+
+
 def hybrid_hits_any(client, query: str, limit: int) -> list:
     """整串查 + 逐 token 查併集；停用詞過濾；laap/memory 優先（2026-08-12）。
 
@@ -405,20 +441,17 @@ def hybrid_hits_any(client, query: str, limit: int) -> list:
     import concurrent.futures as _cf
 
     def _one(t):
-        try:
-            return hybrid_hits(client, t, limit_i)
-        except Exception:
-            return []
+        # per-token 快取：變體二次問連共享 token 秒回，少一次鎖排隊
+        return _token_hits(client, t, limit_i)
     try:
         with _cf.ThreadPoolExecutor(max_workers=min(len(toks), 4)) as _ex:
             for hs in _ex.map(_one, toks):
                 _add(hs)
     except Exception:
         for t in toks:
-            try:
-                _add(hybrid_hits(client, t, limit_i))
-            except Exception:
-                continue
+            hit_t = _token_hits(client, t, limit_i)
+            if hit_t:
+                _add(hit_t)
     return _memory_first(list(seen.values()))[:limit]
 
 def _memory_first(hits: list) -> list:
