@@ -28,12 +28,32 @@ from pathlib import Path
 # ── 路徑常數 ──────────────────────────────────────────────
 
 CHANNEL = "/tmp/aris-scream-channel.jsonl"
+PROCESSED = "/tmp/aris-scream-processed-ids.json"
+LOCK = "/tmp/aris-scream-task-lock"
+BRAIN_DIR = Path.home() / ".scream-code" / "agentos-brain"
+AGENTOS_JSON = Path.home() / "agent-sandbox" / "agentos.json"
+
+# ── 留言板監聽 ──
+MESSAGE_BOARD = Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md"
+_mb_last_mtime = 0.0
+_mb_last_notify = 0.0
+_mb_last_size = 0            # 只讀增量用（見 watcher 的防自我迴圈註解）
+ARIS_API = "http://localhost:11546/v1/chat/completions"
+ARIS_MEMORY_URL = os.environ.get("ARIS_MEMORY_URL", "http://127.0.0.1:11551")
+# 乙的種子：Aris 回覆末尾附一句 forward-looking 注意力線，用這個 marker 切出來
+_ATTENTION_MARKER = "⟶下一步"
+# P2-b wake hydration：隔 WAKE_GAP_SEC 沒互動後的第一次 = 醒來，前置注入「上一刻的你」
+WAKE_GAP_SEC = int(os.environ.get("ARIS_WAKE_GAP_SEC", "1800"))
+_last_kick_ts = 0.0
+AGENTOS_API = "http://localhost:8000"
+POLL_INTERVAL = 0.1  # 100ms polling — 近即時回應，對人類無感
+LOG_FILE = "/tmp/agentos-aris-bridge.log"
+
 
 def _notify_macos(title: str, text: str) -> None:
-    """macOS 系統通知（本機、fire-and-forget、有 timeout 不擋執行緒）。
-    任務跑完 / 事件提醒用；失敗只靜默，絕不阻塞 bridge 主迴圈。"""
+    """macOS 系統通知（本機、fire-and-forget、timeout 5s 失敗靜默、不阻塞）。
+    任務跑完 / 提醒用；取代過去飛書脈絡。"""
     def _esc(s: str) -> str:
-        # AppleScript 字串字面：\ 與 \" 必須轉義。回傳安全片段。
         return str(s).replace("\\", "\\\\").replace('"', '\\"')
     try:
         subprocess.run(
@@ -43,6 +63,24 @@ def _notify_macos(title: str, text: str) -> None:
     except Exception:
         pass
 
+
+# ── Headroom 設定（從 headroom.toml 載入，env var 優先） ──
+
+HEADROOM_CONFIG_PATH = os.path.expanduser("~/.scream-code/headroom.toml")
+
+HEADROOM_PROXY = "http://127.0.0.1:8787"
+HEADROOM_COMPRESS_URL = "http://127.0.0.1:8787/v1/compress"
+HEADROOM_RETRIEVE_URL = "http://127.0.0.1:8787/v1/retrieve"
+HEADROOM_PROXY_PORT = 8787
+HEADROOM_MIN_COMPRESS_SIZE = 2000
+HEADROOM_AUTO_START = True
+HEADROOM_LEARN_ENABLED = True
+HEADROOM_LEARN_INTERVAL = 3600
+HEADROOM_LEARN_FAIL_THRESHOLD = 5
+HEADROOM_LEARN_TARGET = "AGENTS.md"
+HEADROOM_PROXY_PID = None
+_learn_fail_count = 0
+_learn_last_run = 0.0
 
 
 def _load_headroom_config() -> None:
