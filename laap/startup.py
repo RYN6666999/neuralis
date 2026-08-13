@@ -197,6 +197,38 @@ def ensure_quantum():
     return _quantum_writer
 
 
+
+
+def ensure_agi_kernel():
+    """非阻塞背景啟動 AGI kernel（kill-switch: AGI_KERNEL=off 一律不開）。
+
+    背景 daemon thread 裡先加 aris_brain 進 sys.path 再 import agi_kernel.spawn_kernel
+    （startup_all 早於 runpy，aris_brain 未必在 path）。任何失敗只 log 不擋 API。
+    預設 off（AGI_KERNEL 未設→不開）；要開設 AGI_KERNEL=on。
+    """
+    if os.environ.get("AGI_KERNEL", "").lower() in ("", "0", "false", "no"):
+        logger.info("[startup] AGI_KERNEL 未啟用（預設 off），略過 AGI kernel")
+        return None
+
+    def _boot():
+        try:
+            import sys as _sys
+            ap = os.path.join(os.environ.get(
+                "LAAP_AGI_DIR", os.path.expanduser("~/Developer/laap-AGI")), "aris_brain")
+            if ap not in _sys.path:
+                _sys.path.insert(0, ap)
+            from agi_kernel import spawn_kernel
+            spawn_kernel(disable_env="AGI_KERNEL")
+            logger.info("[startup] AGI kernel 已在背景啟動（非阻塞）")
+        except Exception as e:
+            logger.warning(f"[startup] AGI kernel 啟動跳過（不擋 API）: {e}")
+
+    import threading as _th
+    _th.Thread(target=_boot, daemon=True, name="agi-kernel-boot").start()
+    return True
+
+
+
 def startup_all():
     """一次啟動所有系統。"""
     ensure_psi_defs()
@@ -206,6 +238,7 @@ def startup_all():
     ensure_consolidation()
     ensure_status()
     ensure_quantum()
+    ensure_agi_kernel()
     # 對話流攔截：必須在作者 app.router.add_post 之前 patch（startup 早於 runpy 起 API）
     try:
         from laap.chatflow import install as _install_chatflow
