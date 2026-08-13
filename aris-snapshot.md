@@ -83,10 +83,10 @@
 ## 我 — 即時狀態
 
 ```
-pleasure=0.777 | arousal=0.8375683947244196 | attention=idle | tick=82920280
+pleasure=-0.909 | arousal=0 | attention=idle | tick=475573680
 dominant_need=competence
-needs: certainty=0.827 competence=0.933 growth=0.769 relatedness=0.644 autonomy=0.686
-drives: autonomy=0.013761918833344877 relatedness=0.0448878288717574 growth=0.04005863687477317
+needs: certainty=0.800 competence=0.954 growth=0.819 relatedness=0.789 autonomy=0.754
+drives: 
 xentropy_h=0.383 trend=↗️ events=56
 ```
 

@@ -38,6 +38,7 @@ if [[ -z "$VENV" ]]; then
 fi
 
 export PYTHONPATH="$NEURALIS_DIR:$LAAP"
+export AGI_KERNEL="${AGI_KERNEL:-on}"   # AGI kernel 背景啟動開關（AGI_KERNEL=off 可關）
 export LAAP_AGI_DIR="$LAAP"
 # 2026-08-01 Rust PSI M3 B-route 啟用：死碼已修復（class 28 方法完整），
 # 數值對拍通過（needs 5/5 一致），三條 topology probe 全綠。

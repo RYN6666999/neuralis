@@ -55,5 +55,8 @@ def get_memory_context(max_core: int = 3, max_recent: int = 3, max_working: int 
     """作者以 max_core/max_recent/max_working kwargs 呼叫；回傳可拼進 prompt 的字串。"""
     core = _STORE.recall(top_k=max_core, layer="core")
     recent = _STORE.recall(top_k=max_recent, layer="episodic")
-    parts = [f"[核心] {m.content}" for m in core] + [f"[近期] {m.content}" for m in recent]
+    # 跳過空內容：_clean_markdown 清完整段樣板會回空字串，渲染出來是「[核心] 」
+    # 這種空殼，比不說更糟（會被 LLM 當成一段真的但沒內容的記憶）。
+    parts = ([f"[核心] {m.content}" for m in core if (m.content or "").strip()]
+             + [f"[近期] {m.content}" for m in recent if (m.content or "").strip()])
     return "\n".join(parts)
