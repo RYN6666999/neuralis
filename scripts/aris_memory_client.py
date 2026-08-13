@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 
 MEMORY_URL = os.environ.get("ARIS_MEMORY_URL", "http://127.0.0.1:11551")
@@ -43,6 +44,55 @@ def _cut_marker_line(text: str, marker: str) -> tuple[str, str]:
 def split_attention(reply: str) -> tuple[str, str]:
     """切出 `⟶下一步:` 那行當 attention_line。找不到 → 回 (原文, '')。"""
     return _cut_marker_line(reply or "", ATTENTION_MARKER)
+
+
+# ── 幻覺尾巴攔截（儲存路徑）──────────────────────────────
+# attention_line 會被存成『上一刻的你』線索餵回後續 session；若 LLM 在尾巴
+# 幻覺出不存在的檔名/模組名，會污染線上。這裡只在『寫進記憶前』驗證：這行
+# 若提名了具體檔名/模組名，逐個對兩個 repo 查真偽，任何一個對不上 → 整行不存。
+_REPO_ROOTS = [os.path.expanduser("~/Developer/laap-AGI"),
+               os.path.expanduser("~/Developer/neuralis")]
+_FNAME_RE = re.compile(r"(?<![A-Za-z0-9_])[\w./-]+\.(?:py|ts|tsx|js|jsx|md|json|sh|toml|yaml|yml)\b")
+_MOD_RE = re.compile(r"\b(?:aris|laap)[._]\w+\b")
+_repo_names_cache = None
+
+
+def _repo_names() -> set:
+    """兩個 repo 的檔案+資料夾名（basename）一次快取，供真偽比對。"""
+    global _repo_names_cache
+    if _repo_names_cache is None:
+        s = set()
+        for root in _REPO_ROOTS:
+            for _r, _ds, fs in os.walk(root):
+                if ".git" in _r:
+                    continue
+                s.update(fs); s.update(_ds)
+        _repo_names_cache = s
+    return _repo_names_cache
+
+
+def _vet_attention_line(line: str) -> bool:
+    """防幻覺尾巴寫進記憶：這行提名了檔名/模組名 → 逐個對兩個 repo 查存在；
+    任何一個對不上真實檔案/目錄 → 判幻覺回 False（整行不存）。
+    純敘述（無具體名可驗）→ 不擋，回 True。
+    """
+    tokens = set(_FNAME_RE.findall(line) + _MOD_RE.findall(line))
+    if not tokens:
+        return True
+    names = _repo_names()
+    _EXT = (".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".json",
+            ".sh", ".toml", ".yaml", ".yml")
+    for tok in tokens:
+        name = tok.split("/")[-1]
+        # 直接存在（真檔/真目錄）→ OK
+        if name in names:
+            continue
+        # 無副檔名的模組 token：若對應的真檔（如 stem.py）存在 → 視為真，避免誤殺
+        if any((name + e) in names for e in _EXT):
+            continue
+        return False
+    return True
+
 
 
 def format_salience(encoding_salience: int, emotion_label: str = "",
@@ -192,13 +242,19 @@ def store(content: str, *, source: str, source_id: str, attention_line: str = ""
     body = (content or "").strip()
     if not body:
         return None
+    # 幻覺尾巴攔截（只在此儲存邊界，不碰顯示）：提名的檔/模組名查無真偽 → 不存。
+    attention_line = (attention_line or "").strip()
+    if attention_line and not _vet_attention_line(attention_line):
+        if log:
+            log(f"🧹 幻覺尾巴攔截（不存入記憶）: {attention_line[:120]!r}")
+        attention_line = ""
     salience = salience or {}
     payload = {
         "source": source,
         "content": body[:2000],
         "source_id": source_id,
         "origin": "auto_generated",
-        "attention_line": (attention_line or "").strip()[:500],
+        "attention_line": attention_line[:500],
         "tags": tags or [],
     }
     if salience.get("encoding_salience"):
