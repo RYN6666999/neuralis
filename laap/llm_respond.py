@@ -952,67 +952,6 @@ ATTENTION_MARKER = (ATTENTION_MARKER_PREFIX +
     "若是純延伸、無新事實可寫，就寫「待確認」就好，不要硬湊一句。）")
 
 
-_CJK_STOP = {"什麼", "為什麼", "怎麼", "可以", "我們", "你的", "我的", "這個", "那個",
-             "一個", "沒有", "知道", "還有", "還是", "現在", "剛才", "上次", "問題",
-             "告訴", "所以", "因為", "如果", "已經", "他們", "自己", "時候", "回答"}
-# 含這些字元的 n-gram 一律不當查詢詞（虛詞、疑問詞、代詞）
-_CJK_STOP_CH = set("是的了嗎呢吧啊什麼你我他她它們這那個有沒要會可以為何怎哪些及和跟就都還在被把讓對於之其地得著過再又也很最")
-
-
-def _kw_candidates(text: str, limit: int = 6) -> list:
-    """抽查詢詞：英數詞 + 中文 3-gram 滑窗（濾常見虛詞）。
-
-    aris-memory 的 /memories/query 是 `content LIKE '%q%'` 單一子字串比對，
-    整句話丟進去永遠 0 命中（2026-08-19 實測）。必須拆成短詞逐個查。
-    """
-    import re as _re
-    text = (text or "")[:120]
-    out, seen = [], set()
-    for w in _re.findall(r"[A-Za-z0-9_./-]{3,}", text):
-        if w.lower() not in seen:
-            seen.add(w.lower()); out.append(w)
-    han = _re.findall(r"[一-鿿]+", text)
-    for seg in han:
-        for n in (4, 3):
-            for i in range(len(seg) - n + 1):
-                g = seg[i:i + n]
-                # 含虛詞字元的滑窗（「是什麼」「的問題」…）會匹配到大量無關記憶，
-                # 2026-08-19 實測：不濾的話「是什麼」把 Verifier/hook 擠出前三。
-                if g in _CJK_STOP or g in seen or (set(g) & _CJK_STOP_CH):
-                    continue
-                seen.add(g); out.append(g)
-    return out[:limit]
-
-
-def _query_aris_memory(user_msg: str, limit: int = 3) -> list:
-    """查 aris-memory (:11551) A 庫。逐關鍵詞查，按命中次數排序。"""
-    import urllib.request as _ur, urllib.parse as _up, json as _js
-    kws = _kw_candidates(user_msg)
-    if not kws:
-        return []
-    score, body = {}, {}
-    for kw in kws:
-        try:
-            url = f"http://127.0.0.1:11551/memories/query?q={_up.quote(kw)}&limit=6"
-            with _ur.urlopen(url, timeout=1.5) as r:
-                rows = (_js.loads(r.read().decode()) or {}).get("results") or []
-        except Exception:
-            continue
-        # IDF：一個詞撈回越多筆代表越泛用，權重越低。
-        # 註：早期版本用「撈滿就整個丟」，但 Verifier/hook 這類常用技術詞一定撈滿，
-        # 會被誤殺成 0 筆（2026-08-19 實測）。虛詞已由 _CJK_STOP_CH 擋掉，這裡只降權。
-        w = len(kw) / max(1, len(rows))
-        for x in rows:
-            mid, c = x.get("id"), str(x.get("content") or "")
-            if not c:
-                continue
-            score[mid] = score.get(mid, 0) + w
-            body[mid] = c[:300]
-    top = sorted(score, key=lambda k: -score[k])[:limit]
-    logger.info(f"[llm_respond] A庫關鍵詞={kws} 候選={len(score)}")
-    return [body[k] for k in top]
-
-
 def _strip_marker(text: str) -> str:
     """剝掉 marker 尾巴，回傳純使用者輸入。"""
     idx = text.find(ATTENTION_MARKER_PREFIX)
@@ -1078,17 +1017,7 @@ def respond_nd(user_msg: str, psi_state: dict, history: list = None,
             hints = "、".join(f"{k} {v:+.2f}" for k, v in moved.items())
             state_hint = f"{state_hint}（你對這句話的反應：{hints}）"
 
-    # 2026-08-19：ND 路徑原本只看 gbrain recall 的 memories，完全碰不到
-    # aris-memory (:11551) 那 1300+ 筆真實對話記憶 —— 寫進 A 庫、卻從 B 庫召回。
-    # 這裡補上 A 庫查詢，命中的併進 memories 前面（A 庫是逐字對話，優先度高）。
     memories = list(memories or [])
-    try:
-        _a = _query_aris_memory(_strip_marker(user_msg))
-        if _a:
-            memories = _a + memories
-        logger.info(f"[llm_respond] A庫召回: {len(_a)} 筆 | 合併後 {len(memories)}")
-    except Exception as _e:
-        logger.info(f"[llm_respond] A庫召回跳過: {_e!r}")
 
     matched = []
     if memories:

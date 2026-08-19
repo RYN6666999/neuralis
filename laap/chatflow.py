@@ -653,26 +653,10 @@ def _make_chat_handler(orig_handler):
         user_turn = _is_user_turn(body) and not _is_harness_noise(user_msg)
         fed = _feed(user_msg) if user_turn else None
 
-        # 忙碌保護：只擋「互斥通道」工具（scream-ask/scream-task — 新對話會真的
-        # 打斷 Q&A/任務往返）。一般工具（gbrain/web-search/agency 背景查詢）不擋 —
-        # 有串流後併發聊天無害，agency 跑 5-9s 查詢時把真使用者擋掉才是傷害
-        # （實測撞過：check 全被 laap-busy 頂回）。ts>120s 視為殘留不擋。
-        _EXCLUSIVE_TOOLS = ("scream-ask", "scream-task")
-        if user_turn:
-            try:
-                import json as _json
-                with open("/tmp/laap-tool-status.json") as _f:
-                    _st = _json.load(_f)
-                if _st.get("status") in ("start", "running") \
-                   and _st.get("tool") in _EXCLUSIVE_TOOLS \
-                   and time.time() - _st.get("ts", 0) < 120:
-                    _busy_msg = f"（正在執行 {_st.get('description', '工作')}，請稍等，完成後會通知你。）"
-                    model = body.get("model", "laap-core")
-                    messages = body.get("messages", [])
-                    prompt_chars = sum(len(_content_text(m.get("content"))) for m in messages)
-                    return web.json_response(_build_response(_busy_msg, "laap-busy", model, prompt_chars))
-            except Exception:
-                pass
+        # 2026-08-19：這裡原本有「忙碌保護」，唯一會擋的是 scream-ask/scream-task
+        # 這兩個互斥通道工具。兩者已隨 Scream 通道一起移除（見 tool_executor.py），
+        # _EXCLUSIVE_TOOLS 永遠比不中 → 整段是死碼，且它會用 laap-busy 頂掉真使用者。
+        # 直接刪，不留空殼判斷。
 
         # 催產素：每次「使用者」對話提升信任權重
         if user_turn:
