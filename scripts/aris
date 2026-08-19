@@ -66,13 +66,21 @@ if not md.exists():
     print("記憶    （還沒有 ARIS.md）")
 else:
     t=md.read_text(encoding="utf-8"); size=len(t.encode())
-    rules=""
-    if "== 規則" in t:
-        rest=t.split("== 規則（訓練成果，永不刪）==",1)[1]
-        rules=rest.split("== 近況",1)[0] if "== 近況" in rest else rest
-    nr=len([l for l in rules.splitlines() if l.strip()])
-    bar=int(size/4096*20); bar=min(bar,20)
-    print(f"記憶    {size}/4096 [{'█'*bar}{'·'*(20-bar)}]  規則 {nr} 條")
+    # 三區切法跟 aris-digest.py 的 split_sections 一致：標頭位置排序切片
+    HEADS=[("== 規則（訓練成果，永不刪）==","rules"),
+           ("== 印象深刻（情感地標，永不刪）==","marks"),
+           ("== 近況（會壓縮）==","recent")]
+    found=sorted((t.find(h),h,k) for h,k in HEADS if h in t)
+    sec={"rules":"","marks":"","recent":""}
+    for i,(pos,h,k) in enumerate(found):
+        end=found[i+1][0] if i+1<len(found) else len(t)
+        sec[k]=t[pos+len(h):end].strip()
+    n=lambda s: len([l for l in s.splitlines() if l.strip()])
+    over = size>4096
+    bar=min(int(size/4096*20),20)
+    fill=('█'*bar)+('·'*(20-bar))
+    print(f"記憶    {size}/4096 [{fill}]{' ⚠️超標' if over else ''}"
+          f"  規則 {n(sec['rules'])} · 地標 {n(sec['marks'])} · 近況 {n(sec['recent'])}")
 EOF
 
 # digest
