@@ -33,19 +33,80 @@ STATE = LAAP / "aris_brain" / "state"
 VENV_PY = Path("/Users/ryan/Developer/laapenv/bin/python3")
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
 
-# 服務清單：(顯示名, port, 進程比對字串, 是否已退役)
+# 服務清單：(顯示名, port, 進程比對字串, 是否已退役, 進入點檔案)
+#
 # 退役 = 刻意關掉，不是故障。仍然探測並顯示（若忽然又活了要看得見），
 # 但不進 warnings —— 把「我關的」報成警告，會把真警告淹掉。
 # 2026-08-19：11546 chat API 退役（Hermes 全走 11547）；11550 relay 同期退役。
-# uses_psi = 這個服務是否經 startup.py 取得 PSI backend。這是靜態標註，
-# 現場推導不出來（沒有 introspection 端點）——所以它會過期，改接線時要同步改。
-# (顯示名, port, 進程比對字串, 已退役, 用 PSI)
+#
+# 這裡刻意「沒有」uses_psi 欄位。第一版有，是手標的 —— 那就是又一份會腐爛的
+# 副本（本檔開頭鐵律 1 禁止的事，我自己犯了）。改成從進入點的 import 閉包推導，
+# 見 _uses_psi()。退役服務不給進入點：它不在聽，算不算消費者無意義。
 SERVICES = [
-    ("aris-api-chat", 11546, "start.sh", True, True),
-    ("aris-cognitive-api", 11547, "aris_cognitive_api.py", False, True),
-    ("aris-relay", 11550, "aris-relay", True, False),
-    ("aris-memory", 11551, "aris-memory", False, False),   # 記憶服務，不碰 PSI
+    ("aris-api-chat", 11546, "start.sh", True, None),
+    ("aris-cognitive-api", 11547, "aris_cognitive_api.py", False,
+     LAAP / "aris_brain" / "aris_cognitive_api.py"),
+    ("aris-relay", 11550, "aris-relay", True, None),
+    ("aris-memory", 11551, "aris-memory", False,
+     NEURALIS / "scripts" / "aris-memory.py"),
 ]
+
+# PSI backend 的取用只可能經這幾個名字進來（laap.startup 是唯一的 backend 工廠）。
+_PSI_IMPORT_MARKERS = ("laap.psi_backend", "laap.psi_core", "from laap.startup",
+                       "get_psi_core", "RustPsiBackend", "PythonPsiBackend")
+
+
+def _uses_psi(entry: Path | None, depth: int = 2) -> dict:
+    """從進入點的 import 閉包推導「這個服務會不會取用 PSI backend」。
+
+    為什麼不手標：手標的旗標改接線時不會自己更新，會靜默說謊。
+    為什麼掃 import 而不是掃全文：aris-memory.py 有 33 個 `psi_*` 命中，
+    全是 SQLite 欄位名（存呼叫端傳來的快照），跟取用 backend 無關 ——
+    全文比對會把它誤判成消費者。判準是 import，不是字串出現。
+
+    限制（誠實登記）：只跟 laap/ 與 aris_brain/ 底下的本地模組，深度 2。
+    動態 import 字串拼接抓不到。抓不到就回 unknown，不回 False。
+    """
+    if entry is None:
+        return {"uses_psi": None, "why": "退役服務，未指定進入點"}
+    if not entry.exists():
+        return {"uses_psi": None, "why": f"進入點不存在：{entry}"}
+
+    seen, frontier = set(), [entry]
+    for _ in range(depth + 1):
+        nxt = []
+        for f in frontier:
+            if f in seen or not f.exists():
+                continue
+            seen.add(f)
+            try:
+                src = f.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            for line in src.splitlines():
+                t = line.strip()
+                if not (t.startswith("from ") or t.startswith("import ")):
+                    continue
+                if any(m in t for m in _PSI_IMPORT_MARKERS):
+                    return {"uses_psi": True, "why": f"{f.name}: {t[:70]}"}
+                # 本地模組才跟：laap.x / aris_brain 同層 / neuralis 同層
+                mod = t.split()[1].split(".")[0] if len(t.split()) > 1 else ""
+                for root in (f.parent, NEURALIS, LAAP / "aris_brain"):
+                    for cand in (root / f"{mod}.py",
+                                 root / mod.replace(".", "/") / "__init__.py"):
+                        if cand.exists() and cand not in seen:
+                            nxt.append(cand)
+                if t.startswith("from laap.") or t.startswith("import laap."):
+                    sub = t.split()[1].split(".")
+                    if len(sub) > 1:
+                        cand = NEURALIS / "laap" / f"{sub[1]}.py"
+                        if cand.exists() and cand not in seen:
+                            nxt.append(cand)
+        frontier = nxt
+        if not frontier:
+            break
+    return {"uses_psi": False,
+            "why": f"掃了 {len(seen)} 個模組的 import，沒有 PSI backend 取用"}
 
 
 # 探測失敗一律登記在這裡，並在報告裡明示。
@@ -261,11 +322,13 @@ def check_python_psi() -> dict:
 def check_services() -> list[dict]:
     listen = _sh(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"])
     rows = []
-    for name, port, _match, retired, uses_psi in SERVICES:
+    for name, port, _match, retired, entry in SERVICES:
+        psi = _uses_psi(entry)
         hit = [l for l in listen.splitlines() if f":{port} " in l]
         pid = hit[0].split()[1] if hit else None
         rows.append({
-            "name": name, "port": port, "retired": retired, "uses_psi": uses_psi,
+            "name": name, "port": port, "retired": retired,
+            "uses_psi": psi["uses_psi"], "uses_psi_why": psi["why"],
             "listening": bool(hit), "pid": pid,
             "evidence": "lsof -nP -iTCP -sTCP:LISTEN 全列比對",
         })
@@ -302,7 +365,7 @@ def check_rust_consumers(backend: dict, launchd: dict, services: list) -> dict:
     # 上面說「生效消費者 = 11546」，下面說「11546 沒在聽」。事實只能推導不能複製。
     if backend.get("effective") == "rust":
         for s in services:
-            if s["listening"] and s["uses_psi"]:
+            if s["listening"] and s["uses_psi"] is True:
                 consumers.append(f"{s['name']}:{s['port']} PSI backend（pid={s['pid']}）")
 
     latest = STATE / "latest.json"
@@ -351,6 +414,11 @@ def collect() -> dict:
             warnings.append(f"{s['name']} (:{s['port']}) 已退役卻在聽 pid={s['pid']} —— 誰起的？")
         elif not s["retired"] and not s["listening"]:
             warnings.append(f"{s['name']} (:{s['port']}) 沒在聽")
+        # unknown 不得靜默當成 False —— 那正是「探測失敗被呈現成沒有」。
+        if s["listening"] and s["uses_psi"] is None:
+            warnings.append(
+                f"{s['name']} (:{s['port']}) 的 PSI 取用推導不出來：{s['uses_psi_why']}"
+                "（消費者清單因此可能少算）")
     # 未載入的 plist：只報「對應服務還在役」的那些。留在磁碟的廢棄 plist 是
     # 考古層，不是待辦；9 條噪音會把真警告淹掉。
     _live_units = {f"com.neuralis.{s['name']}" for s in services if not s["retired"]}
