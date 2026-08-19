@@ -44,3 +44,11 @@ rust/target/
 
 # 演化閘門票佇列（runtime 資料，不提交）
 evolve-gate/
+
+# Aris 記憶系統：ARIS.md 累積 Ryan 的私人對話摘要（客戶定價、金額、人名），
+# neuralis 是 PUBLIC repo，一律不追蹤。備份靠 ARIS.md.history + 本機。
+ARIS.md
+ARIS.md.undo
+ARIS.md.history
+aris-digest.log
+*.bak-20*

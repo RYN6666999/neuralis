@@ -1,0 +1,94 @@
+#!/bin/zsh
+# aris — 一屏看完 Aris 的狀態。減法可視化：沒有 dashboard、沒有 web、沒有依賴。
+#
+#   aris          狀態總覽
+#   aris mem      看記憶檔全文（規則 + 近況）
+#   aris log      看 digest 最近做了什麼
+#   aris now      立刻跑一次 digest（不等 30 分鐘）
+#
+set -u
+N=/Users/ryan/Developer/neuralis
+MD=$N/ARIS.md
+WM=$HOME/.gbrain/aris-digest.watermark
+LOG=$N/aris-digest.log
+DB=$HOME/.aris-memory.db
+
+case "${1:-status}" in
+mem)  cat "$MD" 2>/dev/null || echo "（還沒有記憶檔）"; exit 0 ;;
+log)  tail -30 "$LOG" 2>/dev/null || echo "（還沒有 log）"; exit 0 ;;
+now)  cd $N && /opt/homebrew/bin/python3 scripts/aris-digest.py --incremental --apply; exit $? ;;
+hist)
+  # 全歷史：每次寫入前的快照，帶時間戳。要回到某一版就自己複製貼回 ARIS.md。
+  if [ ! -f "$MD.history" ]; then echo "還沒有歷史"; exit 1; fi
+  grep -n "^===== " "$MD.history" | tail -20
+  echo
+  echo "看某一版： sed -n '/^===== 2026-08-19 20:25/,/^===== /p' $MD.history"
+  exit 0 ;;
+undo)
+  # 撤銷上一次 digest 寫入。只留一層——連按兩次是還原回去，不是往前兩步。
+  if [ ! -f "$MD.undo" ]; then echo "沒有可撤銷的版本"; exit 1; fi
+  cp "$MD" "$MD.redo" && cp "$MD.undo" "$MD" && mv "$MD.redo" "$MD.undo"
+  echo "已撤銷。現在的記憶檔："; echo; cat "$MD"
+  echo; echo "（再打一次 aris undo 會還原回去）"
+  exit 0 ;;
+esac
+
+ok(){ curl -sf --max-time 2 "http://localhost:$1/health" >/dev/null 2>&1 && echo "✅" || echo "❌"; }
+
+echo "───── Aris ─────"
+
+# 心跳：Rust state 檔的 mtime 離現在幾秒
+beat=$(python3 - <<'EOF' 2>/dev/null
+import os,time
+p="/Users/ryan/Developer/laap-AGI/aris_brain/state/rust-latest.json"
+try: print(f"{time.time()-os.stat(p).st_mtime:.0f}s 前")
+except Exception: print("讀不到")
+EOF
+)
+printf "心跳    %s  psi-daemon %s\n" "$beat" "$(pgrep -f psi-daemon >/dev/null && echo ✅ || echo ❌)"
+printf "服務    11546 %s  11547 %s  11551 %s\n" "$(ok 11546)" "$(ok 11547)" "$(ok 11551)"
+
+# 情緒
+python3 - <<'EOF' 2>/dev/null
+import json
+try:
+    p=json.load(open("/Users/ryan/Developer/neuralis/status.json"))["psi"]
+    e=p["emotion"]
+    print(f"情緒    valence {e['valence']:+.2f}  arousal {e['arousal']:.2f}  需求 {p['dominant_need']}")
+except Exception: print("情緒    讀不到 status.json")
+EOF
+
+# 記憶
+python3 - <<'EOF' 2>/dev/null
+from pathlib import Path
+md=Path("/Users/ryan/Developer/neuralis/ARIS.md")
+if not md.exists():
+    print("記憶    （還沒有 ARIS.md）")
+else:
+    t=md.read_text(encoding="utf-8"); size=len(t.encode())
+    rules=""
+    if "== 規則" in t:
+        rest=t.split("== 規則（訓練成果，永不刪）==",1)[1]
+        rules=rest.split("== 近況",1)[0] if "== 近況" in rest else rest
+    nr=len([l for l in rules.splitlines() if l.strip()])
+    bar=int(size/4096*20); bar=min(bar,20)
+    print(f"記憶    {size}/4096 [{'█'*bar}{'·'*(20-bar)}]  規則 {nr} 條")
+EOF
+
+# digest
+if [ -f "$WM" ]; then
+  wm=$(cat "$WM")
+  new=$(sqlite3 "$DB" "select count(*) from memories where source in ('hermes-cli','webchat') and id > $wm;" 2>/dev/null)
+  last=$(python3 -c "
+import os,time
+try: print(f'{(time.time()-os.stat(\"$LOG\").st_mtime)/60:.0f} 分鐘前')
+except Exception: print('沒跑過')" 2>/dev/null)
+  loaded=$(launchctl list 2>/dev/null | grep -c aris-digest)
+  printf "消化    上次 %s  待處理 %s 筆  排程 %s\n" "$last" "${new:-?}" \
+    "$([ "$loaded" -gt 0 ] && echo '✅ 每30分' || echo '❌ 未掛')"
+else
+  echo "消化    水位檔不存在"
+fi
+
+echo "────────────────"
+echo "aris mem | aris log | aris now | aris undo | aris hist"
