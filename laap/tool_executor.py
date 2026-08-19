@@ -79,16 +79,10 @@ class ToolExecutor:
         try:
             with open(self.TOOL_STATUS_FILE, "w") as f:
                 json.dump(payload, f)
-            # 同步寫入 aris-scream-channel（與 scream-ask/scream-task 同管道）
-            channel_event = {
-                "ts": time.time(), "id": uuid.uuid4().hex[:12],
-                "direction": "aris→scream", "type": "tool_execution",
-                "tool": tool, "status": status,
-                "icon": icon, "description": desc,
-                "elapsed": round(elapsed, 1),
-            }
-            with open(self.CHANNEL_PATH, "a") as f:
-                f.write(json.dumps(channel_event, ensure_ascii=False) + "\n")
+            # 2026-08-19：原本每次工具執行都 append 一筆到
+            # /tmp/aris-scream-channel.jsonl 給 Scream TUI 顯示狀態列。
+            # Ryan 已改成只走 Hermes，Scream 不再啟動 → 那個檔沒有讀者，
+            # 只會無上限長大（刪除時實測 223KB / 803 行）。整段刪掉。
             self._last_status_emit_ts = now
             self._last_status_key = status_key
         except Exception:
@@ -110,8 +104,7 @@ class ToolExecutor:
     TOOL_ICONS = {
         "gbrain": "🧠", "qmd": "📚", "file-search": "🔍",
         "http-get": "🌐", "http": "🌐", "web-search": "🌐",
-        "shell": "⚙️", "bash": "⚙️", "scream-ask": "💬",
-        "scream-task": "📋",
+        "shell": "⚙️", "bash": "⚙️",
     }
 
     def execute(self, tool: str, prompt: str, timeout: int = 30) -> str:
@@ -234,66 +227,6 @@ class ToolExecutor:
     def _register_builtins(self):
         """註冊本機可直接叫的工具（不透過 AgentOS）。"""
 
-        # scream-ask — 向 Scream Code TUI 提問
-        CHANNEL_PATH = "/tmp/aris-scream-channel.jsonl"
-
-        def scream_ask(query: str) -> str:
-            if os.path.islink(CHANNEL_PATH):
-                return "[scream-ask 安全拒絕] 頻道檔案是 symlink"
-            entry_id = uuid.uuid4().hex[:12]
-            entry = {"ts": time.time(), "id": entry_id, "direction": "aris→scream",
-                     "type": "request", "content": query[:500], "context": {}}
-            with open(CHANNEL_PATH, "a") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                time.sleep(1.0)
-                try:
-                    with open(CHANNEL_PATH) as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            resp = json.loads(line)
-                            if resp.get("direction") == "scream→aris" \
-                               and resp.get("context", {}).get("request_ts") == entry["ts"]:
-                                return resp.get("content", "（無內容）")
-                except (FileNotFoundError, json.JSONDecodeError, OSError):
-                    pass
-            return "[scream-ask 逾時] 30s 內未收到 Scream 回應"
-
-        # scream-task — 向 Scream Code 委派任務（type=task→result, 120s timeout）
-        def scream_task(task_spec: str) -> str:
-            """寫入 type='task' 項目，輪詢最多 120s 以取得 type='result'。"""
-            if os.path.islink(CHANNEL_PATH):
-                return "[scream-task 安全拒絕] 頻道檔案是 symlink"
-            entry_id = uuid.uuid4().hex[:12]
-            entry = {"ts": time.time(), "id": entry_id,
-                     "direction": "aris→scream", "type": "task",
-                     "content": task_spec[:2000],
-                     "context": {"task_list": [], "task_index": 0,
-                                 "total_tasks": 1, "goal_id": ""}}
-            with open(CHANNEL_PATH, "a") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            deadline = time.time() + 120
-            while time.time() < deadline:
-                time.sleep(2.0)
-                try:
-                    with open(CHANNEL_PATH) as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            resp = json.loads(line)
-                            if (resp.get("direction") == "scream→aris"
-                                and resp.get("type") == "result"
-                                and resp.get("context", {}).get("request_ts") == entry["ts"]
-                                and resp.get("context", {}).get("task_index") == entry["context"]["task_index"]):
-                                return resp.get("content", "（無內容）")
-                except (FileNotFoundError, json.JSONDecodeError, OSError):
-                    pass
-            return "[scream-task 逾時] 120s 內未收到任務結果"
-
         # gbrain 記憶搜尋 — 走 neuralis 持久 MCP client（免 CLI 冷啟 ~3s/次），
         # client 不可用再退 CLI
         def gbrain_search(query: str) -> str:
@@ -359,14 +292,9 @@ class ToolExecutor:
         self.register_tool("file-search", file_search, "ripgrep 檔案全文搜尋",
                            stream_fn=file_search_stream)
         self.register_tool("http-get", http_get, "HTTP GET 請求")
-        self.register_tool("scream-ask", scream_ask, "向 Scream Code 提問，學習 TUI 操作與工具使用")
         self.register_tool("stream-test", stream_test_exec,
                            "串流管線自測（固定慢指令，逐行輸出）",
                            stream_fn=stream_test_stream)
-        self.register_tool("scream-task", scream_task,
-                           "向 Scream Code 委派任務（type=task→result, 120s timeout）。"
-                           "僅在 Scream TUI session 在線時可用，離線會空等 120s。"
-                           "網路搜尋用 web-search，不要用這個。")
 
     def _on_action_request(self, source: str, data: dict) -> None:
         """CognitiveBus ACTION_REQUEST 事件回呼。"""
