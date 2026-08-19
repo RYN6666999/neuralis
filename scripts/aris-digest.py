@@ -123,14 +123,19 @@ def api_key() -> str | None:
     for env in ("NEURALIS_LLM_API_KEY", "OPENROUTER_API_KEY"):
         if os.environ.get(env):
             return os.environ[env]
+    errs = []
     for svc in ("openrouter-api-key", "openai-api-key"):
         try:
             r = subprocess.run(["security", "find-generic-password", "-s", svc, "-w"],
                                capture_output=True, text=True, timeout=5)
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip()
-        except Exception:
-            pass
+            errs.append(f"{svc}:rc={r.returncode}")
+        except Exception as e:
+            errs.append(f"{svc}:{type(e).__name__}")
+    # 2026-08-19 紅隊：原本靜默 pass，分不出「沒設金鑰」和「鑰匙圈鎖住」。
+    # 絕不印金鑰本身，只印哪個來源、什麼錯。
+    print(f"[api_key] ❌ 所有來源都拿不到: {'; '.join(errs) or '(無)'}", file=sys.stderr)
     return None
 
 
@@ -249,10 +254,32 @@ def save_undo() -> None:
 
 
 def read_watermark() -> int:
+    """回水位 id。檔案不存在 → 0（首跑）。**壞掉 → -1（停，不是重來）**。
+
+    2026-08-19 紅隊：原本任何錯誤都回 0，等於「水位檔壞掉就從頭處理整個
+    A 庫」——會灌爆 ARIS.md 並燒 LLM 費用。讀不到水位時該停，不是該重來。
+    """
+    if not WATERMARK.exists():
+        # 首跑不回填歷史：從 A 庫當前最大 id 起算，只記「從現在開始」的事。
+        # 2026-08-19 紅隊：原本回 0 → 水位檔被誤刪就重新消化 60 筆舊對話，
+        # 灌進 ARIS.md 又燒 LLM 費用。要補歷史請顯式跑 --days N。
+        try:
+            conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+            cur = conn.execute(
+                "SELECT COALESCE(MAX(id),0) FROM memories WHERE source IN "
+                f"({','.join('?' * len(HUMAN_SOURCES))})", HUMAN_SOURCES).fetchone()[0]
+            conn.close()
+            print(f"[watermark] 檔案不存在 → 首跑，從當前最大 id={cur} 起算"
+                  f"（要補歷史用 --days N）")
+            return int(cur)
+        except Exception as e:
+            print(f"[watermark] ❌ 首跑取基準失敗，停手: {e!r}", file=sys.stderr)
+            return -1
     try:
         return int(WATERMARK.read_text().strip())
-    except Exception:
-        return 0
+    except Exception as e:
+        print(f"[watermark] ❌ 讀取/解析失敗，停手不處理: {e!r}", file=sys.stderr)
+        return -1
 
 
 def write_watermark(mid: int) -> None:
@@ -389,6 +416,10 @@ def main() -> int:
 
     if args.incremental:
         wm = read_watermark()
+        if wm < 0:
+            print("水位不可信，本輪不處理（修好 ~/.gbrain/aris-digest.watermark 再跑）",
+                  file=sys.stderr)
+            return 1
         rows = fetch_since_id(wm)
         print(f"增量模式：水位 id>{wm} → {len(rows)} 筆新對話")
         if not rows:
@@ -471,8 +502,24 @@ def main() -> int:
         recent = (recent + SEP + block).strip() if recent and recent != "（無）" else block
         print(f"  → 近況區 +{len(new_recent)} 行")
 
+    # ── 對帳斷言（2026-08-19 第二項）───────────────────────────
+    # 保護區只准增不准減：規則/地標是訓練成果，任何路徑都不該讓它變少。
+    old_rules, old_marks, _ = split_sections(old)
+    assert len(rules) >= len(old_rules), \
+        f"規則區縮水 {len(old_rules)}→{len(rules)}，中止寫入"
+    assert len(marks) >= len(old_marks), \
+        f"地標區縮水 {len(old_marks)}→{len(marks)}，中止寫入"
+    # 寫幾筆讀幾筆：地標新增數 == 實際被 append 的行數
+    if new_marks:
+        assert marks.count("\n") - old_marks.count("\n") >= len(new_marks) - 1, \
+            f"地標數對不上：宣稱 +{len(new_marks)}，實際行數沒增那麼多"
+
     save_undo()
     OUT.write_text(render(rules, marks, recent), encoding="utf-8")
+    # 寫完立刻回讀對帳：拆出來的三區必須跟寫進去的逐字相同
+    back_r, back_m, back_c = split_sections(OUT.read_text(encoding="utf-8"))
+    assert (back_r, back_m) == (rules, marks), \
+        "回讀對帳失敗：保護區寫入後拆不回原樣（標頭衝突？）"
     if new_rules:
         notify("Aris 學到新規則",
                "；".join(new_rules)[:180] + "　（不對就打 aris undo）")
