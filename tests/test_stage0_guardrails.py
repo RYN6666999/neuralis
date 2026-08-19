@@ -27,8 +27,13 @@ def test_scream_task_benign_needs_approval(monkeypatch):
     assert not allowed and "批准" in reason, f"未批准委派應排隊：{reason}"
 
 
-def test_scream_ask_still_readonly():
-    assert classify("scream-ask") == "readonly_builtin", "scream-ask 純 Q&A 留唯讀"
+def test_scream_ask_retired_not_readonly():
+    # 2026-08-19 scream 退役。白名單是「預先簽名」不是現況描述 —
+    # 留著 scream-ask 等於日後同名工具復活時自動繼承唯讀批准。
+    assert classify("scream-ask") != "readonly_builtin", \
+        "scream 已退役，scream-ask 不該還在唯讀白名單裡預先簽名"
+    # 正對照：仍在用的工具沒被誤傷
+    assert classify("gbrain") == "readonly_builtin"
 
 
 def test_path_deny_still_wins_over_approval():

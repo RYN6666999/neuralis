@@ -7,7 +7,7 @@
 #   aris now      立刻跑一次 digest（不等 30 分鐘）
 #
 set -u
-N=/Users/ryan/Developer/neuralis
+N=${NEURALIS_ROOT:-${0:A:h:h}}   # 預設 = 本腳本所在的 repo 根
 MD=$N/ARIS.md
 WM=$HOME/.gbrain/aris-digest.watermark
 LOG=$N/aris-digest.log
@@ -16,7 +16,7 @@ DB=$HOME/.aris-memory.db
 case "${1:-status}" in
 mem)  cat "$MD" 2>/dev/null || echo "（還沒有記憶檔）"; exit 0 ;;
 log)  tail -30 "$LOG" 2>/dev/null || echo "（還沒有 log）"; exit 0 ;;
-now)  cd $N && /opt/homebrew/bin/python3 scripts/aris-digest.py --incremental --apply; exit $? ;;
+now)  cd $N && ${PY3:-/opt/homebrew/bin/python3} scripts/aris-digest.py --incremental --apply; exit $? ;;
 hist)
   # 全歷史：每次寫入前的快照，帶時間戳。要回到某一版就自己複製貼回 ARIS.md。
   if [ ! -f "$MD.history" ]; then echo "還沒有歷史"; exit 1; fi
@@ -38,9 +38,10 @@ ok(){ curl -sf --max-time 2 "http://localhost:$1/health" >/dev/null 2>&1 && echo
 echo "───── Aris ─────"
 
 # 心跳：Rust state 檔的 mtime 離現在幾秒
+export ARIS_STATE=$N/../laap-AGI/aris_brain/state/rust-latest.json
 beat=$(python3 - <<'EOF' 2>/dev/null
 import os,time
-p="/Users/ryan/Developer/laap-AGI/aris_brain/state/rust-latest.json"
+p=os.environ["ARIS_STATE"]
 try: print(f"{time.time()-os.stat(p).st_mtime:.0f}s 前")
 except Exception: print("讀不到")
 EOF
@@ -56,7 +57,7 @@ printf "守護    watchdog %s\n" "$(pgrep -f 'watchdog.sh 11547' >/dev/null && e
 # 單一真相 = 源頭。順帶讓狀態列不依賴 11546 是否活著。
 python3 - <<'EOF' 2>/dev/null
 import json, time, os
-P = "/Users/ryan/Developer/laap-AGI/aris_brain/state/rust-latest.json"
+P = os.environ["ARIS_STATE"]
 try:
     d = json.load(open(P)); a = d.get("affect", {}); n = d.get("needs", {})
     age = time.time() - os.stat(P).st_mtime
@@ -72,8 +73,8 @@ EOF
 # 三區計數一律問 aris-digest.py --stats（唯一實作）。
 # 2026-08-19：這裡原本手抄一份切法。兩份實作必然漂移——標頭字串改了只改到
 # 一邊，狀態列就靜默顯示錯的數字。刪掉手抄，判準只留一個地方。
-/opt/homebrew/bin/python3 "$N/scripts/aris-digest.py" --stats 2>/dev/null \
-| /opt/homebrew/bin/python3 -c '
+${PY3:-/opt/homebrew/bin/python3} "$N/scripts/aris-digest.py" --stats 2>/dev/null \
+| ${PY3:-/opt/homebrew/bin/python3} -c '
 import sys, json
 raw = sys.stdin.read().strip()
 if not raw:
