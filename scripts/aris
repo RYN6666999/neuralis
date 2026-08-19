@@ -46,16 +46,26 @@ except Exception: print("讀不到")
 EOF
 )
 printf "心跳    %s  psi-daemon %s\n" "$beat" "$(pgrep -f psi-daemon >/dev/null && echo ✅ || echo ❌)"
-printf "服務    11546 %s  11547 %s  11551 %s\n" "$(ok 11546)" "$(ok 11547)" "$(ok 11551)"
+# 2026-08-19：11546（laap chat API）已退役——流量 100% 是 curl 測試與
+# watchdog 的 /health，Hermes 走 11547。watchdog 改守 11547。
+printf "服務    11547 %s（認知·watchdog 守）  11551 %s（記憶）\n" "$(ok 11547)" "$(ok 11551)"
+printf "守護    watchdog %s\n" "$(pgrep -f 'watchdog.sh 11547' >/dev/null && echo '✅ 盯 11547' || echo '❌ 沒在跑')"
 
-# 情緒
+# 情緒：讀 Rust 心跳直接寫的那份，不讀 11546 的轉手版 status.json。
+# 2026-08-19 實測兩份不同步（status.json valence -1.0 vs 11547 -0.477）。
+# 單一真相 = 源頭。順帶讓狀態列不依賴 11546 是否活著。
 python3 - <<'EOF' 2>/dev/null
-import json
+import json, time, os
+P = "/Users/ryan/Developer/laap-AGI/aris_brain/state/rust-latest.json"
 try:
-    p=json.load(open("/Users/ryan/Developer/neuralis/status.json"))["psi"]
-    e=p["emotion"]
-    print(f"情緒    valence {e['valence']:+.2f}  arousal {e['arousal']:.2f}  需求 {p['dominant_need']}")
-except Exception: print("情緒    讀不到 status.json")
+    d = json.load(open(P)); a = d.get("affect", {}); n = d.get("needs", {})
+    age = time.time() - os.stat(P).st_mtime
+    top = max(n, key=n.get) if n else "?"
+    stale = "  ⚠️心跳停了" if age > 5 else ""
+    print(f"情緒    pleasure {a.get('pleasure',0):+.2f}  arousal {a.get('arousal',0):.2f}"
+          f"  需求 {top}{stale}")
+except Exception as e:
+    print(f"情緒    ❌ 讀不到 Rust 心跳檔（{type(e).__name__}）")
 EOF
 
 # 記憶
