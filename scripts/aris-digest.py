@@ -40,7 +40,25 @@ HUMAN_SOURCES = ("hermes-cli", "webchat")
 # 規則區 = Ryan 訓練 Aris 的成果，重壓時原樣搬過去，LLM 不准動。
 # 近況區 = 一般記憶，會被壓縮合併淘汰。
 RULE_HEADER = "== 規則（訓練成果，永不刪）=="
+LANDMARK_HEADER = "== 印象深刻（情感地標，永不刪）=="
 RECENT_HEADER = "== 近況（會壓縮）=="
+
+# ── 情感地標（2026-08-19 借鑒 Lorry 的 laap_memory_hierarchy.py）────────
+# 上游原設計：「不重要的記憶逐漸衰減，但被回憶過的、情感強烈的、
+# 用戶明確標記重要的，被永久保存。你不會記得每天早餐吃什麼，
+# 但你記得第一次遇見那個重要的人。」
+# 上游那套實測已死（state/memory_hierarchy.json 停在 2026-08-10，
+# 長期事實 0、情感地標 0——卡在「工作記憶滿 100 條才壓縮」，
+# 一天 4 筆要 25 天才觸發一次）。借判準，不借實作。
+#
+# 關鍵：權重算在**原始對話**上，不是算在 LLM 摘要上。
+# 「你憑啥覺得你講這些我就有必要相信」被改寫過就沒力量了，原話才有。
+EMO_STRONG = ("愛", "恨", "永遠", "最重要", "秘密", "第一次", "再也不會",
+              "感謝", "對不起", "難忘", "改變", "失去", "珍惜", "憑啥",
+              "失望", "在乎", "相信", "承諾", "陪", "孤單", "怕")
+EMO_MEDIUM = ("喜歡", "開心", "難過", "累", "擔心", "期待", "希望", "感動",
+              "生氣", "煩", "謝謝", "辛苦")
+EMO_THRESHOLD = float(os.environ.get("ARIS_EMO_THRESHOLD", "0.3"))
 # Ryan 在訓練她時的講法。命中就當規則，不當事實。
 RULE_TRIGGERS = (
     "不要", "不准", "別再", "以後", "記住", "永遠", "一律", "必須", "請你都",
@@ -257,22 +275,40 @@ def fetch_since_id(after_id: int, hard_limit: int = 60) -> list:
     return [(i, c) for i, c in rows if c and not is_noise(c)]
 
 
+def emotional_weight(text: str) -> float:
+    """一句話的情感強度 0-1。判準跑原話，不跑摘要。"""
+    t = text or ""
+    strong = sum(1 for w in EMO_STRONG if w in t)
+    medium = sum(1 for w in EMO_MEDIUM if w in t)
+    return min(1.0, strong * 0.3 + medium * 0.15)
+
+
 def split_sections(text: str) -> tuple:
-    """把 ARIS.md 拆成 (規則區, 近況區)。沒有標頭 → 全部算近況。"""
-    if RULE_HEADER not in text:
-        return "", text.strip()
-    _, rest = text.split(RULE_HEADER, 1)
-    if RECENT_HEADER in rest:
-        rules, recent = rest.split(RECENT_HEADER, 1)
-    else:
-        rules, recent = rest, ""
-    return rules.strip(), recent.strip()
+    """把 ARIS.md 拆成 (規則區, 地標區, 近況區)。
+
+    三個標頭都是可選的；一個都沒有 → 舊格式，全部算近況。
+    做法：把標頭當分隔點切開，按出現順序歸位——不做巢狀 split，
+    那寫法繞且容易錯（2026-08-19 第一版就是那樣，重寫成這個）。
+    """
+    heads = [(RULE_HEADER, "rules"), (LANDMARK_HEADER, "marks"),
+             (RECENT_HEADER, "recent")]
+    found = sorted(((text.find(h), h, k) for h, k in heads if h in text))
+    if not found:
+        return "", "", text.strip()
+    out = {"rules": "", "marks": "", "recent": ""}
+    for i, (pos, head, key) in enumerate(found):
+        start = pos + len(head)
+        end = found[i + 1][0] if i + 1 < len(found) else len(text)
+        out[key] = text[start:end].strip()
+    return out["rules"], out["marks"], out["recent"]
 
 
-def render(rules: str, recent: str) -> str:
+def render(rules: str, marks: str, recent: str) -> str:
     out = []
     if rules:
         out.append(RULE_HEADER + "\n" + rules)
+    if marks:
+        out.append(LANDMARK_HEADER + "\n" + marks)
     out.append(RECENT_HEADER + "\n" + (recent or "（無）"))
     return "\n\n".join(out).rstrip() + "\n"
 
@@ -295,14 +331,15 @@ def recompress(key: str, max_rounds: int = 3) -> bool:
     print(f"[重壓] {len(old.encode())} bytes > 上限 {CAP_BYTES}，目標 {TARGET_BYTES}")
 
     # 規則區是 Ryan 的訓練成果，原樣搬過去，只壓近況區。
-    rules, recent = split_sections(old)
-    if rules:
-        rule_bytes = len(rules.encode())
-        print(f"  規則區 {rule_bytes} bytes（保護，不壓）")
-        if rule_bytes >= TARGET_BYTES:
-            print("  ⚠️ 規則區已吃掉整個預算，請你自己砍規則", file=sys.stderr)
+    rules, marks, recent = split_sections(old)
+    protected = len((rules + marks).encode())
+    if rules or marks:
+        print(f"  保護區 {protected} bytes（規則 {len(rules.encode())} "
+              f"+ 地標 {len(marks.encode())}），不壓")
+        if protected >= TARGET_BYTES:
+            print("  ⚠️ 保護區已吃掉整個預算，請你自己砍（aris mem）", file=sys.stderr)
 
-    cur = recent if rules else old
+    cur = recent if (rules or marks) else old
     for rnd in range(1, max_rounds + 1):
         out = call_llm(RECOMPRESS_PROMPT + cur, key, max_tokens=2000)
         if not out:
@@ -317,7 +354,7 @@ def recompress(key: str, max_rounds: int = 3) -> bool:
             break
 
     # 壓完的近況區跟保護的規則區重新組回去
-    new = render(rules, cur) if rules else cur
+    new = render(rules, marks, cur) if (rules or marks) else cur
     if new == old:
         print("[重壓] 完全壓不動，維持原檔（寧可超標也不寫壞）", file=sys.stderr)
         return False
@@ -375,26 +412,45 @@ def main() -> int:
         budget -= len(piece)
     blob = "\n\n---\n\n".join(reversed(parts))
     print(f"  （餵給 LLM：{len(parts)}/{len(rows)} 筆，{len(blob)} 字）")
-    gist = call_llm(DIGEST_PROMPT + blob, key)
-    if not gist:
-        return 1
-    if gist.startswith("無值得記"):
-        print("今天沒有值得長期記住的事")
-        return 0
+    stamp = time.strftime("%Y-%m-%d")
+    old = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
+    rules, marks, recent = split_sections(old)
 
-    print("\n--- 今日摘要 ---")
-    print(gist)
-    print("----------------")
+    # 情感地標：機械判準，跑在**原始對話**上，不經 LLM。
+    # 「你憑啥覺得你講這些我就有必要相信」被摘要過就沒力量了。
+    # 2026-08-19 bug：這段原本放在「LLM 回無值得記就 return」之後，
+    # 於是機械判準被 LLM 的判斷擋掉，永遠跑不到。判準是機械的就不能排在 LLM 後面。
+    new_marks = []
+    for mid, content in rows:
+        first = (content or "").split("\n", 1)[0].strip()
+        w = emotional_weight(first)
+        if w >= EMO_THRESHOLD and first[:40] not in marks:
+            new_marks.append(f"[{stamp} w={w:.2f}] {first[:120]}")
+    if new_marks:
+        print(f"  → 情感地標 +{len(new_marks)} 條")
+        for m in new_marks:
+            print(f"     {m[:80]}")
+
+    gist = call_llm(DIGEST_PROMPT + blob, key)
+    if gist and gist.startswith("無值得記"):
+        print("今天沒有值得長期記住的事")
+        gist = ""
+    if not gist and not new_marks:
+        return 0 if gist == "" else 1
+
+    if gist:
+        print("\n--- 今日摘要 ---")
+        print(gist)
+        print("----------------")
 
     if not args.apply:
         cur = OUT.stat().st_size if OUT.exists() else 0
         print(f"\n[DRY-RUN] 未寫入。現檔 {cur} bytes，"
-              f"加上這段約 {cur + len(gist.encode()) + 4} / 上限 {CAP_BYTES}")
+              f"地標 +{len(new_marks)} 條、摘要 {len(gist.encode())} bytes / 上限 {CAP_BYTES}")
         return 0
 
-    stamp = time.strftime("%Y-%m-%d")
-    old = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
-    rules, recent = split_sections(old)
+    if new_marks:
+        marks = (marks + "\n" + "\n".join(new_marks)).strip()
 
     # 逐行分流：訓練用的規則進規則區（永不刪），其餘進近況區。
     new_rules, new_recent = [], []
@@ -416,7 +472,7 @@ def main() -> int:
         print(f"  → 近況區 +{len(new_recent)} 行")
 
     save_undo()
-    OUT.write_text(render(rules, recent), encoding="utf-8")
+    OUT.write_text(render(rules, marks, recent), encoding="utf-8")
     if new_rules:
         notify("Aris 學到新規則",
                "；".join(new_rules)[:180] + "　（不對就打 aris undo）")
