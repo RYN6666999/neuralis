@@ -35,6 +35,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import ast
+import io
+import tokenize
 import sys
 from pathlib import Path
 
@@ -99,6 +102,51 @@ def iter_files():
                 yield Path(dirpath) / fn
 
 
+def nocode_lines(path: Path):
+    """回傳「屬於註解或字串常值」的行號集合；判不了回 None。
+
+    為什麼不用正則自己判：
+      舊版是 `s.startswith("#") or s.startswith("//")`，只擋得住單行註解。
+      docstring 內文一行都擋不掉 —— 而這套 code 的說明文字裡到處是
+      `state/latest.json`、`memory_store.py`、`11546`。實測 285 筆命中有
+      156 筆（55%）在註解或字串裡，規則 A 誤判 95%、規則 D 誤判 95%。
+      等於在懲罰把註解寫詳細的人。
+
+      補正則沒有盡頭：單引號三連、raw 前綴、字串裡的井號、井號後面的引號……
+      每補一條就多一個不知道自己漏了的邊角，因為那是在重寫一份 Python 語法
+      的贗品。（寫這段註解時我第一版真的把那幾個符號打成字面量，當場把
+      docstring 提早關掉 —— 現身說法：手寫判斷連寫註解都會踩到。）
+      tokenize 是 Python 直譯器自己拆解原始碼用的模組 —— 判準改成向原件
+      求證，不是拿我對語法的理解去複製。事實只能推導，不能複製。
+
+    失敗處理：語法錯或非 .py → 回 None（誠實說「判不了」），不回空集合。
+      回空集合等於把「探測失敗」偽裝成「沒有註解」，那是說謊不是回報。
+    """
+    if path.suffix != ".py":
+        return None
+    out = set()
+    try:
+        src = path.read_text(encoding="utf-8", errors="replace")
+        # ① 註解：tokenize
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.COMMENT:
+                out.update(range(tok.start[0], tok.end[0] + 1))
+        # ② docstring：ast。只排除「當敘述用」的字串（獨立成一句的字串
+        #    運算式），不排除「當值用」的字串。
+        #    這條界線是必要的：第一版我排除了全部 STRING token，結果把
+        #    `open("rust-latest.json")` 也當成註解跳過 —— 檔案路徑在真程式碼
+        #    裡永遠是字串常值，排掉等於把規則 A 整條關掉（46→5 不是去噪，
+        #    是關燈）。變異測試 M6 抓到的就是這個。
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) \
+               and isinstance(node.value.value, str):
+                out.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    except Exception as e:
+        ERRORS.append(f"解析失敗（此檔退回逐行判斷，可能有註解誤判）: {path} — {type(e).__name__}")
+        return None
+    return out
+
+
 def scan() -> list[dict]:
     hits = []
     for f in iter_files():
@@ -110,10 +158,14 @@ def scan() -> list[dict]:
         except Exception as e:
             ERRORS.append(f"讀檔失敗（此檔未稽查）: {f} — {type(e).__name__}")
             continue
+        nocode = nocode_lines(f)      # None = 判不了，退回逐行粗判
         for i, line in enumerate(text.splitlines(), 1):
             s = line.strip()
-            if s.startswith("#") or s.startswith("//"):
-                continue          # 註解不算接線
+            if nocode is not None:
+                if i in nocode:
+                    continue      # 註解/字串常值：在「談論」接線，不是在接線
+            elif s.startswith("#") or s.startswith("//"):
+                continue          # .sh/.md 等非 Python：只擋得住單行註解
             for rule, pat in RULES:
                 if pat.search(line):
                     hits.append({
