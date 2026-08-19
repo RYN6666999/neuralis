@@ -59,29 +59,22 @@ except Exception: print("情緒    讀不到 status.json")
 EOF
 
 # 記憶
-python3 - <<'EOF' 2>/dev/null
-from pathlib import Path
-md=Path("/Users/ryan/Developer/neuralis/ARIS.md")
-if not md.exists():
-    print("記憶    （還沒有 ARIS.md）")
-else:
-    t=md.read_text(encoding="utf-8"); size=len(t.encode())
-    # 三區切法跟 aris-digest.py 的 split_sections 一致：標頭位置排序切片
-    HEADS=[("== 規則（訓練成果，永不刪）==","rules"),
-           ("== 印象深刻（情感地標，永不刪）==","marks"),
-           ("== 近況（會壓縮）==","recent")]
-    found=sorted((t.find(h),h,k) for h,k in HEADS if h in t)
-    sec={"rules":"","marks":"","recent":""}
-    for i,(pos,h,k) in enumerate(found):
-        end=found[i+1][0] if i+1<len(found) else len(t)
-        sec[k]=t[pos+len(h):end].strip()
-    n=lambda s: len([l for l in s.splitlines() if l.strip()])
-    over = size>4096
-    bar=min(int(size/4096*20),20)
-    fill=('█'*bar)+('·'*(20-bar))
-    print(f"記憶    {size}/4096 [{fill}]{' ⚠️超標' if over else ''}"
-          f"  規則 {n(sec['rules'])} · 地標 {n(sec['marks'])} · 近況 {n(sec['recent'])}")
-EOF
+# 三區計數一律問 aris-digest.py --stats（唯一實作）。
+# 2026-08-19：這裡原本手抄一份切法。兩份實作必然漂移——標頭字串改了只改到
+# 一邊，狀態列就靜默顯示錯的數字。刪掉手抄，判準只留一個地方。
+/opt/homebrew/bin/python3 "$N/scripts/aris-digest.py" --stats 2>/dev/null \
+| /opt/homebrew/bin/python3 -c '
+import sys, json
+raw = sys.stdin.read().strip()
+if not raw:
+    print("記憶    ❌ 拿不到統計（aris-digest.py --stats 沒輸出）"); raise SystemExit
+d = json.loads(raw)
+bar = min(int(d["size"] / d["cap"] * 20), 20)
+over = " ⚠️超標" if d["size"] > d["cap"] else ""
+print("記憶    {}/{} [{}{}]{}  規則 {} · 地標 {} · 近況 {}".format(
+    d["size"], d["cap"], "█" * bar, "·" * (20 - bar), over,
+    d["rules"], d["marks"], d["recent"]))
+'
 
 # digest
 if [ -f "$WM" ]; then

@@ -402,7 +402,19 @@ def main() -> int:
     ap.add_argument("--recompress", action="store_true", help="只跑重壓")
     ap.add_argument("--incremental", action="store_true",
                     help="只處理水位之後的新對話（每 30 分鐘排程用）")
+    ap.add_argument("--stats", action="store_true",
+                    help="印三區行數 JSON 給 aris 用（唯一實作，不准手抄）")
     args = ap.parse_args()
+
+    if args.stats:
+        # 2026-08-19：aris 腳本原本手抄一份 split_sections，兩份實作必然漂移。
+        # 改成呼叫這裡——判準只有一個地方。
+        t = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
+        r, m, c = split_sections(t)
+        n = lambda s: len([l for l in s.splitlines() if l.strip()])
+        print(json.dumps({"size": len(t.encode()), "cap": CAP_BYTES,
+                          "rules": n(r), "marks": n(m), "recent": n(c)}))
+        return 0
 
     rotate_log()
 
