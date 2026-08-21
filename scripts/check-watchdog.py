@@ -5,6 +5,18 @@
 用 NEURALIS_WATCHDOG_START_CMD 把重啟指令換掉，跑的是真 watchdog.sh 流程。
 
 用法: python3 scripts/check-watchdog.py
+
+exit code（三態，見 scripts/_check_verdict.py）:
+    0 = 驗過且都好      1 = 驗過，有壞的      2 = 沒驗到（缺 lsof）
+
+執行時間：五段全跑約 26s（C 段假死偵測要等 probe timeout）。**不要用
+`timeout 25` 包它** —— 那會得到 exit=124 並被誤讀成腳本壞掉。量測窗口
+太短是量測方法的問題，不是這支腳本的缺口。
+
+2026-08-21 修：舊版缺 lsof 時 `print("SKIP: 需要 lsof"); return` → exit 0，
+五段一段都沒跑，對外訊號跟「五段全過」一樣。lsof 在 macOS 內建、Linux 常缺，
+所以在 CI 上這支就是靜默的全綠。改為 exit 2：沒驗到，但不算失敗。
+env `NEURALIS_WATCHDOG_SCRIPT` 可指定 watchdog.sh 路徑（測試植入壞依賴用）。
 """
 import json
 import os
@@ -16,8 +28,12 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _check_verdict import Verdict, guard   # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
-WATCHDOG = ROOT / "scripts" / "watchdog.sh"
+WATCHDOG = Path(os.environ.get("NEURALIS_WATCHDOG_SCRIPT",
+                               str(ROOT / "scripts" / "watchdog.sh")))
 AUDIT = ROOT / "watchdog-audit.jsonl"
 
 # 假 server：healthy 模式正常回 200；hang 模式收了連線就睡死（單執行緒 = event loop 凍結）
@@ -85,8 +101,19 @@ def lock_path(port: int) -> Path:
 
 
 def main():
+    v = Verdict("watchdog")
     if not shutil.which("lsof"):
-        print("SKIP: 需要 lsof"); return
+        # 舊版在這裡 return → exit 0，五段一段都沒跑卻報成功。
+        # C 段（假死偵測）本質上要問「誰佔著這個 port」，lsof 就是那個能力，
+        # 不是可有可無的裝飾 —— 沒有它就是沒驗到，不能當綠燈。
+        v.unknown("A-E. watchdog 五段",
+                  "缺 lsof —— 健康不動／死了重起／假死重起／crash-loop 停手／"
+                  "煞車持久 五段一段都沒跑")
+        v.finish()
+    if not WATCHDOG.is_file():
+        v.unknown("A-E. watchdog 五段", f"找不到 {WATCHDOG}")
+        v.finish()
+
     tmp = Path(tempfile.mkdtemp(prefix="watchdog-check-"))
     (tmp / "fake_server.py").write_text(FAKE_SERVER, encoding="utf-8")
     py = sys.executable
@@ -112,29 +139,34 @@ def main():
         spawned.append(p)
         return p
 
-    try:
-        # A. 健康 → 不重啟
-        port = free_port()
-        spawn("healthy", port)
+    def wait_healthy(port: int) -> None:
         for _ in range(20):
             if healthy(port):
-                break
+                return
             time.sleep(0.2)
+
+    # ── 五段。每段各自 guard：一段紅不再吞掉其餘段的結論 ──────────────
+    # 舊版是一個大 try，任一 assert 失敗就整支 traceback 退出，後面幾段
+    # 從沒被跑過 —— 「一段壞掉」與「後面四段沒驗」被壓成同一個輸出。
+
+    def seg_a():
+        """健康 → 不重啟。"""
+        port = free_port()
+        spawn("healthy", port)
+        wait_healthy(port)
         assert healthy(port), "假 server 沒起來"
         off = audit_offset()
         rc, out = run_watchdog(port, tmp, start_cmd("healthy", port), cycles=3)
         events = [e["event"] for e in audit_since(off)]
         assert rc == 0, f"健康時 watchdog 不該非零退出: {out}"
         assert "restart" not in events, f"健康時不該重啟: {events}"
-        print("A. 健康不動: OK — events =", events)
+        v.ok("A. 健康不動", f"events = {events}")
 
-        # B. 行程死了 → 殺不到東西，直接重起（OOM/crash 情境）
+    def seg_b():
+        """行程死了 → 殺不到東西，直接重起（OOM/crash 情境）。"""
         port = free_port()
         spawn("healthy", port)
-        for _ in range(20):
-            if healthy(port):
-                break
-            time.sleep(0.2)
+        wait_healthy(port)
         subprocess.run(["pkill", "-f", f"fake_server.py healthy {port}"], check=False)
         time.sleep(0.5)
         assert not healthy(port), "server 應該已經死了"
@@ -143,9 +175,10 @@ def main():
         events = [e["event"] for e in audit_since(off)]
         assert "restart" in events and "restart_ok" in events, f"應重啟成功: {events}\n{out}"
         assert healthy(port), "重啟後 server 應該健康"
-        print("B. 死了自動重起: OK — events =", events)
+        v.ok("B. 死了自動重起", f"events = {events}")
 
-        # C. 假死（行程活著但不回應）→ launchd KeepAlive 抓不到的那種，watchdog 要抓到
+    def seg_c():
+        """假死（行程活著但不回應）→ launchd KeepAlive 抓不到，watchdog 要抓到。"""
         port = free_port()
         spawn("hang", port)
         time.sleep(1)
@@ -157,9 +190,10 @@ def main():
         events = [e["event"] for e in audit_since(off)]
         assert "restart_ok" in events, f"假死應被殺掉重起: {events}\n{out}"
         assert healthy(port), "重啟後應恢復健康"
-        print("C. 假死殺掉重起: OK — events =", events)
+        v.ok("C. 假死殺掉重起", f"events = {events}")
 
-        # D. crash-loop：重啟指令根本起不來 → 撞上限就停手，不無限刷 + 落地 lock
+    def seg_d():
+        """crash-loop：重啟指令根本起不來 → 撞上限停手，不無限刷 + 落地 lock。"""
         port = free_port()
         off = audit_offset()
         rc, out = run_watchdog(port, tmp, "/usr/bin/true", cycles=20)
@@ -168,15 +202,13 @@ def main():
         assert "crashloop" in events, f"應有 crashloop 審計: {events}"
         assert events.count("restart") == 2, f"應停在 MAX_RESTARTS=2: {events}"
         assert lock_path(port).exists(), "crash-loop 應落地 lock 檔（launchd 煞車持久化）"
-        print("D. crash-loop 停手 + lock 落地: OK — events =", events)
+        v.ok("D. crash-loop 停手 + lock 落地", f"events = {events}")
 
-        # E. launchd 重啟 watchdog 不繞過煞車：lock 未過期 → 睡完冷卻期才恢復
+    def seg_e():
+        """launchd 重啟 watchdog 不繞過煞車：lock 未過期 → 睡完冷卻期才恢復。"""
         port_e = free_port()
         spawn("healthy", port_e)
-        for _ in range(20):
-            if healthy(port_e):
-                break
-            time.sleep(0.2)
+        wait_healthy(port_e)
         lock_path(port_e).write_text(str(int(time.time())), encoding="utf-8")
         off = audit_offset()
         t0 = time.time()
@@ -188,9 +220,13 @@ def main():
         assert elapsed >= 2.5, f"應睡完冷卻期（~3s），實際 {elapsed:.1f}s"
         assert not lock_path(port_e).exists(), "冷卻結束應清掉 lock"
         assert "restart" not in events, f"冷卻後 server 健康，不該重啟: {events}"
-        print(f"E. 煞車跨行程持久: OK — 睡了 {elapsed:.1f}s, events = {events}")
+        v.ok("E. 煞車跨行程持久", f"睡了 {elapsed:.1f}s, events = {events}")
 
-        print("ALL WATCHDOG CHECKS PASSED")
+    try:
+        for label, fn in (("A", seg_a), ("B", seg_b), ("C", seg_c),
+                          ("D", seg_d), ("E", seg_e)):
+            with guard(v, f"{label} 段"):
+                fn()
     finally:
         for f in ROOT.glob("watchdog-crashloop-*.lock"):
             f.unlink(missing_ok=True)
@@ -198,6 +234,8 @@ def main():
             p.kill()
         subprocess.run(["pkill", "-f", str(tmp / "fake_server.py")], check=False)
         shutil.rmtree(tmp, ignore_errors=True)
+
+    v.finish()
 
 
 if __name__ == "__main__":

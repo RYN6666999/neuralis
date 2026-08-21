@@ -14,6 +14,18 @@ check-rust-psi-backend.py — RustPsiBackend 相容性檢查腳本
   python3 scripts/check-rust-psi-backend.py
   python3 scripts/check-rust-psi-backend.py --verbose   # 詳細輸出
   python3 scripts/check-rust-psi-backend.py --daemon    # 含 daemon 存活測試
+
+exit code（三態，見 scripts/_check_verdict.py）:
+    0 = 驗過且都好          1 = 驗過，有壞的          2 = 沒驗到（daemon 不在）
+
+2026-08-21 修：舊版 daemon binary 不存在時，A 段 `raise SystemExit(0)` 之後的
+`check_daemon_lifecycle` 直接踩 FileNotFoundError，被 main() 的
+`except Exception` 吞成一行「腳本例外」，**後續所有檢查靜默消失**，摘要仍印
+「⚠️ 有 WARN（靜默降級）」exit 0。三個獨立失效疊在一起：
+  · 依賴不在 → 沒驗到，卻走 exit 0（跟「驗過而且好」同一個訊號）
+  · 腳本自己炸掉 → 也走 exit 0
+  · 段落沒有隔離 → 一段炸掉帶走其餘全部
+env `NEURALIS_PSI_DAEMON` 可指定 daemon 路徑（測試植入壞依賴用）。
 """
 from __future__ import annotations
 
@@ -29,7 +41,8 @@ from pathlib import Path
 # ── 常數 ──────────────────────────────────────────────────────────────
 
 REPO = Path(__file__).resolve().parents[1]
-DAEMON_BINARY = REPO / "rust" / "target" / "release" / "psi-daemon"
+DAEMON_BINARY = Path(os.environ.get(
+    "NEURALIS_PSI_DAEMON", str(REPO / "rust" / "target" / "release" / "psi-daemon")))
 LAAP_AGI_DIR = Path(os.environ.get("LAAP_AGI_DIR", str(REPO.parents[0] / "laap-AGI")))
 
 # aris_brain 讀者期望的 key 對照表：
@@ -95,23 +108,31 @@ EXPECTED_BIAS_KEYS = {"optimism", "risk_seeking", "attention_narrowing",
 NEED_NAMES = {"certainty", "competence", "autonomy", "relatedness", "growth"}
 
 # ── 結果收集 ──────────────────────────────────────────────────────────
+# 三態由 scripts/_check_verdict.Verdict 統一（PASS / FAIL / WARN / UNKNOWN）。
+# 舊版只有前三個，於是「依賴不在所以沒驗」只能寫成 WARN，而 WARN 走 exit 0。
 
-results: list[dict] = []
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _check_verdict import Verdict, guard   # noqa: E402
+
+V = Verdict("rust-psi-backend")
+results = V.results
 
 
 def ok(msg: str, detail: str = "") -> None:
-    results.append({"status": "PASS", "msg": msg, "detail": detail})
-    print(f"  ✅ {msg}" + (f" — {detail}" if detail else ""))
+    V.ok(msg, detail)
 
 
 def fail(msg: str, detail: str = "") -> None:
-    results.append({"status": "FAIL", "msg": msg, "detail": detail})
-    print(f"  ❌ {msg}" + (f" — {detail}" if detail else ""))
+    V.fail(msg, detail)
 
 
 def warn(msg: str, detail: str = "") -> None:
-    results.append({"status": "WARN", "msg": msg, "detail": detail})
-    print(f"  ⚠️  {msg}" + (f" — {detail}" if detail else ""))
+    V.warn(msg, detail)
+
+
+def unverified(msg: str, detail: str = "") -> None:
+    """依賴不在 → 這段沒驗到。不是綠燈，也不算失敗（見 _check_verdict）。"""
+    V.unknown(msg, detail)
 
 
 # ── 測試 A: daemon 可用性 ─────────────────────────────────────────────
@@ -134,13 +155,20 @@ def check_daemon_availability() -> None:
             else:
                 warn(f"daemon 回傳 {r.returncode}")
     else:
-        warn("daemon binary 不存在，後續 daemon 測試全部跳過")
-        raise SystemExit(0)
+        # 舊版這裡 `raise SystemExit(0)`：既讓「沒驗到」變成綠燈，也讓
+        # 後面的 lifecycle 段在 main() 裡裸炸。改為明示「沒驗到」並讓
+        # 呼叫端據此跳過需要 daemon 的段（而不是整支腳本靜默成功）。
+        unverified("A. daemon binary 不存在",
+                   f"{DAEMON_BINARY} —— daemon 相關段（A2 生命週期 / E4 FIFO "
+                   f"事件流 / F3 healthy 實測）這次都沒驗到")
 
 
 def check_daemon_lifecycle() -> None:
     """起 daemon → 確認 state 檔產生 → 寫事件 → 確認狀態變化 → 停。"""
     print("\n═══ A2. daemon 生命週期 ═══")
+    if not DAEMON_BINARY.is_file():
+        unverified("A2. daemon 生命週期", "binary 不在")
+        return
     with tempfile.TemporaryDirectory() as tmp:
         state_file = Path(tmp) / "state.json"
         fifo_file = Path(tmp) / "state.fifo"
@@ -161,7 +189,9 @@ def check_daemon_lifecycle() -> None:
             if tick > 0:
                 ok(f"daemon tick 推進 ({tick})")
             else:
-                warn(f"daemon tick 為 0")
+                # daemon 在場卻不推進 tick = 它壞了，不是「環境沒有」。
+                # 這條必須紅，否則植入一個什麼都不做的 daemon 也會全綠。
+                fail("daemon tick 停在 0", "daemon 在場但沒有推進 —— 它沒在跑")
 
             # 寫事件到 FIFO
             try:
@@ -170,14 +200,14 @@ def check_daemon_lifecycle() -> None:
                 os.close(fd)
                 ok("FIFO 寫入成功")
             except OSError as e:
-                warn(f"FIFO 寫入失敗: {e}")
+                fail(f"FIFO 寫入失敗", str(e))
 
             time.sleep(0.5)
             raw2 = json.loads(state_file.read_text())
             if raw2.get("tick", 0) > tick:
                 ok(f"daemon tick 持續推進 ({raw2['tick']})")
             else:
-                warn("daemon tick 未推進")
+                fail("daemon tick 未持續推進", f"停在 {tick}")
         finally:
             proc.terminate()
             try:
@@ -302,7 +332,9 @@ def check_remap_shape() -> None:
 def check_aris_brain_compatibility() -> None:
     print("\n═══ C. aris_brain 讀者相容性 ═══")
     if not LAAP_AGI_DIR.is_dir():
-        warn(f"LAAP_AGI_DIR 不存在: {LAAP_AGI_DIR}，跳過讀者掃描")
+        # 讀者掃描完全沒跑 —— 那是沒驗到，不是「有個小警告」。
+        unverified("C. aris_brain 讀者相容性",
+                   f"LAAP_AGI_DIR 不存在: {LAAP_AGI_DIR}，讀者掃描沒跑")
         return
 
     critical_missing = 0
@@ -397,7 +429,7 @@ def check_fallback() -> None:
     if exists:
         ok("daemon binary 可用")
     else:
-        warn("daemon binary 不存在，start() 會靜默跳過")
+        unverified("D. start() 真實啟動路徑", "daemon binary 不在，只驗到了無 daemon 的回退分支")
 
 
 # ── 測試 E: B2 FIFO 事件通道 ─────────────────────────────────────────
@@ -430,6 +462,9 @@ def check_fifo_channel() -> None:
         fail(f"no-daemon satisfy 例外: {e}")
 
     # E4: daemon 在時 FIFO 事件流
+    if not DAEMON_BINARY.is_file():
+        unverified("E4. FIFO 事件流（daemon 在場）", "binary 不在，事件真的有沒有被吃到沒驗到")
+        return
     with tempfile.TemporaryDirectory() as tmp:
         state_file = Path(tmp) / "state.json"
         fifo_file = Path(tmp) / "state.fifo"
@@ -453,7 +488,7 @@ def check_fifo_channel() -> None:
             if delta > 0.005:
                 ok(f"FIFO: process_input('我懂了') → competence +{delta:.4f}")
             else:
-                warn(f"FIFO: competence delta 過小 ({delta:.4f})")
+                fail("FIFO: process_input 沒有推動 competence", f"delta={delta:.4f}")
 
             # post_affective_event
             backend2.post_affective_event("task_success", 0.5)
@@ -463,7 +498,8 @@ def check_fifo_channel() -> None:
             if pleasure_delta > 0.01:
                 ok(f"FIFO: post_affective_event('task_success') → pleasure +{pleasure_delta:.4f}")
             else:
-                warn(f"FIFO: pleasure delta 過小 ({pleasure_delta:.4f})")
+                fail("FIFO: post_affective_event 沒有推動 pleasure",
+                     f"delta={pleasure_delta:.4f}")
 
             # satisfy
             backend2.satisfy("growth", 0.5, "test")
@@ -473,7 +509,7 @@ def check_fifo_channel() -> None:
             if growth_delta > 0.005:
                 ok(f"FIFO: satisfy('growth') → growth +{growth_delta:.4f}")
             else:
-                warn(f"FIFO: growth delta 過小 ({growth_delta:.4f})")
+                fail("FIFO: satisfy 沒有推動 growth", f"delta={growth_delta:.4f}")
 
         finally:
             proc.terminate()
@@ -523,14 +559,15 @@ def check_switch_regression() -> None:
             if backend2.healthy():
                 ok("healthy() daemon 在線 → True")
             else:
-                warn("healthy() daemon 在線但回 False")
+                fail("healthy() daemon 在線卻回 False",
+                     "daemon 在場的健康判定壞了")
             proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
     else:
-        warn("daemon binary 不存在，跳過 healthy() 實測")
+        unverified("F3. healthy() 實測", "daemon binary 不在")
 
 
 # ── 主程式 ────────────────────────────────────────────────────────────
@@ -546,45 +583,31 @@ def main() -> None:
     print(f"  verbose: {verbose}")
     print()
 
-    try:
-        check_remap_shape()
-        check_aris_brain_compatibility()
-        check_fallback()
-        check_fifo_channel()
-        check_switch_regression()
-        if test_daemon:
-            check_daemon_availability()
-            check_daemon_lifecycle()
-    except SystemExit:
-        pass
-    except Exception as e:
-        print(f"\n❌ 腳本例外: {e}")
-        if verbose:
-            traceback.print_exc()
+    # 段落隔離：一段炸掉只讓那段紅，不再帶走其餘全部（舊版是一個大 try，
+    # A2 的 FileNotFoundError 會讓 B/C/D/E/F 一起消失，而且仍 exit 0）。
+    sections = [
+        ("B. remap 形狀", check_remap_shape),
+        ("C. aris_brain 讀者", check_aris_brain_compatibility),
+        ("D. 回退行為", check_fallback),
+        ("E. FIFO 事件通道", check_fifo_channel),
+        ("F. 開關回歸", check_switch_regression),
+    ]
+    if test_daemon:
+        sections += [("A. daemon 可用性", check_daemon_availability),
+                     ("A2. daemon 生命週期", check_daemon_lifecycle)]
+
+    for label, fn in sections:
+        with guard(V, label):
+            fn()
 
     # ── 總結 ──
-    print("\n" + "═" * 50)
-    passed = sum(1 for r in results if r["status"] == "PASS")
-    failed = sum(1 for r in results if r["status"] == "FAIL")
-    warned = sum(1 for r in results if r["status"] == "WARN")
-    total = len(results)
-    print(f"結果: {passed}/{total} PASS, {failed} FAIL, {warned} WARN")
-
     if verbose:
         print("\n詳細:")
         for r in results:
-            icon = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️"}[r["status"]]
+            icon = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️ ", "UNKNOWN": "⚪"}[r["status"]]
             print(f"  {icon} [{r['status']}] {r['msg']}")
 
-    if failed > 0:
-        print("\n❌ 有 FAIL 項目，需處理")
-        sys.exit(1)
-    elif warned > 0:
-        print("\n⚠️  有 WARN 項目（靜默降級），建議檢視")
-        sys.exit(0)
-    else:
-        print("\n✅ 全部通過")
-        sys.exit(0)
+    V.finish()
 
 
 if __name__ == "__main__":
