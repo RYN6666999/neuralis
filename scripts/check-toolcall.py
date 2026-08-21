@@ -7,6 +7,14 @@ D. streaming：SSE delta 累加出完整 tool_call
 E. 迴歸：無 tools 純聊天照常
 用法: PYTHONPATH=.:../laap-AGI ../laapenv/bin/python scripts/check-toolcall.py
 （B-E 需要 :11546 活著；NEURALIS_TOOLCHECK_BASE 可改目標）
+
+exit code（三態，見 scripts/_check_verdict.py）:
+    0 = 驗過且都好      1 = 驗過，有壞的      2 = 沒驗到（:11546 不在）
+
+2026-08-21 修：舊版 `:11546` 不在線時 `sys.exit(1)` —— **服務沒開被報成失敗**。
+這是 guard.yml 明文警告的假紅（「假紅比沒有更糟 —— 人會學會無視紅燈」），
+方向跟綠燈說謊相反但後果同類：紅燈失去意義。服務不在 = 沒驗到 = exit 2。
+A/F 段是純函式、不需 server，永遠會跑。
 """
 import json
 import os
@@ -14,6 +22,11 @@ import sys
 import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _check_verdict import Verdict, guard   # noqa: E402
+
+V = Verdict("toolcall")
 
 BASE = os.environ.get("NEURALIS_TOOLCHECK_BASE", "http://localhost:11546")
 
@@ -56,7 +69,6 @@ def seg_a():
     assert _is_harness_noise('以下是会话 "session_xxx" 的对话内容，请总结'), \
         "scream 簿記請求要被擋"
     assert not _is_harness_noise("嗨，今天感覺怎麼樣？")
-    print("A. user-turn 護欄 + content 安全抽取 + 簿記過濾: OK")
 
 
 def seg_f():
@@ -90,7 +102,7 @@ def seg_f():
         st.get_psi_core = orig
     assert ("task_failure", 0.5) in events and ("task_success", 0.3) in events, events
     assert len(events) == 2, f"純聊天不該產生事件: {events}"
-    print(f"F. 工具結果→情緒事件: OK ({events})")
+    return events
 
 
 def seg_b():
@@ -109,7 +121,6 @@ def seg_b():
     assert "city" in args, f"arguments 缺 city: {args}"
     assert fin == "tool_calls", f"finish_reason={fin}"
     assert resp.get("engine") == "psi-llm-tools"
-    print(f"B. 非 streaming tool call: OK (city={args['city']}, finish={fin})")
     return tcs[0]
 
 
@@ -130,7 +141,6 @@ def seg_c(tc):
     assert "31" in msg["content"] or "晴" in msg["content"], \
         f"最終回應沒用到工具結果: {msg['content'][:120]}"
     assert fin == "stop", f"finish_reason={fin}"
-    print(f"C. 工具結果往返: OK ({msg['content'][:60]}...)")
 
 
 def seg_d():
@@ -156,7 +166,6 @@ def seg_d():
     parsed = json.loads(args)
     assert "city" in parsed, f"SSE 累加 arguments 壞掉: {args!r}"
     assert fin == "tool_calls", f"SSE finish_reason={fin}"
-    print(f"D. streaming tool call: OK (city={parsed['city']})")
 
 
 def seg_e():
@@ -167,22 +176,47 @@ def seg_e():
     msg = resp["choices"][0]["message"]
     assert msg.get("content"), "純聊天壞了"
     assert not msg.get("tool_calls")
-    print(f"E. 純聊天迴歸: OK (engine={resp.get('engine')})")
 
 
 def main():
-    seg_a()
-    seg_f()
+    # A/F 純函式，不需 server —— 永遠跑。
+    with guard(V, "A. user-turn 護欄"):
+        seg_a()
+        V.ok("A. user-turn 護欄 + content 安全抽取 + 簿記過濾")
+    with guard(V, "F. 工具結果→情緒事件"):
+        events = seg_f()
+        V.ok("F. 工具結果→情緒事件", str(events))
+
     try:
         urllib.request.urlopen(f"{BASE}/health", timeout=5)
     except Exception as e:
-        print(f"⚠️ {BASE} 不在線（{e}），B-E 跳過 — 起 server 後重跑")
-        sys.exit(1)
-    tc = seg_b()
-    seg_c(tc)
-    seg_d()
-    seg_e()
-    print("\n✅ check-toolcall 全過 — scream agent 迴圈的協議底座就緒")
+        # 舊版這裡 sys.exit(1)：服務沒開 → 報失敗 → 假紅。
+        # 服務不在是「沒驗到」，不是「壞了」。兩者的正確行動不同：
+        # 一個是「去把 server 起來再驗」，一個是「去修協議」。
+        V.unknown("B-E. tool-calling 協議往返",
+                  f"{BASE} 不在線（{e}）—— 非 streaming / 工具往返 / "
+                  f"streaming / 純聊天迴歸 四段都沒驗到。起 server 後重跑")
+        V.finish()
+
+    tc = None
+    with guard(V, "B. 非 streaming tool_calls"):
+        tc = seg_b()
+        V.ok("B. 非 streaming tool_calls")
+    if tc is not None:
+        with guard(V, "C. 工具結果往返"):
+            seg_c(tc)
+            V.ok("C. 工具結果往返")
+    else:
+        # B 失敗 → C 的前置不存在。這是「沒驗到」，但 B 已經記了 fail，
+        # 所以整支仍會 exit 1（FAIL 優先於 UNKNOWN）。
+        V.unknown("C. 工具結果往返", "B 段沒拿到 tool_calls，無前置可用")
+    with guard(V, "D. streaming tool call"):
+        seg_d()
+        V.ok("D. streaming tool call")
+    with guard(V, "E. 純聊天迴歸"):
+        seg_e()
+        V.ok("E. 純聊天迴歸")
+    V.finish()
 
 
 if __name__ == "__main__":

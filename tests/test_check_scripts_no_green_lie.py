@@ -29,7 +29,9 @@
 """
 from __future__ import annotations
 
+import ast
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -236,6 +238,11 @@ def test_rust_psi_detects_a_really_broken_daemon(tmp_path, monkeypatch):
 # 3. check-stream.py
 # ══════════════════════════════════════════════════════════════════
 
+def _gbrain_available() -> bool:
+    """gbrain binary 在不在。與 `check-*.py` 判斷可用性的方式一致。"""
+    return shutil.which("gbrain") is not None
+
+
 def _port_11546_alive() -> bool:
     import socket
     try:
@@ -322,3 +329,282 @@ def test_watchdog_detects_a_really_broken_watchdog(tmp_path):
     out = p.stdout + p.stderr
     assert p.returncode == EXIT_FAIL, (
         f"watchdog 換成 no-op，腳本卻沒報紅（exit {p.returncode}）：\n{out[-2500:]}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 5. 反方向的病：假紅（依賴不在卻報 FAIL）
+# ══════════════════════════════════════════════════════════════════
+# 2026-08-21：掃完 27 支後發現的第二種病，方向跟綠燈說謊相反但後果同類。
+# `guard.yml` 原文：「假紅比沒有更糟 —— 人會學會無視紅燈」。
+#   · check-toolcall.py:180      :11546 不在線 → sys.exit(1)
+#   · check-psi-response.py      urlopen 例外一律 errors += 1 → exit 1
+#   · check-consolidation.py     module 層 assert client → AssertionError + exit 1
+#   · check-emotion-recall.py    同上
+# 服務沒開 / 後端沒裝，不是「協議壞了」。兩者的正確行動完全不同。
+
+# 每支的依賴探針，以及「依賴在場時**可達的** exit 集合」。
+#
+# 2026-08-21 修（Ryan 在他機器上抓到，p3 的缺陷）：舊版這兩條測試沒有 skip
+# guard，硬斷言 `returncode == EXIT_UNVERIFIED`。在有 gbrain 的機器上
+# `check-emotion-recall.py` **真的驗過了**（exit 0、A-D 全 PASS、
+# `CHECK-VERDICT: ... unknown=0`），測試卻要求它「必須沒驗到」。
+#
+# 為什麼沙盒測不到：沙盒永遠缺依賴 → `exit 2` 那條路永遠成立，`exit 0` 那條
+# 路一次都沒被執行過。**這正是我們整條線在抓的「只有依賴部分存在才顯形」，
+# 這次的受害者是我們自己的測試。** p2 的同類測試都有 skipif，p3 追加時漏了。
+#
+# `reachable_with_dep` 逐支給，不套同一條斷言 —— 否則會在修掉一個假斷言的
+# 同時寫進另一個假斷言：
+#   · check-toolcall      B-E 需要 :11546，齊全時 A-F 全可驗 → 0 或 1
+#   · check-psi-response  D 段（off 降級）要驗的是 **server 端** 行為，需以 off
+#                         重啟 server，光靠本 process 的環境變數驗不到 →
+#                         **即使 :11546 活著也永遠是 unknown** → 只可能 2
+#   · check-consolidation 齊全時走真驗證路徑 → 0 或 1
+#                         （Ryan 機器上實測 exit 1 是**真陽性**：`:98`
+#                          `assert stats["promoted"] >= 2` 實際 promoted=0，
+#                          A/B/C 三段全跑通。那是產品層問題，不是假紅 ——
+#                          所以這裡刻意允許 1，不讓它變綠。）
+#   · check-emotion-recall 齊全時走真驗證路徑 → 0 或 1
+FALSE_RED_SCRIPTS = [
+    # (腳本, timeout, 依賴是否在場, 依賴在場時可達的 exit)
+    ("check-toolcall.py", 60, _port_11546_alive, {EXIT_OK, EXIT_FAIL}),
+    ("check-psi-response.py", 60, _port_11546_alive, {EXIT_UNVERIFIED}),
+    ("check-consolidation.py", 60, _gbrain_available, {EXIT_OK, EXIT_FAIL}),
+    ("check-emotion-recall.py", 60, _gbrain_available, {EXIT_OK, EXIT_FAIL}),
+]
+
+FALSE_RED_IDS = [f[0] for f in FALSE_RED_SCRIPTS]
+
+
+@pytest.mark.parametrize("name,timeout,dep_present,_reachable",
+                         FALSE_RED_SCRIPTS, ids=FALSE_RED_IDS)
+def test_missing_dependency_is_not_reported_as_failure(
+        name, timeout, dep_present, _reachable):
+    """依賴**不在**時必須是 exit 2（沒驗到），不是 exit 1（失敗）。
+
+    這條驗的是「依賴不在」的行為，所以依賴在場時要跳過 —— 語義同 p2 的
+    `test_memory_gbrain_no_binary_is_unverified_not_green`。
+    """
+    if dep_present():
+        pytest.skip(f"{name} 的依賴在場 —— 這條驗的是「依賴不在」的行為，"
+                    f"在場時該走 test_dependency_present_yields_real_verdict")
+    p = run_script(name, timeout=timeout)
+    out = p.stdout + p.stderr
+    assert p.returncode != EXIT_FAIL, (
+        f"{name} 把「依賴不在」報成失敗（exit 1）—— 假紅：\n{out[-2000:]}")
+    assert p.returncode == EXIT_UNVERIFIED, (
+        f"{name} 應 exit 2（沒驗到），得到 {p.returncode}：\n{out[-2000:]}")
+    assert_not_green(out, name)
+
+
+@pytest.mark.parametrize("name,timeout,dep_present,_reachable",
+                         FALSE_RED_SCRIPTS, ids=FALSE_RED_IDS)
+def test_missing_dependency_does_not_traceback(
+        name, timeout, dep_present, _reachable):
+    """依賴不在不該丟 traceback。
+
+    `assert client is not None` 的 AssertionError 會印出堆疊，讓「環境沒裝」
+    看起來像「腳本自己壞了」—— 讀的人無法區分這兩件事。
+    """
+    if dep_present():
+        pytest.skip(f"{name} 的依賴在場 —— 這條驗的是「依賴不在」的行為")
+    p = run_script(name, timeout=timeout)
+    out = p.stdout + p.stderr
+    assert "Traceback (most recent call last)" not in out, (
+        f"{name} 因依賴不在而裸炸：\n{out[-1500:]}")
+
+
+# ── 正面測試：依賴在場時必須給真結論，不准還說「沒驗到」 ──────────────
+# 只加 skip guard 是不夠的：那只是把測不到的地方變成沉默，而沉默正是這整條
+# 線在修的病（「沒驗到」被講成別的東西）。依賴齊全時，腳本必須真的去驗。
+#
+# **這條只有在依賴齊全的機器上才會執行** —— 沙盒永遠 skip。
+# 所以它在沙盒的綠燈不代表任何事，只有 Ryan 機器上的結果才算證據。
+
+@pytest.mark.parametrize("name,timeout,dep_present,reachable",
+                         FALSE_RED_SCRIPTS, ids=FALSE_RED_IDS)
+def test_dependency_present_yields_real_verdict(
+        name, timeout, dep_present, reachable):
+    """依賴在場 → exit code 必須落在該支**可達**的集合裡。
+
+    抓兩種病：
+      1. 依賴明明在，卻還回 exit 2（該驗卻沒驗 —— 反方向的說謊）
+      2. 腳本永遠回同一個值（依賴在不在都一樣，等於沒在看依賴）
+
+    `reachable` 逐支不同，理由見 FALSE_RED_SCRIPTS 的註解。特別是
+    `check-psi-response.py`：它的 D 段需要用 off **重啟 server** 才驗得到，
+    所以 `{2}` 是它的正確答案，不是缺陷。
+    """
+    if not dep_present():
+        pytest.skip(f"{name} 的依賴不在場（沙盒常態）—— "
+                    f"這條只有依賴齊全的機器驗得到")
+    p = run_script(name, timeout=timeout)
+    out = p.stdout + p.stderr
+    assert p.returncode in reachable, (
+        f"{name} 依賴在場，exit 應落在 {sorted(reachable)}，"
+        f"得到 {p.returncode}：\n{out[-2500:]}")
+    if EXIT_UNVERIFIED not in reachable:
+        assert p.returncode != EXIT_UNVERIFIED, (
+            f"{name} 依賴在場卻回「沒驗到」—— 該驗的時候沒去驗")
+
+
+@pytest.mark.parametrize("name,timeout,dep_present,reachable",
+                         FALSE_RED_SCRIPTS, ids=FALSE_RED_IDS)
+def test_dependency_present_marker_agrees_with_exit(
+        name, timeout, dep_present, reachable):
+    """依賴在場時，若腳本走完 Verdict 路徑，宣告行必須跟真實 exit 一致。
+
+    標記行 ↔ 現實的綁定是整個三態設計的信任基礎。沙盒只驗得到「依賴不在」
+    那半邊，這條補「依賴在場」那半邊。
+
+    **已知缺口（本輪刻意不修）**：這四支的段內斷言用的是裸 `assert`，沒有包在
+    `guard()` 裡。所以依賴在場而斷言失敗時，會是 traceback + exit 1 且
+    **沒有標記行**。`check-consolidation.py` 在 Ryan 機器上就是這條路徑
+    （`:98` promoted=0 的真陽性）。
+
+    這條測試因此只在「沒有裸炸」時才要求標記行 —— 否則我會在修一個
+    「沙盒驗不到的假斷言」的同時，寫進另一個同型的假斷言。裸炸缺口本身
+    列為獨立發現，見 P3B 報告，不在本輪範圍（PI 指定不要碰
+    `check-consolidation.py`，讓它的真陽性保持紅）。
+    """
+    if not dep_present():
+        pytest.skip(f"{name} 的依賴不在場 —— 這條只有依賴齊全的機器驗得到")
+    p = run_script(name, timeout=timeout)
+    out = p.stdout + p.stderr
+    if "Traceback (most recent call last)" in out:
+        pytest.skip(f"{name} 走了裸 assert 路徑（已知缺口，見 docstring）—— "
+                    f"該路徑不經 Verdict，沒有標記行")
+    m = re.search(r"^CHECK-VERDICT: \S+ exit=(\d+) pass=(\d+) fail=(\d+) "
+                  r"warn=(\d+) unknown=(\d+)$", out, re.M)
+    assert m, f"{name} 走完 Verdict 卻沒有標記行：\n{out[-1500:]}"
+    declared, fail_n, unknown_n = int(m.group(1)), int(m.group(3)), int(m.group(5))
+    assert declared == p.returncode, (
+        f"{name} 標記行說 exit={declared}，實際 {p.returncode}")
+    expect = EXIT_FAIL if fail_n else (
+        EXIT_UNVERIFIED if unknown_n else EXIT_OK)
+    assert p.returncode == expect, (
+        f"{name} counts=(fail={fail_n}, unknown={unknown_n}) 應 exit {expect}，"
+        f"實際 {p.returncode}")
+
+
+# ── 沙盒可驗：偵測力沒有因為加了 skip guard 而消失 ──────────────────
+# 加 skip guard 最廉價的假解是「讓測試在哪裡都跳過」—— 那會讓假紅偵測
+# 靜靜消失，而測試全綠沒人看得出來。這條在沙盒（依賴全缺）實跑，
+# 確認假紅偵測仍然活著。
+
+def test_false_red_detection_still_active_without_dependencies():
+    """沙盒（依賴全缺）中，假紅偵測必須真的執行，不是全部 skip 掉。"""
+    active = [name for name, _t, dep, _r in FALSE_RED_SCRIPTS if not dep()]
+    assert active, (
+        "四支的依賴在這台機器上全部在場 —— 那麼假紅偵測這輪一項都沒跑。"
+        "在沙盒（依賴全缺）看到這個訊息，代表 skip 條件寫反了")
+    # 而且它們現在真的都回 exit 2（不是 exit 1）
+    for name in active:
+        p = run_script(name, timeout=90)
+        assert p.returncode == EXIT_UNVERIFIED, (
+            f"{name} 在依賴缺失時應 exit 2，得到 {p.returncode}")
+
+
+def test_planted_false_red_is_caught(tmp_path):
+    """**偵測力**：植入一支「依賴不在就 exit 1」的假紅腳本，斷言判準抓得到。
+
+    這條證明 skip guard 沒有把偵測力一起關掉：判準對真的假紅仍然說不。
+    """
+    liar = tmp_path / "check-planted-false-red.py"
+    liar.write_text(
+        "#!/usr/bin/env python3\n"
+        '"""植入用：探 HTTP，不在就報失敗（假紅）。"""\n'
+        "import sys, urllib.request\n"
+        "try:\n"
+        "    urllib.request.urlopen('http://localhost:1/health', timeout=1)\n"
+        "except Exception as e:\n"
+        "    print(f'FAIL: 服務不在 {e}')\n"
+        "    sys.exit(1)\n"
+        "sys.exit(0)\n", encoding="utf-8")
+    import os as _os
+    env = {**_os.environ, "PYTHONPATH": str(ROOT), "NEURALIS_CONSTITUTION": "off"}
+    p = subprocess.run([sys.executable, str(liar)], cwd=ROOT, env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == EXIT_FAIL, "植入的假紅腳本沒表現出假紅行為"
+    assert p.returncode != EXIT_UNVERIFIED, (
+        "植入的腳本回了 exit 2 —— 那它就不是假紅，這條測試失去意義")
+
+
+# ══════════════════════════════════════════════════════════════════
+# 6. 真陽性不得長成 traceback（p3c）
+# ══════════════════════════════════════════════════════════════════
+# Ryan 機器上 `check-consolidation.py` 的 `promoted=0` 是**真陽性**，但它
+# 長成 traceback + exit 1 + **沒有標記行** —— 段內裸 `assert` 繞過 Verdict。
+# 那讓「產品有問題」看起來像「工具自己壞了」，跟這條線一路在修的病同型
+# （把一種狀態偽裝成另一種），只是換到斷言失敗這條路上。
+#
+# 真問題應該長成 `❌ FAIL` + 標記行 + exit 1。
+#
+# 範圍：只有這 2 支需要修。`check-toolcall.py` 的裸 assert 在**被 guard 包住
+# 的 seg 函式裡**（實測植入 assert False 得到 `exit=1 fail=1` + 標記行），
+# `check-psi-response.py` 每段已被 try/except 包住 —— 動它們就是為了統一而
+# 改已經正確的程式碼。
+
+GUARDED_ASSERT_SCRIPTS = [
+    ("check-consolidation.py", _gbrain_available),
+    ("check-emotion-recall.py", _gbrain_available),
+]
+GUARDED_IDS = [n for n, _ in GUARDED_ASSERT_SCRIPTS]
+
+
+@pytest.mark.parametrize("name,dep_present", GUARDED_ASSERT_SCRIPTS,
+                         ids=GUARDED_IDS)
+def test_section_failures_go_through_verdict(name, dep_present):
+    """依賴在場且有段落失敗時：不得 traceback，且必須有標記行 + fail>=1。
+
+    **這條只有依賴齊全的機器（或假依賴）才會執行。** 它守的是「真陽性的
+    呈現方式」，不是「有沒有真陽性」—— 所以 exit 1 是允許的結果之一。
+    """
+    if not dep_present():
+        pytest.skip(f"{name} 的依賴不在場 —— 這條只有依賴齊全的機器驗得到")
+    p = run_script(name, timeout=90)
+    out = p.stdout + p.stderr
+    assert "Traceback (most recent call last)" not in out, (
+        f"{name} 的段落失敗仍在裸炸 —— 真陽性被偽裝成「工具壞了」：\n{out[-2000:]}")
+    m = re.search(r"^CHECK-VERDICT: \S+ exit=(\d+) pass=\d+ fail=(\d+) ",
+                  out, re.M)
+    assert m, f"{name} 沒有標記行 —— 該路徑繞過了 Verdict：\n{out[-2000:]}"
+    if p.returncode == EXIT_FAIL:
+        assert int(m.group(2)) >= 1, (
+            f"{name} exit 1 但標記行說 fail=0 —— 宣告與現實不符")
+
+
+@pytest.mark.parametrize("name,dep_present", GUARDED_ASSERT_SCRIPTS,
+                         ids=GUARDED_IDS)
+def test_guard_wraps_every_section(name, dep_present):
+    """結構守衛：這 2 支必須用 `guard()` 包段落，且不得留 `raise SystemExit`。
+
+    **沙盒可驗**（純靜態，不需依賴）—— 所以它是 p3c 在沙盒唯一的硬證據。
+    `raise SystemExit` 會被 `guard()` 放行（那是 finish() 的正常出口），
+    拿它當失敗訊號等於繞過三態判定。
+    """
+    src = (SCRIPTS / name).read_text(encoding="utf-8")
+    assert "with guard(" in src, (
+        f"{name} 沒有用 guard() 包段落 —— 段內斷言失敗會繞過 Verdict")
+    tree = ast.parse(src)
+    bad = [n.lineno for n in ast.walk(tree)
+           if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+           and isinstance(n.exc.func, ast.Name) and n.exc.func.id == "SystemExit"]
+    assert not bad, (
+        f"{name} 用 raise SystemExit 當失敗訊號（行 {bad}）—— "
+        f"guard() 會放行它，等於繞過三態判定")
+
+
+def test_assertion_judgements_unchanged_by_p3c():
+    """p3c 只改呈現方式，不改任何斷言的判定內容。
+
+    釘住 `promoted >= 2` 這條 —— 它是 Ryan 機器上的真陽性，**必須繼續失敗**。
+    p3c 若把它放寬（例如改成 >= 0）就會讓真問題變綠，那是最糟的假解。
+    """
+    src = (SCRIPTS / "check-consolidation.py").read_text(encoding="utf-8")
+    assert 'assert stats["promoted"] >= 2' in src, (
+        "`promoted >= 2` 被改動或移除 —— 那會讓 Ryan 機器上的真陽性變綠")
+    assert 'assert stats["merged"] >= 2' in src, "`merged >= 2` 被改動或移除"
+    emo = (SCRIPTS / "check-emotion-recall.py").read_text(encoding="utf-8")
+    assert 'assert _emotion_intensity_for(client, HI) == 0.9' in emo, (
+        "emotion 讀取斷言被改動")

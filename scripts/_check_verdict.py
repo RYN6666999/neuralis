@@ -54,6 +54,15 @@ EXIT_UNVERIFIED = 2
 
 _ICON = {PASS: "✅", FAIL: "❌", WARN: "⚠️ ", UNKNOWN: "⚪"}
 
+# 機器可讀的結論標記。**為什麼需要它**：外部工具（verify-neuralis.sh、CI）
+# 原本靠 grep stdout 的字串猜「這支是不是說謊」，而那必然偽陽 ——
+# 2026-08-21 實測：`check-trust-presence.py` 的通過訊息「舊增益碼**不存在**」
+# 撞上 `grep -qiE 'SKIP|不存在|not found'`，一支 13 項全過、零外部依賴的
+# 腳本被判成綠燈說謊。「壞東西已被移除」的證明訊息天生含這些詞。
+#
+# 猜測換成宣告：腳本自己輸出一行結構化結論，工具讀那一行，不讀散文。
+VERDICT_MARKER = "CHECK-VERDICT:"
+
 
 class Verdict:
     """收集各段結論，最後算出一個誠實的 exit code。"""
@@ -115,7 +124,16 @@ class Verdict:
             body = f"✅ {self.name}: ALL CHECKS PASSED（有 {c[WARN]} 項降級警告）"
         else:
             body = f"✅ {self.name}: ALL CHECKS PASSED"
-        return f"\n{'=' * 56}\n{head}\n{body}\n"
+        return f"\n{'=' * 56}\n{head}\n{body}\n{self.marker()}\n"
+
+    def marker(self) -> str:
+        """機器可讀的一行結論。外部工具讀這行，不要 grep 散文（見 VERDICT_MARKER）。
+
+        格式：`CHECK-VERDICT: <name> exit=<n> pass=<n> fail=<n> warn=<n> unknown=<n>`
+        """
+        c = self.counts()
+        return (f"{VERDICT_MARKER} {self.name} exit={self.exit_code()} "
+                f"pass={c[PASS]} fail={c[FAIL]} warn={c[WARN]} unknown={c[UNKNOWN]}")
 
     def finish(self) -> None:
         """印摘要並用正確的 code 退出。"""
