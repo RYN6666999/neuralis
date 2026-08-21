@@ -93,10 +93,26 @@ def check_npm(c: dict) -> dict:
     return out
 
 
+def _remote_gone(repo: str) -> bool:
+    """遠端 repo 是否已不存在（404）。改名 / 轉私有 / 刪除都會是 404。
+
+    2026-08-20：`lorryjovens-hub/laap-AGI` 就是這樣消失的，而本檔當時把它印成
+    「✅ 全部同步」exit 0 —— 偵測器在它存在的全部理由所對應的最壞情況下印綠燈。
+    """
+    r = _get(f"https://api.github.com/repos/{repo}")
+    return "_error" in r and "404" in str(r["_error"])
+
+
 def check_git(c: dict) -> dict:
     out = {"id": c["id"], "label": c["label"], "repo": c["repo"], "owner": c["owner"]}
     local_dir = Path(c["local"])
     if not (local_dir / ".git").exists():
+        # 本地沒 checkout **不代表**不用查遠端。舊版在這裡就早退，
+        # 所以在 CI／新機器上永遠不會發現上游整個消失了。
+        if _remote_gone(c["repo"]):
+            return {**out, "status": "gone",
+                    "detail": f"上游 repo 不存在（404）—— 改名、轉私有或已刪除。"
+                              f"本地也沒有 {local_dir}，沒有任何可重現的基準"}
         return {**out, "status": "unknown", "detail": f"{local_dir} 不是 git repo"}
 
     def git(*a):
@@ -110,6 +126,12 @@ def check_git(c: dict) -> dict:
 
     up = _get(f"https://api.github.com/repos/{c['repo']}/commits/{c['branch']}")
     if "_error" in up:
+        # 404 = 東西不見了（要叫）；其他錯誤 = 網路／限流（不該假紅）。
+        # 這兩件事的正確行動完全不同，不能共用一個 status。
+        if "404" in str(up["_error"]) and _remote_gone(c["repo"]):
+            return {**out, "local_sha": sha[:7], "branch": branch, "status": "gone",
+                    "detail": f"上游 repo 不存在（404）—— 改名、轉私有或已刪除。"
+                              f"本地 {branch}@{sha[:7]} 成了唯一的來源"}
         return {**out, "local_sha": sha[:7], "branch": branch,
                 "status": "unknown", "detail": up["_error"]}
 
@@ -132,7 +154,12 @@ def check_git(c: dict) -> dict:
     return out
 
 
-MARK = {"ok": "🟢", "drift": "🟡", "stale": "🔴", "unknown": "⚪"}
+MARK = {"ok": "🟢", "drift": "🟡", "stale": "🔴", "gone": "💀", "unknown": "⚪"}
+# 會讓 exit != 0 的狀態。`gone` 必須在裡面 —— 上游整個消失是最壞情況，
+# 偵測器在最壞情況下不出聲就沒有存在意義。`unknown` 刻意不在裡面：
+# 那涵蓋離線與 API 限流，算失敗會製造假紅，而 guard.yml 已經寫過
+# 「假紅比沒有更糟 —— 人會學會無視紅燈」。
+FAIL_STATUS = ("drift", "stale", "gone")
 
 
 def main() -> int:
@@ -142,7 +169,7 @@ def main() -> int:
     if "--json" in args:
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
-        drifted = [r for r in results if r["status"] in ("drift", "stale")]
+        drifted = [r for r in results if r["status"] in FAIL_STATUS]
         if "--quiet" in args and not drifted:
             return 0
         print("\n" + "=" * 56)
@@ -156,15 +183,35 @@ def main() -> int:
                 print("   ⚠️  本地有未提交變更")
             if r.get("note"):
                 print(f"   💬 {r['note']}")
-        if drifted:
+        gone = [r for r in results if r["status"] == "gone"]
+        if gone:
+            print(f"\n💀 {len(gone)} 個上游已不存在（404）。")
+            print("   這不是漂移，是基準消失：你沒有可重現的上游可以疊。")
+            for r in gone:
+                print(f"   · {r['repo']} —— README / ROADMAP / topology.yaml 的宣稱都指向這裡")
+        if drifted and not gone:
             print(f"\n⚠️  {len(drifted)} 個上游已漂移。")
             print("   漂移不等於壞掉，但代表：上游修過的 bug 你沒拿到，")
             print("   而且你們的行為差異會越拉越大。")
-        else:
-            print("\n✅ 全部同步")
+        elif not drifted:
+            unknown = [r for r in results if r["status"] == "unknown"]
+            if unknown:
+                print(f"\n⚪ {len(unknown)} 個查不到（離線／限流／本地無 checkout）—— 不是綠燈，是沒驗到。")
+            else:
+                print("\n✅ 全部同步")
         print()
 
-    return 1 if any(r["status"] in ("drift", "stale") for r in results) else 0
+    # 三態 exit（docstring 第 18 行本來就這樣承諾，但實作一直只有 0/1）：
+    #   1 = 有漂移／上游消失 —— 要行動
+    #   2 = 查不到（離線／限流／本地無 checkout）—— **不是綠燈，也不是失敗**
+    #   0 = 真的驗過且同步
+    # 為什麼 unknown 需要自己的 code 而不是併進 1：併進去就是假紅，而
+    # guard.yml 寫過「假紅比沒有更糟 —— 人會學會無視紅燈」。但併進 0 是
+    # 把「沒驗到」講成「沒問題」，自動化讀不出差別。所以要第三個值。
+    # CI 建議：exit 2 當 warning（不擋 pipeline），exit 1 當 failure。
+    if any(r["status"] in FAIL_STATUS for r in results):
+        return 1
+    return 2 if any(r["status"] == "unknown" for r in results) else 0
 
 
 if __name__ == "__main__":

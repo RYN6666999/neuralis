@@ -43,6 +43,13 @@ READONLY_WHITELIST = frozenset({"gbrain", "qmd", "file-search", "scream-ask"}) |
 NEED_COOLDOWN_S = 1800.0
 AUDIT_PATH = Path(__file__).resolve().parents[1] / "agency-audit.jsonl"
 
+_PAIR_SEP = "|"
+
+
+def _pair_key(need: str, tool: str) -> str:
+    """_need_stats 的 pair 層 key。JSON-safe，存與讀是同一個表示法（無轉換 = 無漂移）。"""
+    return f"{need}{_PAIR_SEP}{tool}"
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -93,7 +100,11 @@ class AgencyLoop:
         self.actions_total = 0
         self.skipped_stale = 0                     # 因種子重複/缺席而跳過的次數（可觀測）
         # ── RPE 狀態 ──
-        self._need_stats: dict = {}                # need → {expected, rpes, angle_weights}
+        # key 一律是 str：need 層 = "competence"，pair 層 = "competence|gbrain"（見 _pair_key）。
+        # 2026-08-20：曾用 tuple 當 pair key，但 JSON 沒有 tuple key，_save_state 轉字串、
+        # _load_state 沒轉回來 → 重啟後查不到（累積歸零）；且 _act 寫 tuple、
+        # _get_angle_weights 讀 str → 同一個 process 內就讀不到。單一表示法消滅這類 bug。
+        self._need_stats: dict = {}                # need | need|tool → {expected, rpes, angle_weights}
         self._rpe_buffer = deque(maxlen=20)        # 滑動視窗 RPE，調 threshold / 探索率
         self._exploration_rate = 0.15              # 探索非最優角度的機率
         self._rpe_total = 0.0                      # 累計 RPE（儀表用）
@@ -258,10 +269,9 @@ class AgencyLoop:
         if not self._state_loaded:
             return  # 讀失敗或從未嘗試 → 不蓋掉好資料
         state = {
-            "need_stats": {
-                (f"{k[0]}|{k[1]}" if isinstance(k, tuple) else k): v
-                for k, v in self._need_stats.items()
-            },
+            # key 已是 str（_pair_key）→ 無轉換。轉換是漂移的來源：舊版這裡把 tuple
+            # 轉 "a|b"，_load_state 卻沒轉回來，重啟後累積歸零。
+            "need_stats": self._need_stats,
             "trust_scores": self._trust_scores,
             "exploration_rate": self._exploration_rate,
             "task_queue": self._task_queue, "task_index": self._task_index, "goal_spec": self._goal_spec,
@@ -312,9 +322,10 @@ class AgencyLoop:
                     self._state_loaded = True  # 全新 → 准存
                     return
                 state = json.loads(body)
+                # key 一律 str，存讀同一表示法 → 不需要還原邏輯。
+                # 線上舊資料相容：舊 tuple 版存下來的也是 "need|tool" 字串，直接可用；
+                # 更舊的純 need key 也還在，pair 查不到會冷啟動退回 need 層 expected。
                 self._need_stats = state.get("need_stats", self._need_stats)
-                # 遷移舊狀態：舊版 key 是 need(string)，新版是 (need, tool)(tuple)
-                # 有 string key 時不做轉換，pair_key 查不到會冷啟動退回 need 層值
                 self._trust_scores = state.get("trust_scores", self._trust_scores)
                 self._exploration_rate = state.get("exploration_rate", self._exploration_rate)
                 self._task_queue = state.get("task_queue", [])
@@ -657,9 +668,9 @@ class AgencyLoop:
 
         # ── RPE 計算 ──
         outcome = self._score_result(result, tool=tool, query=prompt) if ok else 0.0
-        # 粒度修正：expected 按 (need, tool) 存而非僅 need（2026-08-06）
+        # 粒度：expected 按 (need, tool) 存而非僅 need（2026-08-06）
         # 冷啟動退回：該組合第一次出現 → 用 need 層值當先驗
-        pair_key = (need, tool)
+        pair_key = _pair_key(need, tool)
         if pair_key not in self._need_stats:
             need_seed = self._need_stats.get(need, {}).get("expected", 0.3)
             self._need_stats[pair_key] = {
@@ -681,7 +692,12 @@ class AgencyLoop:
                 break
         if used_angle:
             from laap.constitution import get_constitution
-            aw = stats["angle_weights"]
+            # angle_weights 存在 **need 層**，不是 pair 層：_form_intent 選角度時
+            # （見「RPE 角度選擇」）還沒決定工具，工具路由在那之後才跑。存 pair 層
+            # 等於寫進一個讀取端結構上到不了的地方 —— 3f4df6e 的真正錯誤所在。
+            need_stats = self._need_stats.setdefault(
+                need, {"expected": 0.3, "rpes": [], "angle_weights": {}})
+            aw = need_stats["angle_weights"]
             old = aw.get(used_angle, 1.0)
             # 憲法：權重變速上限 + 小時預算凍結（防 gbrain 分數線異常時垃圾訊號永久累積）
             allowed = get_constitution().guard_weight(need, used_angle, rpe * 0.5)

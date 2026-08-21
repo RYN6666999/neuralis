@@ -13,7 +13,7 @@
 散文只該留給需要人類判讀的部分（根因、解法、取捨）。可機械判定的部分
 就該是這支檔案。這是 scripts/check-*.py 家族的第 27 支，不是新發明。
 
-所有突變測試一律 try/finally 還原，並在最後驗 diff 為空。
+所有突變測試跑在用完就丟的臨時 repo 或 try/finally 還原，最後驗這個 repo 沒被碰過。
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 import time
 from pathlib import Path
@@ -92,24 +93,48 @@ def check_syntax_gate() -> None:
     record("語法閘.已掛載", hooks_path == ".githooks",
            f"core.hooksPath={hooks_path!r}（需 '.githooks'）")
 
-    if sh(["git", "diff", "--cached", "--name-only"]):
-        record("語法閘.實際會擋", False, "index 有暫存檔，跳過突變測試以免干擾",
-               "先 git reset 再跑")
-        return
+    # 突變測試跑在**用完就丟的臨時 repo** 裡，不碰這個 repo。
+    #
+    # 2026-08-20：舊版在 ROOT 裡 `git add` + `git commit` 真的做提交，靠 hook 擋下來
+    # 才沒事。但 hook 沒掛的機器上（.git/hooks 不進版控，重 clone / 換分支就沒了）
+    # commit 會成功，而 finally 只 `git reset HEAD <file>` —— 那撤 index，不撤 commit。
+    # 結果：壞檔案進了歷史，HEAD 多一個 "check-mechanisms probe"，而 git status
+    # 看起來近乎乾淨。實測連踩兩次。
+    #
+    # 最惡毒的地方是它專打「閘已經死掉」的機器 —— 正是最需要跑這支自檢的時候。
+    # 一個為了驗證安全機制而破壞工作區的檢查，會讓它之後所有的實跑結果都不可信。
+    #
+    # 臨時 repo 只需要 hook + 一個壞檔案就能驗「hook 會不會擋」，不需要真實歷史。
+    hook_abs = str(hook.resolve())
+    with tempfile.TemporaryDirectory(prefix="check-mech-") as tmp:
+        def tsh(args: list[str]) -> str:
+            r = subprocess.run(["git", "-C", tmp, *args],
+                               capture_output=True, text=True)
+            return (r.stdout + r.stderr).strip()
 
-    bad = ROOT / "_check_mechanisms_bad.py"
-    try:
-        bad.write_text("def f():\nreturn 1\n")
-        sh(["git", "add", str(bad.name)])
-        out = sh(["git", "commit", "-m", "check-mechanisms probe"])
+        tsh(["init", "-q"])
+        tsh(["config", "user.email", "probe@localhost"])
+        tsh(["config", "user.name", "check-mechanisms probe"])
+        # 指向版控裡那份真 hook（用絕對路徑，因為 cwd 是臨時目錄）
+        tsh(["config", "core.hooksPath", str(Path(hook_abs).parent)])
+        (Path(tmp) / "_probe_bad.py").write_text("def f():\nreturn 1\n")
+        tsh(["add", "_probe_bad.py"])
+        out = tsh(["commit", "-m", "check-mechanisms probe"])
         blocked = "無法編譯" in out and "擋下" in out
-        record("語法閘.實際會擋", blocked,
-               next((l for l in out.splitlines() if "擋下" in l), out[:120]))
-    finally:
-        sh(["git", "reset", "-q", "HEAD", str(bad.name)])
-        bad.unlink(missing_ok=True)
-        leftover = sh(["git", "status", "--porcelain", str(bad.name)])
-        record("語法閘.測試已清乾淨", leftover == "", leftover or "工作區乾淨")
+        # 雙重確認：不只看訊息，直接問臨時 repo 有沒有生出 commit
+        has_commit = tsh(["rev-parse", "--verify", "-q", "HEAD"]) != ""
+        record("語法閘.實際會擋", blocked and not has_commit,
+               next((l for l in out.splitlines() if "擋下" in l), out[:120])
+               + ("" if not has_commit else " ← 且 commit 真的成立了"))
+
+    # 這個 repo 從頭到尾沒被碰過，直接驗給你看（不再是「清乾淨了嗎」而是「有沒有碰」）
+    dirty = sh(["git", "status", "--porcelain"])
+    stray = [l for l in dirty.splitlines() if "_check_mechanisms_bad" in l or "_probe_bad" in l]
+    head_now = sh(["git", "log", "-1", "--format=%s"])
+    record("語法閘.未污染工作區",
+           not stray and "check-mechanisms probe" not in head_now,
+           f"無突變殘留；HEAD={head_now[:50]!r}" if not stray
+           else f"殘留: {stray}")
 
 
 # ── 3. bootstrap 摘要 ──────────────────────────────────────────────────

@@ -13,7 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from laap.s_span_bench import behavior_entropy, learning_correlation
+from laap.s_span_bench import (behavior_entropy, learning_correlation,
+                               learning_verdict, realized_advantage)
 
 AUDIT = ROOT / "agency-audit.jsonl"
 
@@ -57,16 +58,33 @@ try:
 except Exception:
     hr = {"total": 0}
 
+# 1b. E3.2 可信度校準判準（corr 的誤判率約 40% 且不隨樣本量下降，見 s_span_bench 註解）
+verdict = learning_verdict([{"choice": (r["need"], r["tool"]),
+                             "outcome": r.get("outcome", 0)} for r in recs])
+print(f"\n1b. 實現優勢（realized_advantage）")
+print(f"   實際選擇的平均 outcome − 均勻亂選期望: {verdict['advantage']:+.4f}")
+if verdict["null_p95"] is not None:
+    print(f"   虛無分佈 95 百分位（亂選能拿到的上限）: {verdict['null_p95']:+.4f}")
+
 # 判決
 print("\n=== 判決 ===")
-learned = corr is not None and corr > 0.2
-diverse = learned_ent > baseline_ent + 0.1
-if learned and diverse:
-    print(f"✅ S_span 有效 — 選擇正相關 outcome（{corr:.2f}，學了不是隨機）"
-          f"且比規則表多樣。分工/學習投資值得。")
-elif learned:
-    print(f"🟡 部分 — 有學習跡象（corr {corr:.2f}）但多樣度未明顯超規則表。續觀察。")
+if verdict["underpowered"]:
+    print(f"⚪ 樣本不足，不下結論 — {verdict['n_records']} 筆 / "
+          f"{verdict['n_choices']} 種選擇。")
+    print(f"   蒙地卡羅顯示 n<100 時連真的有學也只有 ~50% 檢出率，")
+    print(f"   所以這裡的「未證實」不等於「沒學」，是「測不出來」。")
+    print(f"   需要 ≥100 筆（建議 300 筆）真實決策才能判。")
+elif verdict["learned"]:
+    diverse = learned_ent > baseline_ent + 0.1
+    print(f"✅ 學了 — 實現優勢 {verdict['advantage']:+.4f} 超過亂選上限 "
+          f"{verdict['null_p95']:+.4f}（{verdict['n_records']} 筆）")
+    print(f"   {'且比規則表多樣。分工/學習投資值得。' if diverse else '但多樣度未明顯超規則表，續觀察廣度軸。'}")
 else:
-    c = "算不了（樣本太少/單一選擇）" if corr is None else f"{corr:.2f}"
-    print(f"❌ 未證實 — 選擇與 outcome 相關 {c}，看不到『學了』的證據。"
-          f"⚠️ 樣本可能太小（{len(recs)} 筆）；讓 Aris 多跑再驗，或前面投資要回頭。")
+    print(f"❌ 未證實 — 實現優勢 {verdict['advantage']:+.4f} 未超過亂選上限 "
+          f"{verdict['null_p95']:+.4f}（{verdict['n_records']} 筆，樣本量足夠）")
+    print(f"   樣本夠而測不出優勢 = 選擇與品質無關的證據，前面的投資要回頭檢視。")
+
+# 舊判準並列（保留可比性，但標明不可信）
+learned_old = corr is not None and corr > 0.2
+print(f"\n   [舊判準 corr>0.2: {'通過' if learned_old else '未通過'}"
+      f" — 誤判率約 40%，僅供對照，不作結論依據]")
