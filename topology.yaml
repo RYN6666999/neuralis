@@ -22,9 +22,15 @@ updated: 2026-08-01 14:00
 
 nodes:
   - id: board
-    at: ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md
     owns: [人類介面, session 摘要, 跨 session 交接]
-    note: 原本寫成 ~/Library/.../ 縮寫，人看得懂但機器驗不了 —— 無法驗證的宣稱等於沒宣稱。
+    note: >-
+      2026-08-21：at 欄移除。原本指 ~/Library/Mobile Documents/iCloud~md~obsidian/
+      Documents/Fun/Aris/留言板.md，該檔已不在該 vault 的任何位置（find 全 vault
+      無結果，且非 iCloud placeholder ——同目錄 13 個檔都在，正對照成立）。
+      這條線目前是斷的：board_to_channel 與 :162 的 from 都還掛著這個 node，
+      但沒有實體檔案在支撐它。保留 node 是為了不讓那兩條 edge 懸空，不是宣稱它還活著。
+      要復活就把檔案放回去並把 at 加回來；確定廢棄就連同兩條 edge 一起拆。
+      at 欄只放機器現在真的打得開的東西（同 gbrain node 的規則）。
 
   - id: bridge
     at: scripts/agentos-aris-bridge.py
