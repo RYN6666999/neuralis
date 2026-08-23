@@ -17,6 +17,13 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# 這支自檢會做幾次真的 _act，寫進真的 agency-audit.jsonl（見下方 B 段註解）。
+# 2026-08-23：那些行以前跟自主決策長得一模一樣 —— 1099 筆裡有 158 筆是本檔
+# 反覆產生的 'test query 作法'，而 S_span 的 learning_verdict 照單全收。
+# 標上來源，之後才算得出「扣掉自檢後的真實決策」。setdefault 前置於 import，
+# 與 tests/conftest.py 同一個模式。
+os.environ.setdefault("NEURALIS_AUDIT_SOURCE", "check-agency")
+
 from laap.agency import AgencyLoop, AUDIT_PATH, READONLY_WHITELIST
 from laap.psi_core import PsiCore, NeedType
 from laap.psi_backend import PythonPsiBackend

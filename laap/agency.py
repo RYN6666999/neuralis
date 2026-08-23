@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import re
+import sys
 import threading
 import time
 from collections import deque
@@ -776,9 +777,35 @@ class AgencyLoop:
 
     @staticmethod
     def _audit(entry: dict) -> None:
+        """寫一行審計，並標上「誰寫的」。
+
+        2026-08-23 加 pid/proc/src。這個檔一直被當成「Aris 的真實決策紀錄」
+        餵給 S_span 的 learning_verdict，實際盤點 1099 筆：234 筆 (21.3%)
+        的 prompt 含 "test"（其中 158 筆是一模一樣的 'test query 作法'），
+        另有 56 筆的 prompt 根本是某個 agent 的 <system-reminder> 系統提示。
+        三種來源共用同一個路徑常數、誰 import 誰就能寫，而每行都沒署名，
+        所以事後一筆都拆不開 —— 那 1099 筆只能當歷史，不能拿來下結論。
+
+        只記機器測得的事實，不記推論出來的分類：
+          pid  = os.getpid()
+          proc = 執行中的腳本名（task-executor 與 agentos-aris-bridge 是兩個
+                 獨立 launchd 服務、跑同一支腳本、scoring 設定不同，光靠 pid
+                 分不出重啟前後，proc 才看得出是哪支在寫）
+          src  = NEURALIS_AUDIT_SOURCE，**沒設就不寫這個 key**。
+                 不預設 "autonomous"：check-agency.py 忘了設環境變數時，
+                 測試流量會被標成自主決策 —— 那比沒有欄位更糟，因為它看起來可信。
+
+        每次呼叫都重讀 argv/environ，不在模組層快取：頻率是每次決策一次，
+        成本可忽略，換來的是子行程改了環境變數也能正確反映。
+        """
         try:
+            stamped = {**entry, "pid": os.getpid(),
+                       "proc": os.path.basename(sys.argv[0])}
+            src = (os.environ.get("NEURALIS_AUDIT_SOURCE") or "").strip()
+            if src:
+                stamped["src"] = src
             with AUDIT_PATH.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.write(json.dumps(stamped, ensure_ascii=False) + "\n")
         except Exception as e:
             logger.warning(f"[Agency] 審計寫入失敗: {e}")
 

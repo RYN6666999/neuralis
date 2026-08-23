@@ -21,6 +21,15 @@ import os
 # This affects the entire pytest process.
 os.environ.setdefault("NEURALIS_CONSTITUTION", "off")
 
+# Stamp every audit line written during a test run as src="pytest".
+#
+# 2026-08-23: agency-audit.jsonl 的 1099 筆裡有 234 筆 (21.3%) 是測試流量
+# （158 筆一模一樣的 'test query 作法'），但沒有任何欄位分得出來，所以整份
+# 資料拿去算 learning_verdict 時，測試噪音跟真實決策是混在一起的。
+# 加了 src 欄位還不夠 —— 沒有這一行，測試跑出來的 audit 仍然不會署名。
+# setdefault 而非 setenv：呼叫端已經標了更精確的來源就別蓋掉它。
+os.environ.setdefault("NEURALIS_AUDIT_SOURCE", "pytest")
+
 import pytest
 
 from laap.agi.cognitive_bus import CognitiveBus
