@@ -15,7 +15,7 @@
 # 用法：./brain/blast.py <id>   → 看動它會炸到誰
 
 version: 1
-updated: 2026-07-27
+updated: 2026-08-23   # rust-psi 假缺口修正 + 兩個過期 risk 重測
 source: Aris/Scream 完整管線地圖 v2 (2026-07-26) §6 §11
 
 # ── 樞紐節點：粗神經節，動它們全身震 ──
@@ -40,13 +40,13 @@ hubs:
     repo: LIUTod/scream-code
     owned: false          # ← 上游，不是你的
     install: npm 全域 /opt/homebrew/lib/node_modules/scream-code
-    risk: 本地 0.10.0 落後 npm latest 0.10.13 共 13 版（drift.py 實測 2026-07-27）
+    risk: 本地 0.10.0 落後 npm latest 0.14.3 共 43 版（npm view 實測 2026-08-23）
 
   - id: laap-upstream
     role: laap-core · PSI 引擎源頭
     repo: lorryjovens-hub/laap-AGI
     owned: false          # ← 上游，不是你的
-    risk: 本地在 feat/env-config-hermes，已與 upstream/main 分岔
+    risk: 本地在 main@94b9b58（2026-08-23 實測）；與 upstream 的分叉狀態跑 brain/drift.py 實查
 
 # ── 阻塞鏈：誰卡著誰 ──
 # from 沒完成 → to 全部動不了。這是「牽一髮動全身」的實體。
@@ -139,13 +139,35 @@ blockers:
 
 # ── 封印：能開但刻意沒開。解封成本 vs 收益 ──
 sealed:
+  # ⚠️ 2026-08-23：這個封印**已不成立**，三項宣稱逐條被實測推翻（見 note）。
+  #    保留條目是為了不動 brain/blast.py 依賴的結構；保留不等於它還封著。
   - id: rust-psi
-    label: Rust PSI Backend 接線
-    why: RustPsiBackend class 建好，但 startup.py 沒接。先試 Rust 失敗就降級 Python，Python 夠用所以沒人修。
+    label: Rust PSI Backend 接線（封印已失效，見 note）
+    why: （2026-07-27 原文，已過期）RustPsiBackend class 建好，但 startup.py 沒接。先試 Rust 失敗就降級 Python，Python 夠用所以沒人修。
     unseal_cost: low
     unseal_gain: 2000 ticks/s · p99 4µs
-    hard_blocker: rustc 未安裝
+    hard_blocker: （2026-07-27 原文，已過期）rustc 未安裝
     src: 管線地圖 §6 §11 #18 #29
+    note: |
+      2026-08-23 實測，上面三項宣稱全部不成立：
+        · hard_blocker「rustc 未安裝」 → rustc 1.97.0 在 ~/.cargo/bin/rustc
+        · 「startup.py 沒接」          → laap/startup.py:52 起有完整 RustPsiBackend 接線
+        · 封印（= 刻意沒開）           → psi-daemon 正在跑，已連續 3 天
+                                         （launchd com.neuralis.psi-daemon；三種方法
+                                          交叉確認：pgrep -f / ps -p / launchctl list）
+        · 編譯產物 rust/target/release/psi-daemon 557.9K 存在
+      topology.yaml 的 rust-psi-daemon node 記著「2026-08-01 打通 M3 B-route」——
+      這條在 causal 躺了三週沒更新，而 topology 早就記錄完成了。兩份分工是硬的，
+      但沒有任何機制在比對它們，所以誰也沒發現對方已經走遠。
+
+      ⚠️ 這是本檔 risks:doc-lies 的實例，而且是最難發現的形態：**假缺口**。
+      假綠燈讓人不去查真問題；**假缺口讓人以為還有事要做 ——
+      而沒有人會質疑一個開著的 ticket。** 它不觸發任何告警，
+      只是安靜地讓每一份規劃都繞過一個其實已經可用的能力。
+
+      未解的部分（真的還沒做，不要連帶當成完成）：
+        · Python 與 Rust 的數值對拍從未做過（無 test_psi_numeric_parity.py）
+        · topology.yaml 的 rust_compare_python 邊標 expect: fail，指的就是這件事
 
   - id: agency-delegate
     label: Agency Delegate
@@ -179,23 +201,36 @@ sealed:
 risks:
   - id: scream-stale
     severity: high
-    what: Scream 本地 0.10.0，npm latest 0.10.13 — 落後 13 版
+    what: Scream 本地 0.10.0，npm latest 0.14.3 — 落後 43 版
     why: |
       身體是 npm 全域安裝（/opt/homebrew/lib/node_modules/scream-code），不是原始碼。
       ~/Developer/neuralis/scream-code/ 只有 mcp.json，是設定不是碼 —— 所以「無 .git」
-      本身不是問題，這裡從來不該有 git。真正的問題是版本落後 13 版。
+      本身不是問題，這裡從來不該有 git。真正的問題是版本落後 43 版。
     fix: npm i -g scream-code@latest（升級前先確認 config.toml 相容）
-    detected_by: brain/drift.py 2026-07-27 實測
+    detected_by: npm view scream-code version 2026-08-23 實測
     note: |
-      前一版 causal.yaml 曾記為 scream-no-git（誤判：以為該目錄是原始碼）。
-      這正是 doc-lies 風險的實例 —— 連我自己也會誤判，所以一切以實測為準。
+      2026-08-23 更新：前次記錄「latest 0.10.13、落後 13 版」是 2026-07-27 的值。
+      一個月後上游走到 0.14.3，落差從 13 版變成 43 版，而這裡的數字沒有跟著動。
+      ⚠️ 版本落差是流動量不是靜態量 —— 引用時必須連量測日期一起帶，
+      否則下一個人會照抄一個過期的數字去做升級決策。
+      brain/upgrade-scream.md 的「先不升」結論是在落後 13 版的前提下做的，
+      落後 43 版之後值不值得重估，由 Ryan 決定。
+
+      （併入原 note）前一版 causal.yaml 曾記為 scream-no-git（誤判：以為該目錄是
+      原始碼）。這正是 doc-lies 風險的實例 —— 連我自己也會誤判，所以一切以實測為準。
 
   - id: laap-diverged
     severity: medium
-    what: 本地 laap-AGI feat/env-config-hermes@7f02b62 ≠ upstream/main@c3d495c
+    what: 本地 laap-AGI 在 main@94b9b58，與 upstream 分叉狀態需 drift.py 實查
     why: 上游 lorryjovens-hub 一動可能靜默漂移，且本地有未提交變更
     fix: brain/drift.py 監測（已實作）；決定要跟上游還是長期分叉
-    detected_by: brain/drift.py 2026-07-27 實測
+    detected_by: git -C ~/Developer/laap-AGI rev-parse 2026-08-23 實測
+    note: |
+      2026-08-23 更新：前次記錄「本地 feat/env-config-hermes@7f02b62」已過期 ——
+      分支與 commit 都變了，實測在 main@94b9b58。
+      ⚠️ 這裡刻意不再寫死 upstream/main 的 sha（原文寫 c3d495c）：
+      那個值要打網路才問得到，寫進靜態檔案就是在製造下一個過期宣稱。
+      要比對分叉跑 brain/drift.py —— 它會實查，這裡只記本地端。
 
   - id: origin-all-auto
     severity: high
