@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # 反覆產生的 'test query 作法'，而 S_span 的 learning_verdict 照單全收。
 # 標上來源，之後才算得出「扣掉自檢後的真實決策」。setdefault 前置於 import，
 # 與 tests/conftest.py 同一個模式。
-os.environ.setdefault("NEURALIS_AUDIT_SOURCE", "check-agency")
+os.environ.setdefault("NEURALIS_SERVICE", "check-agency")
 
 from laap.agency import AgencyLoop, AUDIT_PATH, READONLY_WHITELIST
 from laap.psi_core import PsiCore, NeedType

@@ -29,6 +29,7 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from laap import failure_trail
 from laap.safety_gate import AGENTOS_READONLY, classify
 
 # ── 事件標準化（Phase 1 里程碑）：events.py 不存在時安全 fallback
@@ -45,6 +46,87 @@ NEED_COOLDOWN_S = 1800.0
 AUDIT_PATH = Path(__file__).resolve().parents[1] / "agency-audit.jsonl"
 
 _PAIR_SEP = "|"
+
+# ── audit 來源標記（provenance）────────────────────────────────────────
+# 2026-08-21：這台機器上有**兩個 launchd service 各自跑決策、共寫這一份
+# agency-audit.jsonl**（`task-executor` 用 laapenv python 3.12 且設了
+# SCORING_ROUTER_ENABLED=1 / SCORING_YOLO_MODE=0；`agentos-aris-bridge` 用
+# homebrew python 3.14 且完全沒設）。cwd 相同所以載入同一份原始碼，但
+# **兩個跑不同 scoring 配置、各自 open("a") append、無鎖，而每一行都沒有
+# 記錄來源進程**。
+#
+# 後果：`advantage` 的差異有一部分來自「哪個進程寫的」而不是「學到了什麼」，
+# 事後無法拆開。舊的 1099 筆已經無法救，但新資料不該重複這個病。
+#
+# 為什麼也記程式碼版本：2026-08-21 我們花一整天分析一份資料，最後發現寫它的
+# 進程跑的是 22 小時前的舊碼。一行 `ps` 就能發現，但沒人想到要查。
+# **資料的產生者也有版本，而版本不會出現在資料裡** —— 除非把它寫進去。
+#
+# 全部在 import 時算一次（每行 audit 都跑 git 子進程會拖慢決策迴圈，
+# 而這些值在一個 process 的生命週期內不會變）。
+
+
+def _code_version() -> str:
+    """本次執行的程式碼版本。git sha 優先，取不到退回 agency.py 的 mtime。
+
+    退回 mtime 而不是留空：**「查不到版本」與「沒有版本」不同**，而下游要能
+    分辨。mtime 至少能答「是不是同一份檔案」，那正是舊碼跑了 22 小時那次
+    需要的資訊。
+    """
+    try:
+        import subprocess
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           cwd=str(Path(__file__).resolve().parents[1]),
+                           capture_output=True, text=True, timeout=2)
+        sha = r.stdout.strip()
+        if r.returncode == 0 and sha:
+            return f"git:{sha}"
+    except Exception:
+        pass
+    try:
+        return f"mtime:{int(Path(__file__).stat().st_mtime)}"
+    except Exception:
+        return "unknown"
+
+
+def _service_name() -> str:
+    """哪個 service 在寫。先看顯式 env，再退回可執行檔特徵。
+
+    `NEURALIS_SERVICE` 是給 launchd plist 設的顯式標籤 —— 那是唯一可靠的來源。
+    測試與自檢腳本也設它（tests/conftest.py 設 "pytest"，
+    scripts/check-agency.py 設 "check-agency"），因為「誰在寫」對它們是同一個問題。
+
+    沒設時用 sys.executable 推：那兩個 service 剛好用不同的 python
+    （laapenv 3.12 vs homebrew 3.14），所以推得出來；但**推測值加 `?` 前綴**，
+    讓讀取端分得出「它自己說的」與「我們猜的」。把猜測當事實，
+    就是這條線一路在修的那個病。
+    """
+    explicit = os.environ.get("NEURALIS_SERVICE", "").strip()
+    if explicit:
+        return explicit
+    exe = (sys.executable or "").lower()
+    if "laapenv" in exe:
+        return "?task-executor"      # laapenv python = task-executor 的特徵
+    if "homebrew" in exe or "/opt/homebrew" in exe:
+        return "?agentos-aris-bridge"
+    return "?unknown"
+
+
+# 這些鍵刻意都是新增的，且與既有欄位（ts/need/tool/outcome/...）無交集 ——
+# 讀取端（.patches/run-sspan.py、laap/s_span_bench.py、morning-brief.py）
+# 讀的是既有鍵，新增鍵對它們不可見。
+_PROVENANCE = {
+    "src_service": _service_name(),
+    "src_pid": os.getpid(),
+    "src_py": f"{sys.version_info.major}.{sys.version_info.minor}."
+              f"{sys.version_info.micro}",
+    "src_exe": sys.executable or "",
+    "src_code": _code_version(),
+    # scoring 配置：這兩個 env 就是兩個 service 的行為差異來源。
+    # 未設 = None（不是 ""）—— 「沒設」與「設成空字串」在 shell 裡是兩件事。
+    "src_scoring_router": os.environ.get("SCORING_ROUTER_ENABLED"),
+    "src_scoring_yolo": os.environ.get("SCORING_YOLO_MODE"),
+}
 
 
 def _pair_key(need: str, tool: str) -> str:
@@ -777,37 +859,40 @@ class AgencyLoop:
 
     @staticmethod
     def _audit(entry: dict) -> None:
-        """寫一行審計，並標上「誰寫的」。
+        """寫一行 audit。**來源標記在這裡加，不在呼叫端。**
 
-        2026-08-23 加 pid/proc/src。這個檔一直被當成「Aris 的真實決策紀錄」
-        餵給 S_span 的 learning_verdict，實際盤點 1099 筆：234 筆 (21.3%)
-        的 prompt 含 "test"（其中 158 筆是一模一樣的 'test query 作法'），
-        另有 56 筆的 prompt 根本是某個 agent 的 <system-reminder> 系統提示。
-        三種來源共用同一個路徑常數、誰 import 誰就能寫，而每行都沒署名，
-        所以事後一筆都拆不開 —— 那 1099 筆只能當歷史，不能拿來下結論。
+        為什麼在這裡：`_audit` 是唯一的寫入路徑，加在這裡的話「忘記帶
+        provenance」這件事不可能發生。加在呼叫端就會有下一個呼叫點忘記帶。
 
-        只記機器測得的事實，不記推論出來的分類：
-          pid  = os.getpid()
-          proc = 執行中的腳本名（task-executor 與 agentos-aris-bridge 是兩個
-                 獨立 launchd 服務、跑同一支腳本、scoring 設定不同，光靠 pid
-                 分不出重啟前後，proc 才看得出是哪支在寫）
-          src  = NEURALIS_AUDIT_SOURCE，**沒設就不寫這個 key**。
-                 不預設 "autonomous"：check-agency.py 忘了設環境變數時，
-                 測試流量會被標成自主決策 —— 那比沒有欄位更糟，因為它看起來可信。
+        既有欄位優先：`{**_PROVENANCE, **entry}` 的順序讓 entry 覆蓋
+        provenance，所以**呼叫端傳的任何既有欄位都不會被這裡改掉**。
+        provenance 是補充，不是覆寫 —— 若反過來，某天新增一個同名欄位
+        就會靜默改掉既有語義。
 
-        每次呼叫都重讀 argv/environ，不在模組層快取：頻率是每次決策一次，
-        成本可忽略，換來的是子行程改了環境變數也能正確反映。
+        為什麼盤點過的那 1099 筆救不回來：這個檔一直被當成「Aris 的真實決策
+        紀錄」餵給 S_span 的 learning_verdict，但裡面 234 筆 (21.3%) 的 prompt
+        含 "test"（158 筆是一模一樣的 'test query 作法'），另有 68 筆的 prompt
+        是某個 agent 的 <system-reminder> 系統提示（07-17~07-26 那段，已停）。
+        誰 import 誰就能寫，而每行都沒署名。這裡守的是新資料不重複這個病。
         """
         try:
-            stamped = {**entry, "pid": os.getpid(),
-                       "proc": os.path.basename(sys.argv[0])}
-            src = (os.environ.get("NEURALIS_AUDIT_SOURCE") or "").strip()
-            if src:
-                stamped["src"] = src
             with AUDIT_PATH.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(stamped, ensure_ascii=False) + "\n")
+                f.write(json.dumps({**_PROVENANCE, **entry},
+                                   ensure_ascii=False) + "\n")
         except Exception as e:
+            # 舊版只有這行 warning —— 而下一步的計畫是「重啟後累積新資料」。
+            # 寫入靜默失敗的話，我們會再等一次永遠不會來的資料
+            # （2026-08-21 已經發生過一次：以為在累積，其實是舊碼在寫）。
+            # 所以失敗要留下**事後查得到、而且看得出是失敗**的痕跡。
             logger.warning(f"[Agency] 審計寫入失敗: {e}")
+            failure_trail.record(
+                "agency_audit_write", e,
+                audit_path=str(AUDIT_PATH),
+                # 帶上這筆的識別，讓事後能答「丟掉的是哪些決策」
+                lost_ts=entry.get("ts"), lost_need=entry.get("need"),
+                lost_tool=entry.get("tool"))
+            # 刻意不 raise：審計壞掉不該升級成「Aris 停止決策」。
+            # 要吵，但不要致命。
 
     _SEED_PREFIX = re.compile(r"^\[[\d.]+\]\s*|^\S+/\S+\s+--\s*|^#+\s*")
 

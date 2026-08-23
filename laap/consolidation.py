@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from laap import failure_trail
+
 logger = logging.getLogger("laap.consolidation")
 
 _NS = "laap/memory/"
@@ -112,7 +114,17 @@ class ConsolidationLoop:
                     self.run_pass()
             except Exception as e:
                 self._seen_hashes.clear()
+                # 舊版只有這行 warning，於是固化可以**一輪輪安靜地失敗**：
+                # 每 interval 秒重試、每次都只印一行沒人看的 warning，
+                # 而外面看起來就像「固化在跑」。跟 agency._audit 同一形態。
+                # 失敗要留下查得到的痕跡。
                 logger.warning(f"[Consolidation] pass 失敗: {e}")
+                failure_trail.record(
+                    "consolidation_pass", e,
+                    interval=self.interval, idle_s=self.idle_s)
+                # 刻意不 raise / 不 break：daemon 執行緒炸掉會讓固化**完全**
+                # 停止且更難發現。連續失敗的次數由 failure_trail 累計，
+                # 那是「安靜地壞掉」與「明確地壞掉」的差別。
 
     def _asleep(self) -> bool:
         if time.time() - self._last_interaction < self.idle_s:
