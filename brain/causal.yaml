@@ -60,12 +60,23 @@ blockers:
     src: 管線地圖 §11 #6 #9 #14
     note: 下游 4 個全 P0。目前圖上最高槓桿點。
     evidence: |
-      brain/memcheck.py 2026-07-27 唯讀實測 ~/.aris-memory.db（152 筆）：
-      · confidence 欄 152/152 全 yellow —— 零 green 零 red
-      · origin 欄 152/152 全 auto_generated —— 零 human
-      · provenance 欄 152/152 全空
-      三欄都存在（有人設計過），但沒有任何邏輯在填。
-      這是「閘宣告了但沒接線」的硬證據，不是推論。
+      ⚠️ 2026-08-23 重跑 verify 指令，前一版 evidence 三條全部過期：
+
+                    2026-07-27（原文）    2026-08-23（重測）
+        總筆數      152                   1164
+        confidence  全 yellow，零 red      red 115 / yellow 1049
+        origin      全 auto_generated      auto 1163 / human 1
+        provenance  全空                   1/1164 有
+
+      memcheck 現在把那三項都標 🟢（不再是問題），但 **status 仍是 partial**：
+      missing 的「黃轉綠升格路徑」還成立 —— 分級開始有東西在填了（red 出現），
+      但只到 red/yellow 兩級，**零筆升到 green**。
+
+      memcheck 目前唯一的 🔴 是 gbrain_never_synced（1164 筆 synced_to_gbrain
+      全為 0，而 gbrain 有 5041 個 md），它自己指回本檔的「固化cron」。
+
+      ⚠️ 教訓：evidence 欄裡的數字是流動量。這三行躺了將近一個月沒人重跑，
+      而 verify 指令一直就寫在下面那一行 —— **有 verify 不等於有人跑。**
     verify: python3 brain/memcheck.py
 
   - id: salience-gate
@@ -93,9 +104,29 @@ blockers:
 
   - id: 檢索過濾
     label: confidence 檢索過濾
-    status: not_started
+    status: partial
+    done: [confidence_gte 參數, SQL CASE 閾值比較, 6 個測試案例含反向測試]
+    missing: [生產呼叫端 —— 全 repo 零個地方傳這個參數]
     blocked_by: [confidence-gate]
     src: 管線地圖 §11 #6
+    evidence: |
+      2026-08-23 逐條驗 blocker status 時發現：原本標 not_started，實際上實作是完整的。
+        · scripts/aris-memory.py:458 `def query(..., confidence_gte="")`
+          docstring 明寫「支援全文檢索 + 來源過濾 + 分頁 + confidence 過濾」
+        · SQL 用 CASE confidence WHEN 'red' THEN 0 ... >= ? 做閾值比較
+        · tests/test_aris_memory.py 有 6 個案例守著，其中一個是反向測試
+          （檔頭寫「故意改壞 confidence_gte SQL → 測試 7 紅 ✅」）
+
+      **但全 repo 搜 confidence_gte，命中全部在 tests/，零個生產呼叫端。**
+      （正對照：同樣搜法搜 after_id 得 27 個命中，所以那個「零」是真的零。）
+
+      所以正確狀態是 partial 而非 not_started —— 這兩者對讀的人意義完全不同：
+      not_started 會讓人以為要從頭寫，實際上只差把參數接上去。
+
+      ⚠️ 這是本檔 risks:doc-lies 的第三種形態。前兩種是「宣稱有但沒接線」
+      （confidence-gate 的欄位）與「假缺口」（sealed:rust-psi）；這條是
+      **「做好了、測試守著、但沒有人叫它」** —— 能力存在而不被使用，
+      在任何檢查裡都不會亮紅燈，因為測試是綠的。
 
   - id: 升格路徑
     label: 黃轉綠升格
@@ -126,9 +157,26 @@ blockers:
   - id: gbrain快取
     label: gbrain 快取命中率
     status: partial
-    metric: 64%
+    metric: 64%（⚠️ 來源不明，見 evidence —— 引用前先重測）
     blocks: [因果鏈前瞻]
     src: 管線地圖 §6 §11 #26
+    evidence: |
+      ⚠️ 2026-08-23 逐條驗 blocker 時，**找不到這個 64% 的量測來源**。
+      搜「快取命中」全 repo，命中的是：
+        · laap/llm_respond.py:435  工具快取命中（LLM 層，不是 gbrain）
+        · laap/llm_respond.py:888  LLM 回應快取命中
+        · laap/chatflow.py:405     bootstrap 快取（wake_ids）
+      三個都不是 gbrain 快取。沒有找到任何會算出「gbrain 快取命中率」的程式碼。
+
+      這個數字可能來自管線地圖 §26 的一次人工量測（2026-07-26 前後），
+      也可能是估計值。無論何者，**它沒有 verify 指令，也沒有可重跑的來源**。
+
+      ⚠️ 沒有量測來源的 metric 跟過期的 metric 一樣危險，而且更難發現：
+      它看起來精確（有小數點等級的具體性），所以沒有人會想去查它。
+      在補上量測方式之前，不要拿這個數字做任何決策。
+
+      待辦（不是本輪範圍）：找出「gbrain 快取」實際指哪一層，
+      補一個像 confidence-gate 那樣的 verify 指令。
 
   - id: attention_line寫入
     label: P0 事件帳本 attention_line
