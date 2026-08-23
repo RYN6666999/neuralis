@@ -18,27 +18,68 @@
 #    加邊必須同時加 probe 函式，否則全套驗證癱瘓。跨 repo 節點只加 node，不加 edge。
 
 version: 1
-updated: 2026-08-01 14:00
+updated: 2026-08-23 16:20   # 死節點/假邊全掃 + 留言板機制廢除後的第一次對帳
 
 nodes:
+  # ⚠️ 已廢除的機制。保留 node 只因為 edges 受 probe.py 硬鎖
+  #    （set(edges) ^ set(PROBES) 不為空就 return 2），拆 node 會讓兩條 edge 懸空。
+  #    **保留不等於還活著。** 下面 owns 的三項職責目前沒有任何實作在承擔。
   - id: board
     owns: [人類介面, session 摘要, 跨 session 交接]
     note: >-
-      2026-08-21：at 欄移除。原本指 ~/Library/Mobile Documents/iCloud~md~obsidian/
-      Documents/Fun/Aris/留言板.md，該檔已不在該 vault 的任何位置（find 全 vault
-      無結果，且非 iCloud placeholder ——同目錄 13 個檔都在，正對照成立）。
-      這條線目前是斷的：board_to_channel 與 :162 的 from 都還掛著這個 node，
-      但沒有實體檔案在支撐它。保留 node 是為了不讓那兩條 edge 懸空，不是宣稱它還活著。
-      要復活就把檔案放回去並把 at 加回來；確定廢棄就連同兩條 edge 一起拆。
-      at 欄只放機器現在真的打得開的東西（同 gbrain node 的規則）。
+      2026-08-23：**留言板機制由 Ryan 決策廢除**，不是「檔案不見了要找回來」。
+      這是與 2026-08-21 那次記錄的差別 —— 當時的判斷是檔案遺失，現在是機制不再使用。
+
+      原路徑 ~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Fun/Aris/留言板.md
+      實測不存在（find 全 vault 無結果，同目錄 20 個檔都在，正對照成立）。
+
+      ⚠️ 這個檔案曾是**四條告警線的共同出口**，它們現在全部寫進虛空：
+        · scripts/nightshift.sh:13          probe 紅了的告警
+        · scripts/safety-redline-alerts.py:49  安全紅線 critical 告警
+        · scripts/check-sentinels.sh:7      靜默失敗告警
+        · 本 node（board_to_channel 的來源）
+      四者都是 disabled 狀態，所以現在不咬人；**但只要有人 enable 其中任何一個，
+      它就會安靜地告警到不存在的檔案** —— 看起來會叫，實際上不會。
+      那比沒有告警更危險，所以在給它們新出口之前不要開。
+
+      owns 的三項職責（人類介面／session 摘要／跨 session 交接）目前**無歸屬**。
+      本檔規矩說「一個概念只准出現在一個 node 的 owns 裡，設計新東西前先 grep owns」
+      —— 要在這三項上蓋新東西的人，看到的是這個死 node，請先把職責移到新的 node。
 
   - id: bridge
     at: scripts/agentos-aris-bridge.py
-    owns: [channel 路由, 留言板監聽, salience parse, wake 注入]
+    owns: [channel 路由, salience parse, wake 注入]
+    note: >-
+      2026-08-23：owns 移除「留言板監聽」—— 該機制已廢除（見 board node）。
+      本節點是唯一還在跑的 neuralis 服務（PID 由 launchd 管，實測活著），
+      但 MESSAGE_BOARD 常數仍留在 scripts/agentos-aris-bridge.py:37，
+      啟動 log 因此顯示「留言板監聽: off」（判定式是 MESSAGE_BOARD.exists()）。
+      程式碼層的清理不在本次範圍（本次只更新這份地圖，不動任何執行中的碼）。
 
+  # ⚠️ 服務未運行。at 的檔案在，但沒有人在跑它 —— 這兩件事不一樣。
+  #    lint.py 的 check F 只驗「at 打得開」，所以它一路綠燈到 2026-08-23 被人工掃出來。
   - id: aris-api
-    at: laap/chatflow.py  # port 11546
+    at: laap/chatflow.py  # port 11546（已退役，見 note）
     owns: [對話主路, session bootstrap, PSI, agency]
+    note: >-
+      2026-08-23 實測：**11546 無人監聽**（lsof 全列 + nc 兩種方法一致），
+      全機無 chatflow 進程。11546 於 2026-08-19 21:12~21:21 退役
+      （commit e407458 刪 11546 專屬死重量、28ee1d3 watchdog 改守 11547）。
+
+      現在活著的對話入口是 **11547**（aris_cognitive_api，laap-AGI/aris_brain/），
+      但它 import 的是 laap_integrator / aris_cognitive_bridge，**不 import laap.startup**。
+
+      連帶後果（這是 owns 欄位裡的 agency 那一項）：
+      `laap/startup.py:134` 的 ensure_agency() → AgencyLoop.start() 是自主迴圈的
+      唯一生產啟動路徑，而它的上游 startup_all() 只有 scripts/start.sh 在呼叫
+      （scripts/start.sh:21 PORT 預設 11546）。11546 沒人跑 → start.sh 沒人跑 →
+      **自主迴圈自 08-19 起從未實例化**（三個 service log 的「迴路啟動」皆 0 次）。
+      agency-audit.jsonl 在那之後的 37 筆逐筆核對，全部是自檢腳本的測試字串。
+
+      ⚠️ 即使給它宿主也不會動：seed = psi.get_last_input() or _seed_snippet，
+      冷啟動時兩者皆空 → laap/agency.py:669 `if not seed` → skipped_stale += 1 → 零行動。
+      （2026-08-23 前台 90 秒實測：running=True, actions_total=0, skipped_stale=1）
+      「無人時自己找題目」是新功能，不是修復。
 
   - id: aris-memory
     at: scripts/aris-memory.py  # port 11551
@@ -53,9 +94,24 @@ nodes:
     owns: [長期知識, 概念層, 頁面, 連結層]
     note: "另有 gbrain CLI（外部指令，不在本 repo）。at 欄只放本 repo 打得開的東西。"
 
+  # ⚠️ 服務未運行，且 launchd 層被明確 disable（不是意外掉的）。
   - id: relay
-    at: scripts/aris-relay.py  # port 11550
+    at: scripts/aris-relay.py  # port 11550（未監聽，見 note）
     owns: [webchat 通道, event 狀態機]
+    note: >-
+      2026-08-23 實測：**11550 無人監聽**（lsof 全列 + nc 一致），
+      `launchctl print gui/501/com.neuralis.aris-relay` → Could not find service，
+      `launchctl print-disabled` → "com.neuralis.aris-relay" => disabled，
+      /tmp/com.neuralis.aris-relay.log 不存在（本次開機從未跑過）。
+
+      **是連坐停用，不是故障**：它的 plist 寫死
+      ARIS_API=http://localhost:11546/v1/chat/completions —— 指向已退役的 11546。
+      就算現在 enable 也連不到後端。11546 退役 → relay 一起關，是一致的決策。
+
+      ⚠️ 全 repo 搜 `launchctl disable` 零命中（所有安裝腳本用的是 bootout/unload，
+      而 bootout 不會寫 disabled 狀態）。**所以這個 disabled 是互動式下的指令，
+      不是任何腳本的副產品。** 同批被 disable 的還有 scream-monitor / safety-redline /
+      mutation-canary / phase-logger / nightshift，共 6 個。
 
   # ── 跨 repo 節點（2026-07-27 加）─────────────────────────
   # 這些不在 neuralis 裡，但 neuralis 依賴它們。
@@ -68,9 +124,12 @@ nodes:
     owns: [身體執行, 檔案讀寫, git 操作]
     watch: brain/drift.py
     note: |
-      本地 0.10.0，npm latest 0.10.13 — 落後 13 版（2026-07-27 實測）。
+      2026-08-23 重測：本地仍 0.10.0，npm latest 已是 0.14.3 —— 落後 43 版。
+      前次記錄「latest 0.10.13、落後 13 版」是 2026-07-27 的值，一個月後過期。
+      ⚠️ 版本差是流動量不是靜態量，引用時必須連量測日期一起帶，否則下一個人會照抄。
       ~/Developer/neuralis/scream-code/ 只有 mcp.json，是設定不是碼。
-      升級評估見 brain/upgrade-scream.md（結論：先不升）。
+      升級評估見 brain/upgrade-scream.md（結論：先不升）—— 但那個結論是在
+      「落後 13 版」的前提下做的，落後 43 版之後值不值得重估，由 Ryan 決定。
 
   - id: laap-upstream
     at: ~/Developer/laap-AGI
@@ -78,7 +137,11 @@ nodes:
     owned: false
     owns: [上游模型層]
     watch: brain/drift.py
-    note: 本地 feat/env-config-hermes@7f02b62 != upstream/main@c3d495c，已分叉。
+    note: |
+      2026-08-23 重測：本地實際在 main@94b9b58。
+      前次記錄「本地 feat/env-config-hermes@7f02b62」已過期 —— 分支與 commit 都變了。
+      ⚠️ 這裡不寫 upstream/main 的 sha：那要打網路才問得到，寫死一個值等於
+      製造下一個過期宣稱。要比對分叉就跑 brain/drift.py（watch 欄指的就是它）。
 
   - id: agentOS
     at: ~/agent-sandbox
@@ -120,11 +183,31 @@ nodes:
       參數對拍（Python vs Rust）：dominant_need 一致，needs 5/5 在 0.2 以內。
       已知問題：watchdog 重啟 API 會留下 orphan daemon（兩個 psi-daemon 寫同個檔案）。
 
+# ── 2026-08-23 批次標記 expect: fail 的依據與限度（讀之前先看這段）────────
+#
+# 下面 7 條新標的 `expect: fail`，依據是**節點層實測**，不是 probe 實測：
+#   · 11546 / 11550 無人監聽 —— lsof 全列 + nc 兩種方法交叉確認
+#   · 留言板.md 不存在 —— find 全 vault，同目錄 20 檔為正對照
+#   · aris-relay launchd 層 disabled + log 檔從未產生
+# 也就是說：**這幾條的兩端有一端根本不存在，邊不可能通。**
+#
+# ⚠️ 刻意沒跑 probe.py 來標：它有寫入副作用（aris_to_memory 的 check 是
+#    「注一筆 kick → DB rows +1」），而這次的範圍是純文件更新、零風險。
+#    本檔前科第一條正是「標 expect: fail 但 probe 實測是綠的 —— 手標的過期標記」，
+#    所以這裡把依據寫死：**節點死 ⇒ 邊死**，這個推論不需要 probe 也成立。
+#
+# ⚠️ 反過來不成立：節點活不代表邊通。等那些服務重新上線時，
+#    這些 expect: fail 必須逐條拿掉並用 probe 真跑一次，不要因為「服務開了」就假設綠。
+#
+# ⚠️ 沒有刪任何 edge：scripts/probe.py:642 `set(edges) ^ set(PROBES)` 是硬鎖，
+#    少一條邊就 return 2，整組健康檢查靜默拒跑（本檔前科第 6 條）。
+
 edges:
   - id: board_to_channel
     from: board
     to: bridge
     via: _message_board_watcher
+    expect: fail   # 2026-08-23：board 機制已廢除，留言板.md 不存在
     contract: direction=scream→aris · type=kick · 必須有 id（三者缺一就進不了主迴圈）
     note: 2026-07-26 修好前這條斷了，通知寫進沒人讀的 channel
     check: 留言板 mtime 變動 → channel 出現一筆合格 entry
@@ -133,6 +216,7 @@ edges:
     from: bridge
     to: aris-api
     via: main_loop 分支 B
+    expect: fail   # 2026-08-23：aris-api(11546) 無人監聽
     contract: kick 進來 → POST 11546 → 回覆非空
     check: 注一筆 kick → bridge log 出現「✅ Aris 回應」
 
@@ -147,6 +231,7 @@ edges:
     from: relay
     to: aris-memory
     via: aris-relay._remember（共用 aris_memory_client，與 bridge 同一套 marker 規則）
+    expect: fail   # 2026-08-23：relay(11550) 無人監聽 + launchd disabled
     contract: |
       webchat 每輪雙筆：使用者說的（source=webchat）+ Aris 回的（source=aris-self）。
       attention_line 只掛 aris-self 那筆。標記必須在回給前端之前剝掉。
@@ -168,6 +253,7 @@ edges:
     from: [aris-memory, memos, board]
     to: aris-api
     via: aris_memory.wake_context
+    expect: fail   # 2026-08-23：aris-api(11546) 未監聽、board 機制已廢除
     contract: 任一源掛掉跳過該塊，永不擋醒來 · 至少要有一源出東西
     check: GET /wake → context 非空且含 ≥1 個【】區塊標題
 
@@ -183,6 +269,7 @@ edges:
     from: relay
     to: aris-api
     via: process_worker messages 組裝（2026-08-01 加：撈前幾輪 history 注入 messages）
+    expect: fail   # 2026-08-23：兩端皆死：relay(11550) + aris-api(11546)
     contract: 同 conversation_id 的前幾輪要回放進 messages
     check: 兩輪哨兵，第二輪知道剛剛有代號被給過（不要求 exact match—Aris 會幻覺具體內容）
 
@@ -190,6 +277,7 @@ edges:
     from: relay
     to: aris-memory
     via: _remember
+    expect: fail   # 2026-08-23：relay(11550) 無人監聽 + launchd disabled
     contract: discovered_salience 只能由真 recall 賺，寫入端不得自發
     check: 新寫入的 aris-self 記憶 ds=0 且 total_recalls=0
 
@@ -231,6 +319,7 @@ edges:
     from: rust-psi-daemon
     to: aris-api
     via: RustPsiBackend._read_raw → _remap
+    expect: fail   # 2026-08-23：aris-api(11546) 無人監聽
     contract: daemon 每 100ms 寫 atomic state → RustPsiBackend 讀 latest.json → remap 成 Python dict
     check: spawn daemon → RustPsiBackend.get_state() 回 tick>0 且 schema=neuralis-rust-psi/v1
 
@@ -238,6 +327,7 @@ edges:
     from: aris-api
     to: rust-psi-daemon
     via: RustPsiBackend._write_event → FIFO → daemon reader thread
+    expect: fail   # 2026-08-23：aris-api(11546) 無人監聽
     contract: process_input/satisfy/post_affective_event 寫 "EventName,intensity\\n" 到 FIFO → daemon post 進 ring buffer
     check: write SocialPraise,1.0 到 FIFO → daemon log 無錯誤 → 5 秒後 tick 增加
 
@@ -253,5 +343,6 @@ edges:
     from: aris-api
     to: aris-api
     via: probe.py — 綜合健康指標
+    expect: fail   # 2026-08-23：aris-api(11546) 無人監聽
     contract: PSI 引擎活著 + 記憶持續累積 + probe 整體維持綠燈
     check: python3 scripts/aris-growth-check.py → True
