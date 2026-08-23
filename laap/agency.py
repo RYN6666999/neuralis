@@ -72,15 +72,30 @@ def _code_version() -> str:
     退回 mtime 而不是留空：**「查不到版本」與「沒有版本」不同**，而下游要能
     分辨。mtime 至少能答「是不是同一份檔案」，那正是舊碼跑了 22 小時那次
     需要的資訊。
+
+    sha 後面接 `-dirty`：**光有 sha 不夠**。2026-08-23 實測，工作區有 18 項
+    未提交／未追蹤的改動，`src_code` 卻回報乾淨的 `git:5cbe399` —— 那份資料
+    看起來是在某個 commit 上跑的，實際上跑的是那個 commit 加一堆沒進版控的
+    東西。跟「舊碼跑了 22 小時」是同一個病的變形：**版本標示與實際執行的碼
+    不符**，只是這次差的不是時間而是未提交的部分。
+
+    porcelain **刻意不加 `--untracked-files=no`**：`git apply` 建立新檔但不
+    `git add`，patch 帶進來的新模組是 untracked 的，那當然要算 dirty。
+    代價是任何未追蹤檔案都會讓它變 dirty，所以 patch／編輯器的殘留必須
+    進 .gitignore —— 見該檔尾部與 tests/test_gitignore_no_fake_dirty.py。
     """
     try:
         import subprocess
+        root = str(Path(__file__).resolve().parents[1])
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                           cwd=str(Path(__file__).resolve().parents[1]),
-                           capture_output=True, text=True, timeout=2)
+                           cwd=root, capture_output=True, text=True, timeout=2)
         sha = r.stdout.strip()
         if r.returncode == 0 and sha:
-            return f"git:{sha}"
+            st = subprocess.run(["git", "status", "--porcelain"],
+                                cwd=root, capture_output=True, text=True,
+                                timeout=5)
+            dirty = "-dirty" if (st.returncode == 0 and st.stdout.strip()) else ""
+            return f"git:{sha}{dirty}"
     except Exception:
         pass
     try:

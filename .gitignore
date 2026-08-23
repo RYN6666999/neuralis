@@ -52,3 +52,42 @@ ARIS.md.undo
 ARIS.md.history
 aris-digest.log
 *.bak-20*
+audit/
+
+# ── patch / 合併流程的殘留（2026-08-21 稽核）───────────────────────
+# **這不是整潔問題，是資料正確性問題。**
+#
+# `laap/agency.py:_code_version()` 用 `git status --porcelain` 判斷工作區乾不乾淨，
+# 並把結果寫進每一筆 audit 的 `src_code`（`git:<sha>` / `git:<sha>-dirty`）。
+# 那個 porcelain **刻意不加 `--untracked-files=no`** —— 因為 `git apply` 建立新
+# 檔案但不 `git add`，patch 帶進來的新模組是 untracked 的，必須算 dirty。
+#
+# 副作用：**任何**未追蹤檔案都會讓 `src_code` 變 `-dirty`，即使一行碼都沒改。
+# 而**假的 `-dirty` 事後無法跟真的區分** —— 那批資料就永久標錯了。
+#
+# 三個來源，三問（逐一實測）：
+#   1. 這個 patch 產生什麼          → audit-failures.jsonl（p5 已處理）
+#   2. 我們教對方跑的指令產生什麼     → *.rej / *.orig（patch --reject / --backup）
+#   3. 我們交給對方的東西會留在哪裡   → *.patch / *.diff（我們每一輪都在丟）
+# 第 3 項最後才被想到：前兩項是某個動作的副作用，第 3 項**沒有動作** ——
+# 東西就在那裡，因為我們給了，所以不在「工具會產生什麼」的搜尋空間裡。
+#
+# 注意一：改本檔**自己**會讓 porcelain 顯示 ` M .gitignore`，所以加完這些行之後
+#   仍然是 dirty —— **要 commit 才會乾淨。** 那不是這些行沒生效。
+# 注意二：`#` 在 gitignore 是註解字元，Emacs 的 `#*#` **必須轉義**成 `\#*#`
+#   （實測未轉義時完全不生效）。
+# 注意三：`*.bak` 刻意**不**用裸 pattern —— `brain/consumers.yaml.bak` 是**已追蹤**
+#   的檔案（`git check-ignore --no-index` 驗得到裸 `*.bak` 會遮蔽它）。
+#   已追蹤檔案的修改仍看得到，但刪掉再重建會靜默消失，且語義上誤導。
+*.rej
+*.orig
+*.py.bak
+*.sh.bak
+*.jsonl.bak
+\#*#
+.merge_file_*
+*.BASE.*
+*.LOCAL.*
+*.REMOTE.*
+*.patch
+*.diff
