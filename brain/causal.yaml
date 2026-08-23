@@ -54,9 +54,9 @@ blockers:
   - id: confidence-gate
     label: Confidence 閘（四繩計算）
     status: partial
-    done: [寫入端硬閘, origin/confidence/provenance 三欄, 封頂, relay 帶 origin]
-    missing: [四繩計算, 檢索過濾, 黃轉綠升格路徑]
-    blocks: [固化cron, 檢索過濾, 升格路徑, 修剪cron]
+    done: [寫入端硬閘, origin/confidence/provenance 三欄, 封頂, relay 帶 origin, 檢索過濾的查詢層實作]
+    missing: [四繩計算, 黃轉綠升格路徑]
+    blocks: [固化cron, 升格路徑, 修剪cron]
     src: 管線地圖 §11 #6 #9 #14
     note: 下游 4 個全 P0。目前圖上最高槓桿點。
     evidence: |
@@ -107,8 +107,21 @@ blockers:
     status: partial
     done: [confidence_gte 參數, SQL CASE 閾值比較, 6 個測試案例含反向測試]
     missing: [生產呼叫端 —— 全 repo 零個地方傳這個參數]
-    blocked_by: [confidence-gate]
     src: 管線地圖 §11 #6
+    unblocked_note: |
+      2026-08-23 拿掉 blocked_by: [confidence-gate]。
+      理由：查詢層實作已完成，顯然沒有被 confidence-gate 擋住 ——
+      而 confidence 欄位本身也已經有 red/yellow 分佈了（memcheck 實測），
+      所以「等 confidence-gate 做完才能做檢索過濾」這個依賴本來就不成立。
+
+      ⚠️ 拿掉時必須**兩邊一起拿**：brain/blast.py:68-77 會雙向自動補全 ——
+      只刪 blocked_by 而留著 confidence-gate.blocks 裡的這一項，
+      blast 會從 blocks 那邊把 blocked_by 加回來，等於沒改。
+      同一次也把 confidence-gate.missing 裡的「檢索過濾」移到 done，
+      因為那個功能不再是它欠的東西。
+
+      剩下真正卡住它的不是 confidence-gate，是**沒有人呼叫** ——
+      那不是依賴關係，是接線工作，所以不該用 blocked_by 表示。
     evidence: |
       2026-08-23 逐條驗 blocker status 時發現：原本標 not_started，實際上實作是完整的。
         · scripts/aris-memory.py:458 `def query(..., confidence_gte="")`
