@@ -39,6 +39,25 @@ from laap.psi_core import PsiCore, NeedDriveSystem, EmotionGradient
 
 
 @pytest.fixture(autouse=True)
+def _isolate_agency_audit(tmp_path, monkeypatch):
+    """任何測試都不得寫到真的 agency-audit.jsonl。
+
+    2026-08-23：靠新加的 provenance 欄位抓到的。跑完全套後真檔多了 3 行，
+    `src_pid` 指回 pytest 自己的進程 —— `test_agency_state_roundtrip.py` 與
+    `test_psi_callsite_migration.py` 會呼叫 `_act` / `_evaluate`，而它們
+    沒有導向 tmp。這就是那 1099 筆裡 234 筆測試流量的其中一條來源，
+    跟 `check-agency.py` 同型，只是藏在測試套件裡沒人看。
+
+    諷刺的是：**它是被自己修的東西抓到的** —— 沒有 src_pid 就查不出兇手。
+
+    導向 tmp 而不是逐個測試補 monkeypatch，理由同 `_audit` 把 provenance
+    加在唯一寫入路徑：**「忘記帶」不可能發生**。
+    """
+    from laap import agency
+    monkeypatch.setattr(agency, "AUDIT_PATH", tmp_path / "agency-audit.jsonl")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_failure_trail(tmp_path, monkeypatch):
     """任何測試都不得寫到真的 audit-failures.jsonl。
 
