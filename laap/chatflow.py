@@ -482,56 +482,9 @@ def _psi_memories_sync(query: str) -> list[str]:
             logger.info("[chatflow] recall 鎖被佔用，改無鎖唯讀（不擋召回）")
     except Exception:
         pass
-    try:
-        try:
-            client = _recall_client()
-            if client is None:
-                logger.info("[chatflow] recall gbrain client None，跳過")
-                return []
-            from memory_store import hybrid_hits_any
-            try:
-                hits = hybrid_hits_any(client, query, 4)
-            except Exception as _e:
-                logger.info(f"[chatflow] recall 首次失敗 {_e!r}，重試（client 自癒）")
-                c2 = _recall_client()
-                hits = hybrid_hits_any(c2, query, 4) if c2 is not None else []
-            logger.info(f"[chatflow] recall query={query[:40]!r} -> {len(hits)} hits")
-            out = []
-            for h in hits:
-                if h.get("score", 0) < 0.3:
-                    continue
-                t = " ".join((h.get("chunk_text", "") or "").split())
-                key = t[:40]
-                if len(t) < 4:
-                    continue
-                if key in _quoted_recently:
-                    # 防穿幫去重的保底：這輪還沒引進任何記憶時，允許重引命中
-                    # （否則問法變體會讓相關記憶永遠被擋 → 答「不知道」）。
-                    if out:
-                        continue
-                else:
-                    _quoted_recently.append(key)
-                out.append(t[:80])
-                try:
-                    import re as _re
-                    from laap import memory_utility
-                    _m = _re.search(r"mem-\d+-\w+", str(h.get("slug", "")))
-                    if _m:
-                        memory_utility.record_recall(_m.group(0))
-                except Exception:
-                    pass
-                if len(out) >= 2:
-                    break
-            return out
-        finally:
-            if locked:
-                try:
-                    release("gbrain")
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.info(f"[chatflow] recall 失敗: {e!r}")
-        return []
+    # 記憶管線已收斂為 :11551/wake（hook 注入），不再需要 gbrain 即時召回
+    logger.info("[chatflow] recall 跳過（記憶管線已收斂，由 hook /wake 注入）")
+    return []
 
 
 _NEED_PHRASE = {

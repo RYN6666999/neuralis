@@ -1,0 +1,5 @@
+{"input": "V12 引擎檔名?", "expected_memory": "aris_v12_dense_kernel.py", "label_a": "aris_v12_dense_kernel.py", "label_b": "aris_v12_dense_kernel.py"}
+{"input": "把客戶 A 簽約進度拉出來", "label_a": "客戶A.簽約", "label_b": "客戶A.簽約"}
+{"input": "庫存剩多少", "label_a": "庫存.產品", "label_b": "庫存.產品"}
+{"input": "上次修了那隻記憶 recall?", "label_a": "記憶recall修復", "label_b": "記憶修復08012"}
+{"input": "幫我約客戶", "label_a": "客戶.約", "label_b": "客戶.約"}

@@ -161,18 +161,18 @@ nodes:
       不要讀那份。本尊以 at: 為準。
 
   - id: psi-evaluator
-    at: ~/.aris-evaluator/psi_evaluator.py
     owns: [PSI 評估, 需求驅力分析, need_bias 計算]
     note: |
       讀 session log → 算 need_bias → 直接修改 PSI state → 輸出報告。
       2026-07-29 建，係數 provisional。
+      位置: ~/.aris-evaluator/psi_evaluator.py
 
   - id: cloud-evaluator
-    at: ~/.aris-evaluator/cloud_evaluator.py
     owns: [雲端 LLM 評估, 雙模型評分, OpenRouter 路由]
     note: |
       用 OpenRouter API 呼叫 GLM-5.2 / Kimi K3 評估 session log。
       2026-07-29 建，取代失敗的 GenSpark 瀏覽器方案。
+      位置: ~/.aris-evaluator/cloud_evaluator.py
 
   - id: rust-psi-daemon
     at: rust/target/release/psi-daemon

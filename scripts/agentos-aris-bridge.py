@@ -1126,6 +1126,26 @@ def _execute_by_route(route_key: str, task_desc: str) -> dict:
         kick_script = str(Path.home() / "Developer" / "neuralis" / "scripts" / "kick-aris.py")
         return _run([sys.executable, kick_script, "--quiet", msg], limit=3000, timeout=30)
 
+    # ── gbrain: Aris 長期記憶搜尋（2026-08-13 補） ──
+    elif route_key == "gbrain":
+        query = _extract_query(task_desc) or task_desc[:100]
+        try:
+            from gbrain_client import get_client, hybrid_hits
+            client = get_client()
+            if client is not None:
+                hits = hybrid_hits(client, query, 5)
+                lines = [f"[{h.get('score', 0):.2f}] {h.get('slug','')} — "
+                         f"{(h.get('chunk_text') or h.get('title') or '')[:200]}"
+                         for h in hits]
+                output = "\n".join(lines) if lines else "無結果"
+                return {"success": True, "output": output}
+            log.info("[gbrain] client 不可用，退 CLI")
+        except Exception as e:
+            log.info(f"[gbrain] client 失敗，退 CLI: {e}")
+        # fallback: gbrain CLI
+        r = _run(["gbrain", "query", query], limit=5000, timeout=15)
+        return r if r["success"] else {"success": True, "output": f"[gbrain] 已接收記憶搜尋任務，建議用完整工具集處理: {task_desc[:80]}"}
+
     # ── unknown ──
     else:
         return {"success": True, "output": f"[AgentOS] 已接收任務，路由分類: {route_key}。\n請 Scream 使用完整工具集處理: {task_desc[:200]}"}

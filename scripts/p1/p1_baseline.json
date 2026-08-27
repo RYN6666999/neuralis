@@ -1,0 +1,8 @@
+{
+  "date": "2026-08-26",
+  "n": 10,
+  "correct": 1,
+  "accuracy": 0.1,
+  "method": "gbrain lexical",
+  "quizzes": "/Users/ryan/Developer/neuralis/scripts/p1/quiz_fangduoduo.jsonl"
+}

@@ -55,19 +55,48 @@ _REPO_ROOTS = [os.path.expanduser("~/Developer/laap-AGI"),
 _FNAME_RE = re.compile(r"(?<![A-Za-z0-9_])[\w./-]+\.(?:py|ts|tsx|js|jsx|md|json|sh|toml|yaml|yml)\b")
 _MOD_RE = re.compile(r"\b(?:aris|laap)[._]\w+\b")
 _repo_names_cache = None
+_REPO_CACHE_FILE = os.path.expanduser("/tmp/aris-repo-names-cache.json")
+_REPO_CACHE_TTL = 3600  # 1 小時
 
 
 def _repo_names() -> set:
-    """兩個 repo 的檔案+資料夾名（basename）一次快取，供真偽比對。"""
+    """兩個 repo 的檔案+資料夾名（basename）一次快取，供真偽比對。
+    
+    跨進程快取：寫入 /tmp/aris-repo-names-cache.json，每小時更新一次。
+    """
     global _repo_names_cache
-    if _repo_names_cache is None:
-        s = set()
-        for root in _REPO_ROOTS:
-            for _r, _ds, fs in os.walk(root):
-                if ".git" in _r:
-                    continue
-                s.update(fs); s.update(_ds)
-        _repo_names_cache = s
+    if _repo_names_cache is not None:
+        return _repo_names_cache
+    
+    # 先讀 /tmp 快取（跨進程共享）
+    try:
+        import time
+        data = json.loads(open(_REPO_CACHE_FILE).read())
+        if time.time() - data.get("ts", 0) < _REPO_CACHE_TTL:
+            _repo_names_cache = set(data["names"])
+            return _repo_names_cache
+    except Exception:
+        pass
+    
+    # 快取失效或不存在 → os.walk 重建
+    s = set()
+    for root in _REPO_ROOTS:
+        for _r, _ds, fs in os.walk(root):
+            if ".git" in _r:
+                continue
+            s.update(fs); s.update(_ds)
+    _repo_names_cache = s
+    
+    # 寫入 /tmp 快取供跨進程使用
+    try:
+        import time
+        open(_REPO_CACHE_FILE, "w").write(json.dumps({
+            "ts": time.time(),
+            "names": list(s),
+        }))
+    except Exception:
+        pass
+    
     return _repo_names_cache
 
 

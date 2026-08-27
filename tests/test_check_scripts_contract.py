@@ -60,6 +60,7 @@ MIGRATED = {
     "check-psi-response.py",
     "check-consolidation.py",
     "check-emotion-recall.py",
+    "check-loops.py",
 }
 
 # 尚未遷移、且**已知**會因外部依賴而跳過段落的腳本。

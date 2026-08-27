@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.neuralis.aris-loops</string>
+
+  <!-- 直接呼叫 venv 的 python，不經 shell、不 source zshrc。
+       aris_loops.py 自己硬寫 sys.path（原則 2），所以這裡刻意不設
+       PYTHONPATH —— 少一個能讓 memory_store 靜默換版的旋鈕。 -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ryan/Developer/laapenv/bin/python3</string>
+    <string>-u</string>
+    <string>/Users/ryan/Developer/neuralis/aris_loops.py</string>
+  </array>
+
+  <!-- cwd 設在 neuralis：不影響 import（路徑已硬寫），但讓相對路徑的
+       產物（audit jsonl 等）落在預期的地方。 -->
+  <key>WorkingDirectory</key><string>/Users/ryan/Developer/neuralis</string>
+
+  <key>RunAtLoad</key><true/>
+
+  <!-- 重點：不要用 KeepAlive=true。
+       aris_loops.py 在「載錯模組」「該起的迴圈沒起」時會 exit 1，
+       那是設定錯誤，重啟一萬次也不會好。SuccessfulExit=false 讓 launchd
+       在 exit≠0 時停手，錯誤安靜地停在紅燈，而不是每 30 秒炸一次刷滿 log。
+       正常收工（SIGTERM → exit 0）則會被拉回來。 -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+
+  <!-- 2026-08-24 實測：SIGTERM 到行程退出約 10s。時間花在
+       AgencyLoop.stop() 的狀態存檔，那會走一次 gbrain tools/call，
+       在關機情境下常常吃滿 10s timeout（實測輸出：
+       「[Agency] 狀態存檔失敗: tools/call timeout (10.0s)」）。
+       launchd 預設 20s 後 SIGKILL，本來就夠；寫死 30s 是為了讓
+       「為什麼收工要等」這件事留在檔案裡，而不是下一個人重新量一次。 -->
+  <key>ExitTimeOut</key><integer>30</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- 第一次上線建議先關固化：run_pass() 會對 laap/memory/episodic/*
+         做 delete / move，門檻是 07 月調的，停機期間累積了多少頁、
+         第一輪會刪掉什麼，沒有人算過。宿主穩了再改成 on。 -->
+    <key>NEURALIS_CONSOLIDATION</key><string>off</string>
+    <key>NEURALIS_AGENCY</key><string>on</string>
+
+    <!-- 2026-08-26 實測補上：launchd 不經 shell，PATH 裡沒有 ~/.bun/bin，
+         gbrain_client._find_binary() 的 shutil.which("gbrain") 因此落空，
+         daemon 起得來但狀態持久化整條失效（log: 「gbrain 不可用（binary 缺？）」，
+         心跳 agency_state_loaded=false）。用 GBRAIN_BIN 明確指路，
+         而不是塞 PATH —— 少一個能靜默換版的旋鈕，和上面 PYTHONPATH 同一個理由。 -->
+    <key>GBRAIN_BIN</key><string>/Users/ryan/.bun/bin/gbrain</string>
+
+    <!-- 刻意不設 NEURALIS_PSI_BACKEND。start.sh:45 設 rust，但它同時
+         在 :16-18 pkill psi-daemon —— 那會殺掉現在獨立跑著的那支。
+         不設 = 走 PythonPsiBackend。這是明知的差異，要切 rust 之前
+         先想清楚 pkill 那條怎麼處理。 -->
+  </dict>
+
+  <key>StandardOutPath</key><string>/tmp/com.neuralis.aris-loops.log</string>
+  <key>StandardErrorPath</key><string>/tmp/com.neuralis.aris-loops.log</string>
+</dict>
+</plist>

@@ -1,0 +1,10 @@
+{"input": "房多多買的都是什麼房?", "expected": "1-銷售系統/房多多的vip買房三大特色", "label_a": null}
+{"input": "VIP買房三大特色是什麼?", "expected": "1-銷售系統/房多多的vip買房三大特色", "label_a": null}
+{"input": "銀行估價大概是實價登錄的幾折?", "expected": "1-銷售系統/_ai-房多多品牌定位整合", "label_a": null}
+{"input": "房多多是不是仲介?", "expected": "1-銷售系統/601房多多內訓課程大更新", "label_a": null}
+{"input": "房多多介紹自己會先講哪一頁建立WHY?", "expected": "1-銷售系統/601房多多內訓課程大更新", "label_a": null}
+{"input": "B1小白客戶該怎麼溝通?", "expected": "2-認知分層/_ai-認知分層整合系統", "label_a": null}
+{"input": "客戶是受害者被直銷坑過,該怎麼應對?", "expected": "2-認知分層/_ai-認知分層整合系統", "label_a": null}
+{"input": "90天看懂房地產、一年買房的陪跑計畫,是怎麼回事?", "expected": "1-銷售系統/房多多的百萬價值提案", "label_a": null}
+{"input": "嫻嫻講師買宜蘭房子的故事在哪?", "expected": "1-銷售系統/新竹分享會", "label_a": null}
+{"input": "學員把房貸4降到1.7萬的見證在哪?", "expected": "1-銷售系統/新竹分享會", "label_a": null}

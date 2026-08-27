@@ -70,7 +70,21 @@ def _emotion_rerank(client, hits: List[Dict]) -> List[Dict]:
     for h in hits:
         emo = _emotion_intensity_for(client, h.get("slug", ""))
         h["_score_adj"] = float(h.get("score", 0.0)) * (1.0 + _EMOTION_RECALL_WEIGHT * emo)
-    return sorted(hits, key=lambda h: h.get("_score_adj", 0.0), reverse=True)
+    # 2026-08-14 T1 修復：分組內排序，不跨組。
+    #
+    # 舊版直接全域 sorted(_score_adj)，把上游 _memory_first 的「自己的記憶頁優先」
+    # 整個洗掉——兩個函式互相抵銷，結果是 laap/memory/* 種子頁被全腦知識頁的
+    # 原始 score 壓下去，對話永遠召回不到自己的記憶。
+    # score 來自不同通道（query hybrid vs search lex），本來就不同尺度，
+    # 拿來跨組比大小沒有意義。
+    return sorted(
+        hits,
+        key=lambda h: (
+            (h.get("slug") or "").startswith(_GBRAIN_NS),
+            h.get("_score_adj", 0.0),
+        ),
+        reverse=True,
+    )
 
 
 def _backend_mode() -> str:
@@ -452,6 +466,23 @@ def hybrid_hits_any(client, query: str, limit: int) -> list:
             hit_t = _token_hits(client, t, limit_i)
             if hit_t:
                 _add(hit_t)
+
+    # 2026-08-14 T1 修復：向量沒撈到任何自己的記憶頁 → 補一次 lex-only。
+    #
+    # 為什麼需要這段：gbrain_client.hybrid_hits 的降級條件是「query 回空才走
+    # search」，但 query（hybrid+RRF）永遠回得出低分雜訊、從不回空，所以 lex
+    # 通道實際上永遠走不到。結果是 laap/memory/* 種子頁明明用 keyword 一查就中
+    # （tsquery 'V12' → 7 頁，其中 4 頁是種子），對話卻永遠召回不到，
+    # _memory_first 也無從提拔——它只能重排已經在手上的 hits。
+    #
+    # 只在「一頁自己的記憶都沒撈到」時才多付一次呼叫，正常情況零額外成本。
+    if not any((h.get("slug") or "").startswith(_GBRAIN_NS) for h in seen.values()):
+        for t in toks:
+            try:
+                _add(client.call("search", {"query": t, "limit": limit_i}))
+            except Exception as e:
+                logger.debug(f"[memory_store] lex 補撈失敗 token={t!r}: {e}")
+
     return _memory_first(list(seen.values()))[:limit]
 
 def _memory_first(hits: list) -> list:

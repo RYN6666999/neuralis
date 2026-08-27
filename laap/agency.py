@@ -11,7 +11,7 @@ AgencyLoop — Phase 6：閉合「需求 → 行動 → 結果 → 記憶」迴�
   - 審計：每次行動一行 JSONL → neuralis/agency-audit.jsonl（不進版控）
   - 總開關：NEURALIS_AGENCY=off
 
-回寫：行動結果 → memory_bridge.store_important（→ gbrain laap/memory/*），
+回寫：行動結果 → 已由 hook post_llm_call 寫入 :11551/store（記憶管線收斂）
 importance 上限 0.5（自主寫入防污染，見 handoff retention 原則）+ 情緒加權。
 成功行動 satisfy 對應需求 → drive 回落 → 迴路自然靜下來，直到鬆弛再拉高。
 """
@@ -496,17 +496,8 @@ class AgencyLoop:
             self._write_task_state()
 
     def _save_goal_memory(self, result: str) -> None:
-        try:
-            import memory_bridge
-            emo = self.psi.get_state()["emotion"]
-            importance = min(0.5, 0.25 + 0.25 * emo.get("arousal", 0.3))
-            memory_bridge.store_important(
-                f"[目標完成] {self._goal_spec}\n最終結果:\n{result[:500]}",
-                tags=["agency", "goal", "scream-task"],
-                importance=importance)
-            logger.info(f"[Agency] 目標記憶已存: {self._goal_spec[:40]}")
-        except Exception as e:
-            logger.warning(f"[Agency] 目標記憶儲存失敗: {e}")
+        """目標記憶已由 hook post_llm_call 寫入 :11551/store。"""
+        logger.info(f"[Agency] 目標記憶已由 hook 處理（stub 已移除）: {self._goal_spec[:40]}")
 
     def _write_task_state(self) -> None:
         state = {"goal_spec": self._goal_spec, "task_queue": self._task_queue,
@@ -820,32 +811,13 @@ class AgencyLoop:
 
         mem_id = ""
         if ok:
-            try:
-                import memory_bridge
-                emo = self.psi.get_state()["emotion"]
-                importance = min(0.5, 0.25 + 0.25 * emo["arousal"])
-                mem_id = memory_bridge.store_important(
-                    f"[自主行動:{need}] 查詢「{prompt}」→\n{result[:500]}",
-                    tags=["agency", need], importance=importance)
-                self.psi.satisfy(need, 0.2, "agency")
-                self._seed_snippet = self._extract_seed(result)
-                # E1.2：記 provenance（哪個 need/tool/angle 產生這條記憶）—
-                # 之後這條被 recall 用到 → 發延遲效用獎勵給該 angle
-                try:
-                    from laap import memory_utility
-                    memory_utility.tag_memory(mem_id, need, tool, used_angle)
-                except Exception:
-                    pass
-            except Exception as e:
-                logger.warning(f"[Agency] 回寫失敗: {e}")
+            # 記憶回寫已由 hook post_llm_call 處理（:11551/store）
+            self.psi.satisfy(need, 0.2, "agency")
+            self._seed_snippet = self._extract_seed(result)
+            logger.debug(f"[Agency] 行動記憶已由 hook 處理（stub 已移除）: {need}")
 
             if ok and tool == "scream-ask":
-                mem_id = memory_bridge.store_important(
-                    f"[scream-ask] 問「{prompt}」→\n{result[:500]}",
-                    tags=["agency", "scream", "tui-learning"],
-                    importance=importance)
-                if mem_id:
-                    logger.info(f"[Agency] scream-ask 記憶已存: {mem_id}")
+                logger.debug(f"[Agency] scream-ask 記憶已由 hook 處理: {prompt[:40]}")
 
         self._action_ts.append(now)
         self._need_last_action[need] = now

@@ -11,11 +11,6 @@ DB = os.environ.get("ARIS_MEMORY_DB", str(Path.home() / ".aris-memory.db"))
 # 每天都在長，但住在 Scream 進程裡，Aris 從來讀不到 —— 這裡把它接上。
 MEMOS_DB = os.environ.get(
     "ARIS_MEMOS_DB", str(Path.home() / ".scream-code/memory/memos.sqlite"))
-BOARD = os.environ.get(
-    "ARIS_BOARD",
-    str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian"
-                      "/Documents/Fun/Aris/留言板.md"))
-_BOARD_ENTRY = re.compile(r"\n\[\d{4}-\d{2}-\d{2}[^\]]*\]")
 
 
 def _tau_score(salience, discovered, age_days):
@@ -29,15 +24,18 @@ def _tau_score(salience, discovered, age_days):
 
 
 def _wake_memos(limit=3):
-    """源②：Scream memos（唯讀跨進程）。無 recall 追蹤 → 沒 τ 信號，退回純時序。"""
+    """源②：Scream memos（唯讀跨進程），僅限最近 7 天。無 recall 追蹤 → 沒 τ 信號，退回純時序。"""
     try:
         db = sqlite3.connect(f"file:{MEMOS_DB}?mode=ro", uri=True)
+        cutoff = (time.time() - 7 * 86400) * 1000  # Scream 用毫秒
         rows = db.execute(
             "SELECT user_need, what_worked, what_failed FROM memos "
             "WHERE user_need IS NOT NULL AND user_need != '' "
-            "ORDER BY recorded_at DESC LIMIT ?", (limit,)).fetchall()
+            "AND recorded_at > ? "
+            "ORDER BY recorded_at DESC LIMIT ?", (cutoff, limit)).fetchall()
         db.close()
-    except Exception:
+    except Exception as e:
+        print(f"[aris-memory] _wake_memos 異常（不影響主流程）: {e}", file=__import__('sys').stderr, flush=True)
         return ""
     out = []
     for need, worked, failed in rows:
@@ -51,19 +49,8 @@ def _wake_memos(limit=3):
 
 
 def _wake_board(window=4000, cap=800):
-    """源③：留言板最末則 —— 人類/Claude 留的話。
-
-    先在大窗（window）找最後一個時間戳，從那裡起算，再截 cap。
-    找不到時間戳才退回尾段。這樣不會像純截尾那樣切在句子中間。
-    """
-    try:
-        tail = Path(BOARD).read_text(encoding="utf-8", errors="replace")[-window:]
-    except Exception:
-        return ""
-    hits = list(_BOARD_ENTRY.finditer(tail))
-    tail = tail[hits[-1].start() + 1:] if hits else tail[-cap:]
-    tail = tail.strip()[:cap].strip()
-    return f"【留言板最末則】\n{tail}" if tail else ""
+    """源③：留言板 — 已移除（檔案不存在，2026-08-27）。"""
+    return ""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -163,32 +150,13 @@ def _ensure_columns(conn):
     for sql in adds:
         conn.execute(sql)
     # confidence 索引在補欄後才建（既有表補欄前該欄不存在）
-    conn.execute("CREATE TABLE IF NOT EXISTS contradiction_journal (id INTEGER PRIMARY KEY AUTOINCREMENT, mem_id INTEGER NOT NULL, rope TEXT NOT NULL, conflict_mem_id INTEGER, reason TEXT NOT NULL, created_at REAL NOT NULL, external_verified INTEGER DEFAULT 0, verification_score INTEGER DEFAULT 0, verification_detail TEXT DEFAULT '{}')")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_cj_mem ON contradiction_journal(mem_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_confidence ON memories(confidence)")
-    try:
-        conn.execute("CREATE TABLE IF NOT EXISTS ontology (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, type TEXT NOT NULL, purpose TEXT NOT NULL, relationships TEXT DEFAULT '[]', status TEXT DEFAULT 'active', updated_at REAL NOT NULL)")
-        conn.execute("CREATE TABLE IF NOT EXISTS causal_chain (id INTEGER PRIMARY KEY AUTOINCREMENT, cause_type TEXT NOT NULL, cause_value REAL NOT NULL, effect_type TEXT NOT NULL, effect_value TEXT NOT NULL, outcome INTEGER DEFAULT 0, timestamp REAL NOT NULL)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_causal_cause ON causal_chain(cause_type)")
-    except:
-        pass
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS decision_log (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL NOT NULL, route TEXT NOT NULL, task_desc TEXT DEFAULT "", psi_energy REAL DEFAULT 0, psi_competence REAL DEFAULT 0.5, psi_certainty REAL DEFAULT 0.5, psi_growth REAL DEFAULT 0.5, success INTEGER DEFAULT 0, duration REAL DEFAULT 0, error TEXT DEFAULT "")")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_route ON decision_log(route)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_psi ON decision_log(psi_energy)")
     except:
         pass
-    # Rope 4: external_verified 欄位 migration
-    try:
-        conn.execute("ALTER TABLE contradiction_journal ADD COLUMN external_verified INTEGER DEFAULT 0")
-    except: pass
-    try:
-        conn.execute("ALTER TABLE contradiction_journal ADD COLUMN verification_score INTEGER DEFAULT 0")
-    except: pass
-    try:
-        conn.execute("ALTER TABLE contradiction_journal ADD COLUMN verification_detail TEXT DEFAULT '{}'")
-    except Exception:
-        pass  # 已存在
     conn.commit()
 
 class ArisMemory:
@@ -235,205 +203,13 @@ class ArisMemory:
             self.conn.commit()
             row_id = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-            # Rope 1: 內部一致檢查（零成本，SQL only）
-            contradictions = self._check_internal_consistency(content, row_id)
-            # Rope 2: 時間一致檢查（過時=紅旗）
-            temporal = self._check_temporal_consistency(content, row_id)
-            all_issues = contradictions + temporal
-            if all_issues:
-                confidence = "red"
-                self.conn.execute("UPDATE memories SET confidence=? WHERE id=?", ("red", row_id))
-                # 2026-07-30 修復：矛盾日誌自動通知
-                rope1_count = len(contradictions)
-                rope2_count = len(temporal)
-                import sys as _sys
-                print(f"[CONTRADICTION] mem={row_id} rope1={rope1_count} rope2={rope2_count} confidence=red", file=_sys.stderr)
-                now_j = time.time()
-                for issue in all_issues:
-                    rope = "rope1" if "emotion_tag" in issue else "rope2"
-                    cid = issue.get("id") or issue.get("conflict_mem_id")
-                    reason = issue.get("reason") or issue.get("emotion_tag") or issue.get("keyword") or "?"
-                    v_result = self._check_external_verification(content)
-                    verified = 1 if v_result["verified"] else 0
-                    v_score = v_result["score"]
-                    v_detail = json.dumps(v_result["sources"], ensure_ascii=False)
-                    self.conn.execute(
-                        "INSERT INTO contradiction_journal (mem_id, rope, conflict_mem_id, reason, created_at, external_verified, verification_score, verification_detail) VALUES (?,?,?,?,?,?,?,?)",
-                        (row_id, rope, cid, str(reason)[:200], now_j, verified, v_score, v_detail)
-                    )
-                self.conn.commit()
-
             return {"id": row_id, "source": source, "source_id": sid, "created_at": now,
                     "origin": origin, "confidence": confidence,
                     "encoding_salience": sal, "serves_needs": sv, "psi_state": ps,
                     "discovered_salience": ds, "total_recalls": tr, "flagged": fl,
-                    "mood_note": mn, "contradictions": all_issues,
+                    "mood_note": mn, "contradictions": [],
                     "event_type": et, "causal_parent_id": cid}
 
-
-    def _check_temporal_consistency(self, content: str, exclude_id: int) -> list:
-        """Rope 2: 時間一致檢查（零成本，SQL only）。
-        對照 spec：過時=紅旗。
-        作法：檢查內容是否包含時間敏感關鍵詞，且記憶已超過有效期限。
-        """
-        issues = []
-        # 時間敏感關鍵詞 + 對應的有效期限（天）
-        time_sensitive = {
-            "today": 1, "yesterday": 2, "tomorrow": 1,
-            "this week": 7, "this month": 30, "this year": 365,
-            "now": 1, "current": 7, "latest": 7,
-            "剛剛": 1, "今天": 1, "昨天": 2, "明天": 1,
-            "這週": 7, "這個月": 30, "今年": 365,
-            "目前": 7, "最新": 7, "最近": 7,
-        }
-        found = [kw for kw in time_sensitive if kw in content]
-        if not found:
-            return []
-        # 查這條記憶的 created_at
-        row = self.conn.execute("SELECT created_at FROM memories WHERE id=?", (exclude_id,)).fetchone()
-        if not row:
-            return []
-        age_days = (time.time() - row[0]) / 86400.0
-        for kw in found:
-            max_age = time_sensitive[kw]
-            if age_days > max_age:
-                issues.append({
-                    "type": "temporal",
-                    "keyword": kw,
-                    "age_days": round(age_days, 1),
-                    "max_age_days": max_age,
-                    "reason": f"內容含時間敏感詞「{kw}」，已過期 {age_days:.0f} 天（上限 {max_age} 天）"
-                })
-        return issues
-
-    def _check_external_verification(self, content: str) -> dict:
-        """Rope 4 v2: 多源外部驗證管線。
-        
-        優化（2026-07-29 紅軍攻擊後全面升級）：
-          1. 多源驗證：gbrain + web search + LLM
-          2. 進階關鍵詞提取：TF-IDF 概念，低頻詞優先
-          3. 加權評分：gbrain=0.4, web=0.3, llm=0.3
-          4. 詳細報告：回傳各來源的驗證結果
-        """
-        result = {"verified": False, "score": 0, "sources": {}}
-        try:
-            import sys as _sys, subprocess, urllib.request, json as _json
-            from pathlib import Path
-            _sys.path.insert(0, str(Path.home() / "Developer/neuralis"))
-            from gbrain_client import get_client
-            
-            kw = self._extract_keywords(content)
-            if not kw:
-                return result
-            
-            score = 0
-            
-            # Source 1: gbrain
-            try:
-                client = get_client()
-                if client:
-                    gbrain_ok = False
-                    for sq in [" ".join(kw[:3]), "評估報告"]:
-                        r = client.call("search", {"query": sq, "limit": 3}, timeout=10.0)
-                        hits = r if isinstance(r, list) else r.get("hits", [])
-                        for hit in hits:
-                            slug = hit.get("slug", "") if isinstance(hit, dict) else str(hit)
-                            if "aris-evaluator" in slug:
-                                gbrain_ok = True
-                                break
-                    if gbrain_ok:
-                        score += 40
-                        result["sources"]["gbrain"] = True
-                    else:
-                        result["sources"]["gbrain"] = False
-            except Exception as e:
-                result["sources"]["gbrain"] = str(e)[:60]
-            
-            # Source 2: AnySearch web
-            try:
-                sq = " ".join(kw[:4])
-                wr = subprocess.run(["bash", str(Path.home() / ".agents/skills/anysearch/scripts/anysearch_cli.sh"), "search", sq],
-                                   capture_output=True, text=True, timeout=15)
-                if wr.returncode == 0 and len(wr.stdout) > 100:
-                    score += 30
-                    result["sources"]["web"] = True
-                else:
-                    result["sources"]["web"] = False
-            except Exception as e:
-                result["sources"]["web"] = str(e)[:60]
-            
-            # Source 3: OpenRouter LLM
-            try:
-                key = subprocess.run(["security", "find-generic-password", "-s", "openrouter-api-key", "-w"],
-                                    capture_output=True, text=True, timeout=5).stdout.strip()
-                if key:
-                    prompt = "你是一個事實驗證器。判斷以下內容是否合理，只需回答：合理/不合理/無法判斷" + "\n\n" + content[:200]
-                    d = _json.dumps({"model": "z-ai/glm-5.2", "messages": [{"role": "user", "content": prompt}], "max_tokens": 64}).encode()
-                    req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", data=d,
-                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
-                    resp = urllib.request.urlopen(req, timeout=20)
-                    rc = _json.loads(resp.read())
-                    c = (rc["choices"][0]["message"].get("content") or "").strip()
-                    if "合理" in c:
-                        score += 30
-                        result["sources"]["llm"] = True
-                    elif "不合理" in c:
-                        result["sources"]["llm"] = False
-                    else:
-                        result["sources"]["llm"] = None
-            except Exception as e:
-                result["sources"]["llm"] = str(e)[:60]
-            
-            result["score"] = score
-            result["verified"] = score >= 50
-        except Exception:
-            pass
-        return result
-    def _check_internal_consistency(self, content: str, exclude_id: int) -> list:
-        """Rope 1: 內部一致檢查（零成本，SQL only）。
-        """
-        import re
-        words = set()
-        # 英文詞（>=3 字母）
-        for w in re.findall(r'[a-zA-Z]{3,}', content):
-            words.add(w.lower())
-        # 中文詞：2-gram 和 3-gram shingle（中文無空格分詞）
-        for chunk in re.findall(r'[一-鿿]+', content):
-            if len(chunk) >= 4:
-                words.add(chunk)  # 完整短語
-            for i in range(len(chunk) - 1):
-                words.add(chunk[i:i+2])  # 2-gram
-            for i in range(len(chunk) - 2):
-                words.add(chunk[i:i+3])  # 3-gram
-        stopwords = {"the", "and", "for", "are", "but", "not", "you", "this", "that",
-                     "was", "has", "had", "did", "get", "got", "can", "all", "any",
-                     "our", "its", "out", "now", "how", "why", "who", "which", "what"}
-        words = words - stopwords
-        if not words:
-            return []
-        candidates = set()
-        for w in list(words)[:5]:
-                rows = self.conn.execute(
-                    "SELECT id, emotion_tag, content FROM memories WHERE id != ? AND content LIKE ? LIMIT 10",
-                    (exclude_id, f"%{w}%")
-                ).fetchall()
-                for r in rows:
-                    candidates.add(r)
-        if not candidates:
-            return []
-        contradictions = []
-        positive_tags = {"relatedness_up", "breakthrough", "success", "proud", "happy"}
-        negative_tags = {"frustration", "sad", "angry", "fear", "disappointment", "shame"}
-        for cid, etag, ccontent in candidates:
-            if not etag:
-                continue
-            if etag in positive_tags or etag in negative_tags:
-                contradictions.append({
-                    "id": cid,
-                    "emotion_tag": etag,
-                    "content_preview": ccontent[:100],
-                })
-        return contradictions
 
     def recall_hit(self, mem_id):
         """Phase 2: 被 query 命中 + 實際被用到 → discovered_salience += 0.1 (cap 1.0), total_recalls += 1。
@@ -705,6 +481,23 @@ def _serve(port=PORT):
             first = lambda k, d="": (qs.get(k, [d]) or [d])[0]
             if u.path == "/health":
                 self._send(200, {"status": "ok", "port": port, "db": DB})
+            elif u.path == "/health/detailed":
+                try:
+                    total = mem.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+                    has_attn = mem.conn.execute("SELECT COUNT(*) FROM memories WHERE attention_line != ''").fetchone()[0]
+                    rec = mem.conn.execute("SELECT created_at FROM memories ORDER BY created_at DESC LIMIT 1").fetchone()
+                    last_h = (time.time() - rec[0]) / 3600 if rec else -1
+                    healthy = total > 0 and last_h < 24
+                    self._send(200, {
+                        "status": "ok",
+                        "memories": total,
+                        "with_attention_lines": has_attn,
+                        "last_store_hours": round(last_h, 1) if last_h >= 0 else -1,
+                        "wake_ok": len(mem.wake_context(1)[0]) > 0,
+                        "healthy": healthy,
+                    })
+                except Exception as e:
+                    self._send(500, {"status": "error", "error": str(e)[:100]})
             elif u.path == "/memories/query":
                 try:
                     limit = int(first("limit", "20") or 20)
@@ -713,20 +506,6 @@ def _serve(port=PORT):
                 confidence = first("confidence", "")
                 self._send(200, {"results": mem.query(
                     first("q"), first("source"), limit, confidence_gte=confidence)})
-            elif u.path == "/contradictions":
-                limit = 20
-                try:
-                    limit = int(first("limit", "20") or 20)
-                except ValueError:
-                    limit = 20
-                with mem._lock:
-                    rows = mem.conn.execute(
-                        "SELECT cj.id, cj.mem_id, cj.rope, cj.conflict_mem_id, cj.reason, cj.created_at, cj.external_verified, cj.verification_score, cj.verification_detail, m.content "
-                        "FROM contradiction_journal cj LEFT JOIN memories m ON cj.mem_id = m.id "
-                        "ORDER BY cj.created_at DESC LIMIT ?",
-                        (limit,)
-                    ).fetchall()
-                self._send(200, {"results": [{"id":r[0],"mem_id":r[1],"rope":r[2],"conflict_mem_id":r[3],"reason":r[4],"created_at":r[5],"external_verified":r[6],"verification_score":r[7],"verification_detail":r[8],"content_preview":(r[9] or "")[:100]} for r in rows]})
             elif u.path == "/memories/recent":
                 try:
                     limit = int(first("limit", "10") or 10)

@@ -402,13 +402,22 @@ class RustPsiBackend:
         Retries 參數容許 daemon 第一次寫入前的初期 race：
         daemon 以 100ms 寫入，5 × 150ms = 750ms 足夠完成第一筆。
         """
-        if self._daemon_process is None:
-            return False
+        # 2026-08-14 修復：判準改成「不變量」，不是「我有沒有 spawn」。
+        #
+        # 舊版第一行是 `if self._daemon_process is None: return False`，
+        # 跟 start() 的跨 process 守衛（state 新鮮就不 spawn，見 :368）互斥：
+        #   launchd 常駐 psi-daemon → state 永遠新鮮 → start() 永不 spawn
+        #   → _daemon_process 永遠 None → healthy() 恆 False
+        #   → startup.py:60 恆回退 Python，Rust 引擎永遠接不上。
+        # 兩個守衛各自都對，合起來讓心臟空轉。必然失敗，不是競態。
+        #
+        # 真正的不變量是「有沒有人在發佈新鮮的 state」——誰 spawn 的不重要。
+        # _read_raw() 已內含 >2s 即視為 stale，所以它為真就代表有活的發佈者。
         for attempt in range(retries):
-            if self._daemon_process.poll() is not None:
+            # 只有「我自己 spawn 的 daemon 已死」才是明確的不健康
+            if self._daemon_process is not None and self._daemon_process.poll() is not None:
                 return False
-            raw = self._read_raw()
-            if raw is not None:
+            if self._read_raw() is not None:
                 return True
             if attempt < retries - 1:
                 time.sleep(pause)

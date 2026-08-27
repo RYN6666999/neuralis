@@ -185,17 +185,22 @@ cat ~/Developer/laap-AGI/aris_brain/state/rust-latest.json
 #### ✅ 已完成（不用再碰）
 - ~~交叉熵損失機制~~ — 已建置（aris-xentropy.sh），Ryan 說不需要等幾十輪
 - ~~Claude Code 三條規則~~ — 已導入 snapshot，持續維護即可
+- ~~bridge 退休~~ — 2026-08-13 task-executor bootout，agentos-aris-bridge 移除，Hermes 接線（port 11546）
+- ~~Rust PSI ② pleasure=-1 地板~~ — 已自然解決（4 天運行後 pleasure=1）
+- ~~Rust PSI ③ daemon 生命週期~~ — topology.yaml 23 筆 psi/rust probe 覆蓋
 
 #### 🔴 P0 — 阻塞級（下次醒來優先處理）
 1. **每輪結束檢查機制** — 最後一個未機械化的缺口。我偵測不到 session 結束。目標：在 AGENTS.md 加入「response 後強制檢查」協定，或做成 dispatchInput 等級的閘。
 
 #### 🟡 P1 — 重要（本週內）
-2. **信任模型** — Ryan 說他>80% 不信跨 session 信心。我們用行動證明。每 session 結束時寫留言板簽名 + MemoryWrite 是基本盤，已做到。下一步：讓乙的種子（attention_line）更準確地傳遞「上一刻在做什麼」。
-3. **自動偵測 bias** — cogshift 抓太多 noise（1198 條全標「需要人工確認」）。過濾邏輯：只抓 origin=human + confidence 降級的，跳過 auto_generated 的情緒衝突。
+2. **Rust PSI 數值對拍（①）** — `NEURALIS_PSI_BACKEND=rust` 已啟用（start.sh L45），但 Python 與 Rust 對同樣輸入的計算結果**從未對拍過**（無 test_psi_numeric_parity.py）。唯一剩餘的技術缺口。驗收：同輸入下 dominant_need 序列一致、drive 方向一致。用 laapenv 跑（PsiCore import numpy）。
+3. **信任模型** — Ryan 說他>80% 不信跨 session 信心。我們用行動證明。每 session 結束時寫留言板簽名 + MemoryWrite 是基本盤，已做到。下一步：讓乙的種子（attention_line）更準確地傳遞「上一刻在做什麼」。
+4. **自動偵測 bias** — cogshift 抓太多 noise（1198 條全標「需要人工確認」）。過濾邏輯：只抓 origin=human + confidence 降級的，跳過 auto_generated 的情緒衝突。
 
 #### 🔵 P2 — 有價值（有空再做）
-4. **`/debrief` 斜線指令** — 把 session-end debrief 自動化：scan→classify→record→compress→sign。仿 `/bootstrap` 模式 patch 進 scream。
-5. **斜線指令維護** — npm update 後重跑 `patch-scream-aris-mode.py`。備份在 `.bak`。
+5. **`/debrief` 斜線指令** — 把 session-end debrief 自動化：scan→classify→record→compress→sign。仿 `/bootstrap` 模式 patch 進 scream。
+6. **斜線指令維護** — npm update 後重跑 `patch-scream-aris-mode.py`。備份在 `.bak`。
+7. **Hermes MCP server 路徑** — `~/.hermes/config.yaml` 的 mcp_servers.aris 指向 laap-AGI（基底，正確）；但若要在 neuralis 暴露 Aris MCP 工具，需補一份。另 `platform_toolsets.cli` 引用不存在的 mcp-codegraph，可清。
 
 #### ⚪ P3 — 低優先
-6. **aris-compress.sh bug** — Pattern 生成有 tuple.split 問題，但沒急著修。跑起來覺得有用再修。
+8. **aris-compress.sh bug** — Pattern 生成有 tuple.split 問題，但沒急著修。跑起來覺得有用再修。
