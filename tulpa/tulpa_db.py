@@ -38,6 +38,13 @@ def _incr_turn() -> int:
         _turn_counter += 1
         return _turn_counter
 
+def get_turn() -> int:
+    """線程安全讀 turn counter(只讀不增)。
+    用函數而非 from-import 全局,避免 from-import 複本不同步(多真理源 bug)。"""
+    global _turn_counter
+    with _turn_lock:
+        return _turn_counter
+
 # ═══════════════════════════════════════════════════════════════
 # 路徑
 # ═══════════════════════════════════════════════════════════════

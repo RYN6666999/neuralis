@@ -99,10 +99,14 @@ async def handle_cognitive(request):
         try:
             dp = result.get("domain_path") or []
             actual_path = "/".join(dp) if dp else ""
+            # 推進輪次並結算過往預測
+            # 只有領域沒匹配時才在此手動 incr(匹配時 _log_path 內部已 incr,避免雙重遞增)
+            from tulpa.tulpa_engine import _incr_turn as _incr
+            if not dp:
+                _incr()
+            _settle_prediction(actual_path)
             if dp:
                 _log_path(actual_path)
-                # 用本輪實際走的 path 結算「過往預測」→ prediction_events 出結果（settled）
-                _settle_prediction(actual_path)
             # 觸發時間軸競爭 → 產生 time_axis_log + prediction_events（未來預測）
             _time_axis_compete(text)
             # 結構同構：從 path_log 找相似路徑 → structure_isomorphism（自帶 5 輪節流）

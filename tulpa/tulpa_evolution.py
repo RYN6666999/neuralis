@@ -430,18 +430,24 @@ def _settle_prediction(actual_path: str) -> None:
     猜錯的永遠掛 pending → 被 session 結束標 expired → 對賭只有贏沒有輸
     → 永遠沒有懲罰訊號 → 校準不可能發生（正確欄位從未被填 0）。
     新版：pred_turn 早於本輪的 pending 一律結算——對上 correct=1（贏），
-    對不上 correct=0（輸，留痕餵對賭）。"""
+    對不上 correct=0（輸，留痕餵對賭）。
+
+    2026-09-07:改用 get_turn() 讀即時 turn,修掉 from-import 複本不同步
+    （原 _turn_counter 複本永為 0 → prediction 永不結算）。
+    """
+    from tulpa.tulpa_db import get_turn
+    now_turn = get_turn()
     db = _db()
     rows = db.execute(
         "SELECT id, predicted FROM prediction_events "
         "WHERE state='pending' AND pred_turn < ?",
-        (_turn_counter,)
+        (now_turn,)
     ).fetchall()
     for row in rows:
         correct = 1 if row["predicted"] == actual_path else 0
         db.execute(
             "UPDATE prediction_events SET actual_turn=?, actual=?, correct=?, state='settled' WHERE id=?",
-            (_turn_counter, actual_path, correct, row["id"]))
+            (now_turn, actual_path, correct, row["id"]))
     db.commit()
     db.close()
 
