@@ -121,3 +121,13 @@ data/audit-ledger.jsonl
 # tulpa 產物(不進版控)
 tulpa/*.db
 tulpa/*.bak-*
+# 工作設定/技能/參考/稽核產物(不進 main repo)
+.claude/
+.agents/
+openspec/
+references/
+neuralis/
+aris-consolidation-report.json
+audit-failures.jsonl
+meta-cognition-verification.md
+skills-lock.json
