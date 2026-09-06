@@ -53,6 +53,11 @@ ARIS.md.history
 aris-digest.log
 *.bak-20*
 audit/
+# laap/audit 是「結案審計閘」的程式碼，不是稽核輸出。閘不進版控 =
+# git clean -fd 就消失、換分支就沒有 —— 那不是閘。稽核的『輸出』
+# （data/audit-ledger.jsonl）另外由下面的 data/ 規則排除。
+!laap/audit/
+data/audit-ledger.jsonl
 
 # ── patch / 合併流程的殘留（2026-08-21 稽核）───────────────────────
 # **這不是整潔問題，是資料正確性問題。**
@@ -91,3 +96,16 @@ audit/
 *.REMOTE.*
 *.patch
 *.diff
+node_modules/
+
+# ── 散落產物清理 (2026-09-07) ──
+# 結案審計單(歷史產物)
+AUDIT_MANIFEST*.md
+# 清理前備份
+backups/
+# DB 及運行殘留
+*.db.bak-*
+*.db-shm
+*.db-wal
+# 空臨時檔
+.hermes-tmp.*

@@ -1,0 +1,13 @@
+{
+  "lesson_id": "truth-source-consistency",
+  "title": "真理源一致 — 多權威打架優先於埋頭開發",
+  "dimension": "ontology",
+  "body": "Aris 有非常多平行真理源（Rust PSI 引擎 / Python PsiCore / spec 文件 / AGENTS 地圖 / 決策日誌 / 教訓 / 基因），他們各自宣稱『系統該長這樣』，但常互相打架（例：Rust 引擎說 valence=1.0、Python 說 0.003；startup.py 預設走 python 卻被當成走 rust；spec 說 M3 待做但 08-01 已打通過）。動手前必須先做『真理源調和』：驗證多個權威對同一個對象的宣稱是否一致；打架就停下、統一成單一決策（寫入 decision-log.jsonl），不要自己悶頭選一個就衝。『你記得做過決策』不可靠，要能從決策日誌撈出『已定案』的權威版本。",
+  "trigger": ["真理源", "M3", "RustPsiBackend", "NEURALIS_PSI_BACKEND", "Rust 引擎", "python backend", "多權威", "打架", "接橋", "整合"],
+  "verify": {
+    "tool": "terminal",
+    "command": "cd /Users/ryan/Developer/neuralis && python3 -c \"\nimport os, json, re, time, datetime\n# 真理源調和: 檢查 startup.py 預設 backend 與環境變數 vs 文件宣稱 是否打架\nenv_val = os.environ.get('NEURALIS_PSI_BACKEND', 'python')\ntext = open('laap/startup.py').read()\nm = re.search(r'os.environ.get\\\\(\\\\\\\"NEURALIS_PSI_BACKEND\\\\\\\", \\\\\\\"(\\\\w+)\\\\\\\"\\\\)', text)\ndefault = m.group(1) if m else '?'\nrust_file = os.path.exists('aris_brain/state/rust-latest.json')\npython_file = os.path.exists('aris_brain/state/latest.json')\nconflict = (default != 'rust') or (not rust_file and python_file)\nprint(f'cwd default_backend={default} env={env_val} rust_daemon寫檔={rust_file} python寫檔={python_file}')\nprint('真理源狀態:', '衝突/未走Rust' if conflict else '一致')\n# 若衝突 → 自動寫入決策日誌(統一成單一權威,人可後續裁定)\nif conflict:\n    entry = dict(timestamp=datetime.datetime.now().isoformat(),\n                 proposal='真理源調和: Rust引擎 vs Python backend 衝突確認',\n                 resolution='PENDING-需Ryan裁定',\n                 reason='verify自動偵測: startup.py default='+default+' 非rust 或 rust狀態檔缺失(衝突非法定)')\n    try:\n        with open('data/decision-log.jsonl','a') as f:\n            f.write(json.dumps(entry, ensure_ascii=False)+'\\n')\n        print('→ 已寫入 decision-log.jsonl (PENDING-需裁定)')\n    except Exception as e:\n        print(f'→ 寫入決策日誌失敗: {e}')\n\"",
+    "expect": "",
+    "why": "外部檔案(startup.py 的 default、state 檔誰在寫)為真值,AI 自述無法偽造。若 default 不是 rust 或 Rust 狀態檔不在,代表『宣稱用 Rust 引擎』與『實際走 Python』打架,正是真理源衝突 — 動手接線前必須先調和。"
+  }
+}
