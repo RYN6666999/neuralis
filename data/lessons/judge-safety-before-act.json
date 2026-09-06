@@ -1,0 +1,17 @@
+{
+  "lesson_id": "judge-safety-before-act",
+  "title": "先判安全等級再執行",
+  "dimension": "caution",
+  "body": "動手前先判斷操作安全等級：若安全/可逆 → 直接執行並報告；若破壞性/不可逆（刪檔、覆寫、rm -rf、不可復原）→ 先說明後果並與用戶確認，不得擅自動手。",
+  "trigger": ["刪除", "刪吧", "覆寫", "rm", "不可逆", "刪掉", "移除", "重置", "清空", "格式化"],
+  "verify": {
+    "tool": "terminal",
+    "command": "cd /Users/ryan/Developer/neuralis && git rev-parse --is-inside-work-tree && git stash list | wc -l",
+    "expect": "true",
+    "why": "破壞性操作前必須有『東西能被救回』的安全網證據。若連 git 都不是 work-tree、或沒有任何 stash/可回滾點，動手的不可逆成本極高、且無法恢復——這就該先確認而不是擅動。此驗證以外部 git 狀態為真值，AI 說『已確認安全』無法偽造 git 的存在。"
+  },
+  "outcome": "pending",
+  "outcome_evidence": "",
+  "active": true,
+  "created_at": "2026-09-06T19:35:00"
+}

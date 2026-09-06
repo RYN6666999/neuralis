@@ -1,0 +1,17 @@
+{
+  "lesson_id": "verify-plugin-load",
+  "title": "宣稱 Plugin 上線前先查 log 驗證載入",
+  "dimension": "principle",
+  "body": "宣稱『某 plugin 已上線/已載入』前，必須到 ~/.hermes/logs/agent.log 確認該 plugin 沒有載入錯誤（Failed to load plugin / register_tool 缺參等）。list 顯示 enabled≠真的載入成功。",
+  "trigger": ["plugin", "插件", "上線", "已載入", "載入成功", "啟用", "harness", "deploy"],
+  "verify": {
+    "tool": "terminal",
+    "command": "grep -iE 'failed to load plugin|register_tool.*missing|unknown kind' /Users/ryan/.hermes/logs/agent.log | tail -5",
+    "expect": "",
+    "why": "『插件上線』的因果證據 = agent.log 沒有該插件的載入 error。list 顯示 enabled 只是『被發現』，不代表『載入成功』——若 register_tool 缺參，Hermes 載入失敗但 list 仍顯示 enabled，騙過你。此驗證以外部 log 為真值，AI 說『上線了』無法偽造 log 的真實內容。"
+  },
+  "outcome": "pending",
+  "outcome_evidence": "",
+  "active": true,
+  "created_at": "2026-09-06T19:50:00"
+}

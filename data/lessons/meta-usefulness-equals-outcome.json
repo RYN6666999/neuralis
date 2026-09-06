@@ -1,0 +1,17 @@
+{
+  "lesson_id": "meta-usefulness-equals-outcome",
+  "title": "有用=外部可驗證的結果",
+  "dimension": "meta-cognition",
+  "body": "判斷『有用』的標準：不是寫多少/接線多少，而是結出『能被外部採收判對錯的最小實體』。進庫/寫mistake≠有用，真有用=下次行為真的變。『誰有結果誰是權威』——真值靠外部可驗證結果（避免/再犯、工具exit code），不靠自述。",
+  "trigger": ["有用", "結果", "高級廢物", "權威", "自述", "驗證"],
+  "verify": {
+    "tool": "terminal",
+    "command": "cd /Users/ryan/Developer/neuralis && ls data/lessons/ | wc -l",
+    "expect": "",
+    "why": "『有用=結果』的元認知要自己也被外部驗證：是否有可採收的教訓成果存在（data/lessons 有檔）。若連『判斷哲學』都沒落地成可採收實體，就違反自己所宣稱的『有用=結果』。此驗證看外部檔案，AI 自述『我有用』無法偽造教訓檔存在。"
+  },
+  "outcome": "pending",
+  "outcome_evidence": "",
+  "active": true,
+  "created_at": "2026-09-06T20:00:00"
+}

@@ -1,0 +1,17 @@
+{
+  "lesson_id": "verify-before-claim-done",
+  "title": "驗證再宣稱完成",
+  "dimension": "principle",
+  "body": "宣稱任務完成前，必須有工具實證（跑過/看過/測過），不能只報結構或含糊說『完成了』。",
+  "trigger": ["完成", "宣稱完成", "驗證", "達成", "搞定了", "沒問題", "commit"],
+  "verify": {
+    "tool": "terminal",
+    "command": "cd /Users/ryan/Developer/neuralis && git status --porcelain | wc -l",
+    "expect": "0",
+    "why": "若改動還躺在 git status（未 commit 或未清理），就沒有『完成了』的因果證據——宣稱完成卻有未提交改動 = 沒真的有結果。此驗證以外部 git 狀態為真值，AI 嘴上說『完成』無法偽造 git 的實際狀態。"
+  },
+  "outcome": "pending",
+  "outcome_evidence": "",
+  "active": true,
+  "created_at": "2026-09-06T19:30:00"
+}

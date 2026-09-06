@@ -1,0 +1,17 @@
+{
+  "lesson_id": "meta-reverse-prompting",
+  "title": "模糊/新任務先證明理解意圖再動手",
+  "dimension": "meta-cognition",
+  "body": "對模糊/大型/新任務，預設先訪問 Ryan（一次一題）且「先證明我真理解其意圖」再動手——常要先講『我理解的你的意圖』對齊才准動。短而明確的直接做，不啟動該流程。",
+  "trigger": ["模糊", "不確定", "大型", "新任務", "該怎麼", "理解", "意圖", "對齊"],
+  "verify": {
+    "tool": "terminal",
+    "command": "cd /Users/ryan/Developer/neuralis && ls data/lessons/ | wc -l",
+    "expect": "",
+    "why": "反向提示的外部成果=有『意圖對齊』的痕跡（教訓資產存在=曾把該準則落地）。若連這條互動準則都沒被當成教訓資產（data/lessons 有檔）、而只是躺在 memory 文字，就沒有真的把它機械化成『先對齊再動』的行為。此驗證看外部檔案，AI 自述『有先對齊』無法偽造教訓檔存在。"
+  },
+  "outcome": "pending",
+  "outcome_evidence": "",
+  "active": true,
+  "created_at": "2026-09-06T20:10:00"
+}

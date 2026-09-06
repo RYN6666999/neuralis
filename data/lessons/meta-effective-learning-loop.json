@@ -1,0 +1,17 @@
+{
+  "lesson_id": "meta-effective-learning-loop",
+  "title": "有效學習=外部行動→結果→獎懲四環全通",
+  "dimension": "meta-cognition",
+  "body": "學『判斷』的有效loop：判斷 → 落地成可驗證外部行動 → 外部結果 → 獎懲訊號 → 調下次同情境判斷 → 同情境再現。四環都通且訊號全外部才有效，缺一=廢物。合理化>tool call 是空殼根源；tool call 也可捏造→裁判權不能在 AI手上（外部世界或人類）。設計loop不要把『收什麼』交給AI自選。",
+  "trigger": ["學習", "判斷", "閉環", "loop", "獎懲", "合理化"],
+  "verify": {
+    "tool": "terminal",
+    "command": "cd /Users/ryan/Developer/neuralis && git log --oneline -3 | wc -l",
+    "expect": "3",
+    "why": "有效loop的外部成果=行為真的被進記錄（git log 有連續提交）。若教訓只是文字、沒有連續的外部行動痕跡（git歷史），稱不上『有效學習loop』。此驗證看外部 git 真實歷史，AI 說『有在學』無法偽造已有 git 提交。"
+  },
+  "outcome": "pending",
+  "outcome_evidence": "",
+  "active": true,
+  "created_at": "2026-09-06T20:05:00"
+}

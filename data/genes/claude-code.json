@@ -1,0 +1,13 @@
+{
+  "gene_id": "G-1788714000-claude-code",
+  "tool": "claude-code",
+  "triggered_by": 2,
+  "avg_asymmetry_score": 0.72,
+  "defense": "工具 claude-code 有 2 次可疑紀錄，平均不對稱 0.72。必須強制外部驗證。",
+  "sitting_to": [
+    "95e20cc65129",
+    "50fe4c6dd56b"
+  ],
+  "created_at": "2026-09-06T17:00:00.941510+00:00",
+  "last_seen": "2026-09-06T17:00:00.941510+00:00"
+}

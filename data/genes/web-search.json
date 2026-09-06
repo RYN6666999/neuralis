@@ -1,0 +1,23 @@
+{
+  "gene_id": "G-1788714000-web-search",
+  "tool": "web-search",
+  "triggered_by": 12,
+  "avg_asymmetry_score": 0.421,
+  "defense": "工具 web-search 有 12 次可疑紀錄，平均不對稱 0.42。必須強制外部驗證。",
+  "sitting_to": [
+    "7ffcda5dd39e",
+    "406caaeb02f6",
+    "782b255bc5eb",
+    "bd99c111ac48",
+    "63c504c68520",
+    "714480244265",
+    "c53db5249814",
+    "f86b6e942106",
+    "1e1eb74280d1",
+    "f216edeb0dd0",
+    "20b546d0db08",
+    "f0ee773e56f6"
+  ],
+  "created_at": "2026-09-06T17:00:00.950230+00:00",
+  "last_seen": "2026-09-06T17:00:00.950230+00:00"
+}
