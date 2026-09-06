@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""
-aris-status — 一頁式 Aris 狀態儀表（讀 status.json + tail 三審計檔）。
+"""aris-status — 一頁式 Aris 狀態儀表（讀 status.json + tail 三審計檔）。
 
 用法:
-    python3 scripts/aris-status.py          # 印當前狀態
-    python3 scripts/aris-status.py --json    # 原始 JSON
-    watch -n5 python3 scripts/aris-status.py # 每 5 秒刷新
+    python3 scripts/aris-status.py           # 印當前狀態
+    python3 scripts/aris-status.py --json     # 原始 JSON
+    python3 scripts/aris-status.py --modules  # 輸出功能性模組清單 (cron 用，附每目錄計數)
+    watch -n5 python3 scripts/aris-status.py  # 每 5 秒刷新
 """
 import json
 import sys
@@ -14,6 +14,50 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 STATUS = ROOT / "status.json"
+
+
+def _count_modules() -> dict:
+    """按功能性計數三個 aris 目錄的 .py 模組，並回報計數 + 清單。
+
+    「功能性」定義：排除 __init__.py、__main__.py、_archive/、test*/*_test.py、
+    *cli*/*_cli.py、*_bench*.py（CLI/測試/bench 都是工具不是運行模組）。
+    回報 absolute 相對路徑清單 + 每目錄計數 + 總計。
+    註：此計數是「file 數」，不含 overlay 實際載入判定；要確認哪些在跑，
+    需另盤點 launchd/啟動載入器（如 laap_integrator.load_all）。
+    """
+    dirs = {
+        "upstream": Path.home() / "Developer/laap-AGI/aris_brain",
+        "neuralis": Path.home() / "Developer/neuralis/laap",
+        "tulpa": Path.home() / "Developer/neuralis/tulpa",
+    }
+    result = {"total": 0, "by_dir": {}, "reported_at": time.time()}
+
+    for label, d in dirs.items():
+        if not d.exists():
+            result["by_dir"][label] = {"count": 0, "modules": [], "exists": False}
+            continue
+        py = list(d.rglob("*.py"))
+        modules = []
+        for p in py:
+            rel = str(p.relative_to(d))
+            parts = rel.split("/")
+            base = parts[-1]
+            # 排除非功能性
+            if base == "__init__.py" or base == "__main__.py":
+                continue
+            if "_archive" in parts:
+                continue
+            if base.startswith("test_") or base.endswith("_test.py"):
+                continue
+            if "cli" in base.lower():
+                continue
+            if "bench" in base.lower():
+                continue
+            modules.append(rel)
+        modules.sort()
+        result["by_dir"][label] = {"count": len(modules), "modules": modules, "exists": True}
+        result["total"] += len(modules)
+    return result
 
 
 def _tail(path: Path, n: int = 3) -> list:
@@ -30,6 +74,11 @@ def _tail(path: Path, n: int = 3) -> list:
 
 
 def main():
+    if "--modules" in sys.argv:
+        m = _count_modules()
+        print(json.dumps(m, ensure_ascii=False, indent=2))
+        return
+
     if not STATUS.exists():
         print("status.json 不存在 — API 沒在跑，或 NEURALIS_STATUS=off")
         return
