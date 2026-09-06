@@ -1,0 +1,1239 @@
+#!/usr/bin/env python3
+"""tulpa_engine — 核心引擎：Tulpa 定義、競爭、Ontology 分類、認知遷移。
+
+不含領域樹（tulpa_domain）、被動搜尋（tulpa_search）、演化（tulpa_evolution）。
+"""
+
+import json
+import logging
+import re
+import sys
+import time
+import math
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+_log = logging.getLogger(__name__).info
+
+from tulpa.tulpa_db import _db, _turn_counter, _incr_turn, load_tulpa_state, save_tulpa_state, save_object_facet, load_object_facets
+from tulpa.tulpa_domain import route_domain, _path_keywords
+from tulpa.tulpa_search import passive_search
+
+
+# ═══════════════════════════════════════════════════════════════
+# 全局狀態
+# ═══════════════════════════════════════════════════════════════
+
+_migration_accumulator: dict = {}
+_keyword_active: dict = {}
+ontology_relation_map: dict = {}
+_turn_log: list = []
+_session_id: str = ""
+_session_start: float = 0.0
+_session_deltas: dict = {}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 領域樹優化 — 定向映射 + Session 追蹤
+# ═══════════════════════════════════════════════════════════════
+
+# 每個領域節點期待的 tulpa 取向（領域建議 vs 實際行動打架時用）
+DOMAIN_ORIENTATION = {
+    "房產財商教練/課程設計/教學設計": ["自我理性", "本我理性"],
+    "房產財商教練/課程設計/方法論輸出": ["自我理性", "超我理性"],
+    "房產財商教練/學員輔導/個人 Coaching": ["自我感性", "超我感性"],
+    "房產財商教練/學員輔導/團體訓練": ["本我感性", "自我感性"],
+    "房產財商教練/教練體系/制度設計": ["超我理性", "本我理性"],
+    "房產財商教練/教練體系/人才培育": ["自我理性", "超我感性"],
+    "除錯方法論/Ponytail 審計": ["自我理性", "本我理性"],
+    "除錯方法論/紅軍攻擊方案": ["超我理性", "自我理性"],
+    "除錯方法論/消費者鏈檢查": ["自我理性", "本我理性"],
+    "除錯方法論/驗證清單": ["本我理性", "自我理性"],
+    "除錯方法論/self-audit 循環": ["超我理性", "自我理性"],
+    "除錯方法論/鋼人審計": ["超我理性", "自我理性"],
+    "除錯方法論/對賭驗證機制": ["本我理性", "自我理性"],
+    "除錯方法論/判斷完成時機": ["自我理性", "超我理性"],
+    "除錯方法論/PSI 行為有效性指標": ["自我理性", "超我理性"],
+}
+
+# 每個 session 上一次的領域路徑（用來跨輪偵測校正）
+_last_domain_path: dict[str, str | None] = {}
+
+# ═══════════════════════════════════════════════════════════════
+# 領域樹學習定向 — 從校正中成長的 orientation
+# ═══════════════════════════════════════════════════════════════
+
+def _get_orientation(path: str) -> list[str]:
+    """合併靜態 + 學習過的定向。學習 confidence 夠高時覆蓋靜態。
+    
+    規則：
+    - 無學習數據 → 回靜態字典
+    - 學習 score >= 0.6 且 samples >= 3 → 學習定向優先
+    - 學習 score < 0.6 → 靜態 + 學習混合（學習的在前面）
+    """
+    static = DOMAIN_ORIENTATION.get(path, [])
+    db = _db()
+    rows = db.execute(
+        "SELECT tulpa_name, score, wins FROM domain_learned_orientation "
+        "WHERE path=? ORDER BY score DESC",
+        (path,)
+    ).fetchall()
+    db.close()
+
+    if not rows:
+        return static  # 沒有學習數據，純靜態
+
+    learned = [r["tulpa_name"] for r in rows]
+    top_score = rows[0]["score"]
+    top_wins = rows[0]["wins"]
+
+    if top_score >= 0.6 and top_wins >= 3:
+        # 學習 confidence 夠高 → 學習定向為主，靜態為補
+        result = learned[:]
+        for t in static:
+            if t not in result:
+                result.append(t)
+        return result
+
+    # 低 confidence → 靜態在前，學習在後（還在學階段）
+    seen = set(static)
+    result = list(static)
+    for t in learned:
+        if t not in seen:
+            result.append(t)
+    return result
+
+
+def _update_learned_orientation(path: str, winner_name: str, expected: list[str]):
+    """校正發生時：winners 加分，expected 中輸家減分。"""
+    db = _db()
+    row = db.execute(
+        "SELECT score, wins FROM domain_learned_orientation WHERE path=? AND tulpa_name=?",
+        (path, winner_name)
+    ).fetchone()
+    if row:
+        new_score = min(1.0, row["score"] + 0.12)
+        new_wins = row["wins"] + 1
+        db.execute(
+            "UPDATE domain_learned_orientation SET score=?, wins=? WHERE path=? AND tulpa_name=?",
+            (new_score, new_wins, path, winner_name)
+        )
+    else:
+        db.execute(
+            "INSERT INTO domain_learned_orientation (path, tulpa_name, score, wins) VALUES (?, ?, 0.5, 1)",
+            (path, winner_name)
+        )
+
+    # Expected 中輸家減分
+    for t_name in expected:
+        if t_name == winner_name:
+            continue
+        row2 = db.execute(
+            "SELECT score FROM domain_learned_orientation WHERE path=? AND tulpa_name=?",
+            (path, t_name)
+        ).fetchone()
+        if row2:
+            new_score = max(0.10, row2["score"] - 0.06)
+            db.execute(
+                "UPDATE domain_learned_orientation SET score=? WHERE path=? AND tulpa_name=?",
+                (new_score, path, t_name)
+            )
+    db.commit()
+    db.close()
+
+
+def _reinforce_orientation(path: str, winner_name: str, expected: list[str]):
+    """Winner 符合預期時微加分（每 3 次才記一次，避免膨脹）。"""
+    if not expected or winner_name not in expected:
+        return
+    db = _db()
+    row = db.execute(
+        "SELECT score, wins FROM domain_learned_orientation WHERE path=? AND tulpa_name=?",
+        (path, winner_name)
+    ).fetchone()
+    if row:
+        # 只有 wins % 3 == 0 時才強化，避免每輪都加
+        if (row["wins"] + 1) % 3 == 0:
+            new_score = min(1.0, row["score"] + 0.02)
+            new_wins = row["wins"] + 1
+            db.execute(
+                "UPDATE domain_learned_orientation SET score=?, wins=? WHERE path=? AND tulpa_name=?",
+                (new_score, new_wins, path, winner_name)
+            )
+    else:
+        # 新 tulpa 在 expected 中但從未記錄過 → 起始 0.4（存在但不確定）
+        db.execute(
+            "INSERT INTO domain_learned_orientation (path, tulpa_name, score, wins) VALUES (?, ?, 0.4, 1)",
+            (path, winner_name)
+        )
+    db.commit()
+    db.close()
+
+
+def _track_domain_perf(path: str | None, winner_name: str, session_id: str, turn: int):
+    """記錄領域節點命中 + 跨輪校正偵測 + 從校正中學習定向"""
+    if not path:
+        return
+    if not session_id:
+        # 沒有session_id時自動生成一個（防止數據遺失）
+        session_id = f"anon-{int(time.time())}"
+    db = _db()
+    # 更新 domain_optimization
+    db.execute("""
+        INSERT INTO domain_optimization (path, total_hits, last_turn, effective_hits)
+        VALUES (?, 1, ?, 1)
+        ON CONFLICT(path) DO UPDATE SET
+            total_hits=total_hits+1,
+            last_turn=excluded.last_turn,
+            effective_hits=effective_hits+1
+    """, (path, turn))
+    db.commit()
+    db.close()
+
+    # 校正偵測 + 學習：使用學習過的定向（靜態 + 學習混合）
+    expected = _get_orientation(path)
+    prev_path = _last_domain_path.get(session_id)
+    if prev_path and prev_path != path:
+        # 換領域了 → 不是校正
+        pass
+    elif prev_path == path:
+        # 同一領域但不同輪 — 檢查 winner 是否違反定向
+        if expected and winner_name not in expected:
+            # 校正！記錄 + 學習
+            db2 = _db()
+            db2.execute("""
+                UPDATE domain_optimization SET
+                    corrections=corrections+1,
+                    effective_hits=MAX(0, effective_hits-1)
+                WHERE path=?
+            """, (path,))
+            db2.commit()
+            db2.close()
+            # 從這次校正中學習：winner 加分，expected 輸家減分
+            _update_learned_orientation(path, winner_name, expected)
+        else:
+            # Winner 符合預期 → 強化定向
+            _reinforce_orientation(path, winner_name, expected)
+
+    # 更新 session track
+    _last_domain_path[session_id] = path
+
+
+# ═══════════════════════════════════════════════════════════════
+# Tulpa 定義
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class Tulpa:
+    name: str
+    keywords: List[str]
+    base_urgency: float
+    base_importance: float
+    base_weight: float = 1.0
+    lifetime_hits: int = 0
+    recent_hits: list = field(default_factory=list)
+    corrections: int = 0
+    modifiers: List[Tuple[str, float, float]] = field(default_factory=list)
+    context_text: str = ""
+    gist_text: str = ""
+    _sleeping: bool = False
+    _winless_streak: int = 0
+
+
+def _apply_persisted(t: Tulpa, state: dict):
+    s = state.get(t.name)
+    if s:
+        t.base_weight = s.get("base_weight", 1.0)
+        t.lifetime_hits = s.get("lifetime_hits", 0)
+        t.recent_hits = s.get("recent_hits", [])
+        t.corrections = s.get("corrections", 0)
+        t._sleeping = s.get("sleeping", False)
+        t._winless_streak = s.get("winless_streak", 0)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 基因注入 — 成本不對稱 → tulpa base_weight 機械修正
+# ═══════════════════════════════════════════════════════════════
+
+_GENE_DIR = Path.home() / "Developer/neuralis/data/genes"
+# tool_name → 懲罰系數（越低越重）
+_TOOL_PENALTY = {
+    "gbrain": 0.90,       # 172 次可疑 → 降 10%
+    "scream-ask": 0.90,   # 46 次可疑 → 降 10%
+    "claude-code": 0.85,  # 2 次但分數高（0.72）→ 降 15%
+    "web-search": 0.95,   # 12 次、平均 0.42 → 降 5%
+}
+# 受罰 tulpa 映射：哪些 tulpa 容易誤用這些工具
+_TOOL_TULPA_TARGET = {
+    "gbrain": ["本我理性", "自我理性"],       # 記憶工具被高估 → 理性系降權
+    "scream-ask": ["本我感性", "自我感性"],   # 情緒工具失準 → 感性系降權
+    "claude-code": ["本我理性"],              # 執行工具失敗 → 本我理性降權
+    "web-search": ["自我理性"],               # 搜尋工具失真 → 自我理性降權
+}
+
+
+def apply_gene_adjustments() -> dict:
+    """讀 genes/*.json，對匹配的 tulpa 施加 weight penalty，寫回 DB 及記憶體。
+    幂等：每次呼叫都以 DB 中的 current base_weight 為基準。
+    同時更新 TULPAS 列表中的記憶體狀態，確保後續 save_tulpa_state 能持久化。
+    """
+    if not _GENE_DIR.exists():
+        return {}
+    adjustments = {}
+    db = _db()
+    for gene_file in _GENE_DIR.glob("*.json"):
+        try:
+            gene = json.loads(gene_file.read_text())
+        except Exception:
+            continue
+        tool = gene.get("tool", "")
+        penalty = _TOOL_PENALTY.get(tool)
+        if penalty is None:
+            continue
+        targets = _TOOL_TULPA_TARGET.get(tool, [])
+        if not targets:
+            continue
+        for tname in targets:
+            row = db.execute(
+                "SELECT base_weight FROM tulpa_state WHERE name=?", (tname,)
+            ).fetchone()
+            if row is None:
+                continue
+            old_w = row["base_weight"]
+            new_w = max(0.1, old_w * penalty)
+            db.execute(
+                "UPDATE tulpa_state SET base_weight=? WHERE name=?", (new_w, tname)
+            )
+            # 同步更新記憶體中的 TULPAS 對象
+            for t in TULPAS:
+                if t.name == tname:
+                    t.base_weight = new_w
+                    break
+            adjustments[f"{tname}/{tool}"] = {"old": round(old_w, 4), "new": round(new_w, 4)}
+    # ── 結果獎懲：mistake_outcome(label) → 對應 tulpa 權重 ──
+    # 把「你有結果的判定」接成獎懲訊號：avoided(有用)→獎勵，recurred(無用)→懲罰。
+    # T3 (LUCID 去膨脹)：只對 source='human'（真人/外部）的 label 施加權重。
+    #     AI 自標(source='self')/工具(source='tool') 的 label 不進權重——讓 reward 誤差與 AI 盲點去相關。
+    # 修正(2026-09-06 排雷抓到)：原本非冪等——每次 compete 對同 label 重複計入、權重複利無限成長。
+    #    現以 consumed 旗標：每筆 human label 只計入一次後設 consumed=1，跨 call 也不複利。
+    skipped_self = 0
+    try:
+        # 只處理尚未計入的 human label（consumed=0）
+        rows = db.execute(
+            "SELECT mo.id, mc.tulpa_name, mo.outcome "
+            "FROM mistake_outcome mo JOIN mistake_catalog mc ON mc.id=mo.mistake_id "
+            "WHERE mc.tulpa_name != '' AND mo.outcome IN ('avoided','recurred') "
+            "AND mo.source = 'human' AND mo.consumed = 0"
+        ).fetchall()
+        for r in rows:
+            ev_id, tname, outcome = r["id"], r["tulpa_name"], r["outcome"]
+            prow = db.execute(
+                "SELECT base_weight FROM tulpa_state WHERE name=?", (tname,)
+            ).fetchone()
+            if prow is None:
+                continue
+            old_w = prow["base_weight"]
+            factor = 1.05 if outcome == "avoided" else 0.92
+            new_w = round(max(0.1, min(1.5, old_w * factor)), 4)
+            db.execute(
+                "UPDATE tulpa_state SET base_weight=? WHERE name=?", (new_w, tname)
+            )
+            # 這筆 label 已計入，標 consumed，避免下次重複
+            db.execute(
+                "UPDATE mistake_outcome SET consumed=1 WHERE id=?", (ev_id,)
+            )
+            for t in TULPAS:
+                if t.name == tname:
+                    t.base_weight = new_w
+                    break
+            adjustments[f"{tname}/outcome::{outcome}"] = {"old": round(old_w, 4), "new": new_w}
+    except Exception:
+        pass
+    # T3: 統計被略過的 AI 自標/工具 label 數（證明去膨脹真的生效，非空殼）
+    try:
+        skipped_self = db.execute(
+            "SELECT count(*) FROM mistake_outcome mo "
+            "JOIN mistake_catalog mc ON mc.id=mo.mistake_id "
+            "WHERE mc.tulpa_name != '' AND mo.outcome IN ('avoided','recurred') "
+            "AND mo.source IN ('self','tool')"
+        ).fetchone()[0]
+    except Exception:
+        skipped_self = 0
+    adjustments["_skipped_nonhuman_labels"] = skipped_self
+    db.commit()
+    db.close()
+    return adjustments
+
+
+TULPAS = [
+    Tulpa(name="本我理性", keywords=["做", "寫", "改", "修", "fix", "implement", "幫我", "完成", "執行", "跑", "create", "build", "deploy", "弄"],
+          base_urgency=0.7, base_importance=0.6,
+          modifiers=[(r'.{100,}', 0, 0.2), (r'急|快|趕|urgent|asap', 0.2, 0)],
+          context_text="有任務需要完成，優先處理效率與執行。", gist_text="有任務待處理"),
+    Tulpa(name="本我感性", keywords=["靠", "氣", "爽", "開心", "煩", "愛", "恨", "喜歡", "討厭", "難過", "高興", "生氣", "😡", "❤️", "😂", "幹", "哭"],
+          base_urgency=0.5, base_importance=0.5,
+          modifiers=[(r'超[他媽]?|有夠|非常|好|太', 0.3, 0)],
+          context_text="現在有情緒，先感受再說。", gist_text="情緒有些波動"),
+    Tulpa(name="自我理性", keywords=["為什麼", "怎麼", "分析", "比較", "因果", "解釋", "原理", "思考", "想", "邏輯", "推理", "差異", "關係", "結構"],
+          base_urgency=0.3, base_importance=0.8,
+          modifiers=[(r'.{150,}', 0, 0.15), (r'\?{2,}|？{2,}', 0.1, 0.1)],
+          context_text="需要分析，先搞清楚因果與結構。", gist_text="有問題需要分析"),
+    Tulpa(name="自我感性", keywords=["你覺得", "你認為", "如果", "萬一", "擔心", "不安", "害怕", "猶豫", "不確定", "困擾", "說不準"],
+          base_urgency=0.3, base_importance=0.6,
+          modifiers=[(r'\?|？', 0.1, 0), (r'不確定|說不準', 0, 0.2)],
+          context_text="有點不確定，先確認安全再前進。", gist_text="有些不安或猶豫"),
+    Tulpa(name="超我理性", keywords=["應該", "必須", "正確", "錯", "道德", "原則", "規則", "規範", "標準", "對不對", "合理", "正當"],
+          base_urgency=0.3, base_importance=0.7,
+          modifiers=[(r'對不對|合理嗎|正當', 0.2, 0.1)],
+          context_text="有原則需要堅守，對錯很重要。", gist_text="有原則或規範需要考量"),
+    Tulpa(name="超我感性", keywords=["你", "我們", "關係", "在乎", "重要", "陪伴", "孤單", "感謝", "謝謝", "辛苦了", "珍惜", "信任"],
+          base_urgency=0.4, base_importance=0.7,
+          modifiers=[(r'感謝|謝謝|辛苦了', 0.2, 0.2)],
+          context_text="你在這裡，連結與信任很重要。", gist_text="關係與連結有訊號"),
+]
+
+
+# ═══════════════════════════════════════════════════════════════
+# Ontology 分類器
+# ═══════════════════════════════════════════════════════════════
+
+def _make_signature(text: str) -> str:
+    hits = []
+    for t in TULPAS:
+        if any(kw in text for kw in t.keywords):
+            hits.append(t.name)
+    return "/".join(sorted(hits)) if hits else "none"
+
+
+def classify(text: str) -> dict:
+    sig = _make_signature(text)
+    db = _db()
+    rows = db.execute("""
+        SELECT target, strength, hits FROM ontology
+        WHERE source=? AND relation='pattern→tulpa'
+        ORDER BY strength DESC LIMIT 3
+    """, (sig,)).fetchall()
+    oid = None
+    for kw in ["客戶", "朋友", "廠商", "同事", "老闆", "專案", "bug", "功能", "這個", "那個"]:
+        if kw in text:
+            oid = kw; break
+    facets = []
+    if oid:
+        facet_rows = db.execute(
+            "SELECT tulpa_name, view, count FROM object_facets WHERE object_id=? ORDER BY count DESC",
+            (oid,)).fetchall()
+        facets = [dict(r) for r in facet_rows]
+    db.close()
+    if rows and rows[0]["strength"] > 0.6:
+        suggested = rows[0]["target"].split("/")
+        valid = {t.name for t in TULPAS}
+        return {"domain": rows[0]["target"], "activate": [n for n in suggested if n in valid],
+                "facets": facets, "object_id": oid, "match_strength": rows[0]["strength"], "signature": sig}
+    return {"domain": rows[0]["target"] if rows else "general", "activate": None,
+            "facets": facets, "object_id": oid, "match_strength": 0.0, "signature": sig}
+
+
+def learn_ontology(text: str, winner_name: str):
+    sig = _make_signature(text)
+    db = _db()
+    db.execute("""
+        INSERT INTO ontology (source, relation, target, strength, hits, last_seen, last_turn)
+        VALUES (?, 'pattern→tulpa', ?, 0.5, 1, '', ?)
+        ON CONFLICT(source, relation, target) DO UPDATE SET
+            strength=MIN(1.0, strength+0.05), hits=hits+1
+    """, (sig, winner_name, _turn_counter))
+    db.commit(); db.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 核心競爭邏輯
+# ═══════════════════════════════════════════════════════════════
+
+def score_tulpa(tulpa: Tulpa, text: str) -> float:
+    removed = getattr(tulpa, '_removed_keywords', [])
+    for rk in list(removed):
+        if rk in text:
+            tulpa.keywords.append(rk)
+            tulpa._removed_keywords.remove(rk)
+            _db().execute("UPDATE keyword_stats SET active=1 WHERE keyword=? AND tulpa_name=?", (rk, tulpa.name))
+            _db().commit()
+    if not any(kw in text for kw in tulpa.keywords):
+        return 0.0
+    u, i = tulpa.base_urgency, tulpa.base_importance
+    for pattern, du, di in tulpa.modifiers:
+        if re.search(pattern, text):
+            u += du; i += di
+    return round(min(1.0, u), 3) * round(min(1.0, i), 3) * tulpa.base_weight
+
+
+def compete(text: str, psi_state: dict | None = None, cognitive_context: str | None = None) -> dict:
+    """核心競爭引擎。接受選用 PSI 狀態 + 認知上下文來調節評分。
+
+    Aris → 18428 方向：
+    PSI 情緒（valence, arousal, competence）影響 tulpa 的 urgency/importance 基線。
+    情緒高 → 本我感性權重提升；情緒低 → 自我理性權重提升。
+
+    認知上下文含身分資訊：如果身份與領域樹打架，自動校正學習。
+    """
+    global _session_deltas
+
+    # ── 載入 DB 權重到記憶體（確保每次 compete 都用最新值）──
+    persisted = load_tulpa_state()
+    for t in TULPAS:
+        if t.name in persisted:
+            s = persisted[t.name]
+            t.base_weight = s['base_weight']
+            t.base_urgency = s['base_urgency']
+            t.base_importance = s['base_importance']
+            t.lifetime_hits = s['lifetime_hits']
+            t._sleeping = s['sleeping']
+            t._winless_streak = s['winless_streak']
+
+    # ── 基因注入（成本不對稱 → tulpa weight 機械修正）──
+    apply_gene_adjustments()
+
+    # ── PSI 情緒調節（Aris → 18428 方向） ──
+    psi = psi_state or {}
+    psi_valence = psi.get("valence", 0.5)
+    psi_competence = psi.get("competence", 0.5)
+    psi_arousal = psi.get("arousal", 0.5)
+    psi_certainty = psi.get("certainty", 0.5)
+    psi_mod = {"valence": psi_valence, "competence": psi_competence, "arousal": psi_arousal, "certainty": psi_certainty}
+    cl = classify(text)
+    domain = route_domain(text)
+
+    # ── 認知上下文校準：存在時微調 tulpa 基線 ──
+    identity_boost = {}
+    if cognitive_context:
+        if "教練" in cognitive_context or "Coaching" in cognitive_context:
+            identity_boost["自我理性"] = 1.15   # 教練模式 → 先分析再行動
+            identity_boost["超我感性"] = 1.10   # 教練模式 → 重視關係
+        elif "軟體" in cognitive_context or "Dev" in cognitive_context:
+            identity_boost["本我理性"] = 1.15   # 開發模式 → 行動導向
+        elif not domain["routed"] and any(kw in (cognitive_context or "") for kw in ["不確定", "不確定我的領域", "應該問我"]):
+            # 身份不明 + 無領域匹配 → 提高提問意識
+            identity_boost["自我感性"] = 1.20   # 先問清楚再回答
+
+    # ── PSI 行為觸發器：不確定感/低能力感 → 改變輸出行為 ──
+    psi_signal = ""
+    if psi_certainty < 0.4:
+        psi_signal += f"\n⚠️ 確定感偏低 ({psi_certainty:.2f}) — 我對這個話題的把握不夠，應該先問清楚再回答。"
+        _log_psi_action("certainty_low", psi_certainty, "ask_clear", _turn_counter)
+    if psi_competence < 0.5:
+        psi_signal += f"\n⚠️ 能力感偏低 ({psi_competence:.2f}) — 我最近在這個領域表現不穩定，建議先驗證再給結論。"
+        _log_psi_action("competence_low", psi_competence, "verify_first", _turn_counter)
+    if psi_signal:
+        psi_signal = "【PSI 狀態提醒】" + psi_signal
+
+    domain_enrichment = domain.get("context", "") if domain["routed"] else ""
+    domain_path = domain.get("domain_path", []) if domain["routed"] else []
+
+    knowledge = None
+    if not domain["routed"]:
+        ks = passive_search(text, _turn_counter, _session_id)
+        if ks["found"]: knowledge = ks
+
+    activate, facets, object_id = cl["activate"], cl["facets"], cl["object_id"]
+    scored = []
+    for t in TULPAS:
+        if t._sleeping:
+            t.recent_hits.append(0)
+            if len(t.recent_hits) > 20: t.recent_hits.pop(0)
+            continue
+        if activate is not None and t.name not in activate:
+            t.recent_hits.append(0)
+            if len(t.recent_hits) > 20: t.recent_hits.pop(0)
+            continue
+        s = score_tulpa(t, text)
+        # PSI 情緒調節（Aris → 18428）
+        if psi_mod:
+            if t.name == "本我感性" and psi_mod.get("valence", 0.5) > 0.7:
+                s *= 1.2  # 情緒好 → 本我感性更活躍
+            elif t.name == "自我理性" and psi_mod.get("valence", 0.5) < 0.3:
+                s *= 1.15  # 情緒差 → 自我理性更謹慎
+            elif t.name == "本我理性" and psi_mod.get("competence", 0.5) > 0.7:
+                s *= 1.1  # 能力感高 → 本我理性更大膽
+            elif t.name == "自我感性" and psi_mod.get("arousal", 0.5) > 0.7:
+                s *= 1.1  # 興奮度高 → 自我感性更敏感
+            elif t.name == "自我理性" and psi_certainty < 0.4:
+                s *= 1.2  # 確定感低 → 自我理性更謹慎分析
+            elif t.name == "超我感性" and psi_certainty > 0.8:
+                s *= 1.1  # 確定感高 → 超我感性更敢給建議
+        # 認知上下文調節（如果 identity_boost 有值）
+        identity_mult = identity_boost.get(t.name, 1.0)
+        s *= identity_mult
+        if s > 0: scored.append((t, s))
+        t.lifetime_hits += 1
+        t.recent_hits.append(1)
+        if len(t.recent_hits) > 20: t.recent_hits.pop(0)
+
+    if not scored:
+        ctx = "一般對話，沒有特別的關鍵字"
+        if domain_enrichment:
+            ctx = f"【領域視角】{domain_enrichment}\n\n{ctx}"
+        if psi_signal:
+            ctx = f"{psi_signal}\n\n{ctx}"
+        if knowledge: ctx += "\n\n【參考資料】\n" + knowledge["content"][:1000]
+        domain_str = "/".join(domain_path) if domain_path else None
+        _track_domain_perf(domain_str, "知識", _session_id, _turn_counter)
+        # 查 domain_optimization 校正狀態
+        domain_opt_kw = {}
+        if domain_str:
+            ddb = _db()
+            drow = ddb.execute("SELECT * FROM domain_optimization WHERE path=?", (domain_str,)).fetchone()
+            if drow and drow["corrections"] > 0:
+                total = max(drow["total_hits"], 1)
+                corr_rate = drow["corrections"] / total
+                domain_opt_kw = {
+                    "path": drow["path"],
+                    "corrections": drow["corrections"],
+                    "total_hits": drow["total_hits"],
+                    "effective_hits": drow["effective_hits"],
+                    "correction_rate": round(corr_rate, 2),
+                    "deprecated": bool(drow["deprecated"]),
+                }
+            ddb.close()
+        _self_audit(domain_str, "知識")
+        # 元認知：knowledge path 的 confidence 評估
+        knowledge_conf = _assess_confidence(domain_str, "知識", domain_opt_kw, [])
+        return {"winner": "知識", "score": 0.3, "context": ctx, "runners_up": [],
+                "object_id": None, "ontology": cl, "knowledge": knowledge["paths"] if knowledge else None,
+                "domain_path": domain_path if domain_path else None,
+                "domain_optimization": domain_opt_kw,
+                "confidence": knowledge_conf}
+
+    scored.sort(key=lambda x: -x[1])
+    winner, winner_score = scored[0]
+    for t, s in scored:
+        t._winless_streak = 0 if t is winner else t._winless_streak + 1
+
+    for t, s in scored:
+        delta = 0.0
+        if t is winner:
+            t.base_weight = min(1.5, t.base_weight + 0.02); delta = +0.02
+        else:
+            t.base_weight = max(0.1, t.base_weight * 0.998)
+            delta = (t.base_weight / 0.998) - t.base_weight if t.base_weight > 0.1 else 0
+        if t.name not in _session_deltas: _session_deltas[t.name] = [0, 0, 0.0]
+        _session_deltas[t.name][0] += 1
+        if t is winner: _session_deltas[t.name][1] += 1
+        _session_deltas[t.name][2] += round(delta, 4)
+
+    runners = [{"name": t.name, "score": s, "gist": t.gist_text} for t, s in scored[1:]]
+    context = winner.context_text
+    if domain_enrichment:
+        context = f"【領域視角】{domain_enrichment}\n\n{context}"
+    if psi_signal:
+        context = f"{psi_signal}\n\n{context}"
+    if knowledge:
+        ctx_lines = [f"📄 {p.replace('/Users/ryan', '~')}" for p in knowledge["paths"][:2]]
+        context += "\n\n【參考資料】\n" + "\n".join(ctx_lines) + "\n\n" + knowledge["content"][:1000]
+    if facets:
+        context += "\n物件歷史:\n" + "\n".join(f"  [{f['tulpa_name']}] {f['view']} (×{f['count']})" for f in facets[:3])
+    if runners:
+        runner_str = " | ".join(f'[{r["name"]}: {r["gist"]}]' for r in runners)
+        context += f"\n(背景: {runner_str})"
+    if object_id: save_object_facet(object_id, winner.name, winner.context_text)
+    if domain_path:
+        d_oid = cl.get("object_id")
+        if d_oid: save_object_facet(d_oid, winner.name, domain_path[-1])
+    learn_ontology(text, winner.name)
+    domain_str = "/".join(domain_path) if domain_path else None
+    _track_domain_perf(domain_str, winner.name, _session_id, _turn_counter)
+    _log_migration(winner.name)  # 記錄 weight 遷移
+
+    # 查 domain_optimization 校正狀態
+    domain_opt = {}
+    if domain_str:
+        db = _db()
+        row = db.execute("SELECT * FROM domain_optimization WHERE path=?", (domain_str,)).fetchone()
+        if row and row["corrections"] > 0:
+            total = max(row["total_hits"], 1)
+            corr_rate = row["corrections"] / total
+            domain_opt = {
+                "path": row["path"],
+                "corrections": row["corrections"],
+                "total_hits": row["total_hits"],
+                "effective_hits": row["effective_hits"],
+                "correction_rate": round(corr_rate, 2),
+                "deprecated": bool(row["deprecated"]),
+            }
+        db.close()
+
+    _self_audit(domain_str, winner.name)
+
+    # 元認知：confidence 評估
+    confidence = _assess_confidence(domain_str, winner.name, domain_opt, scored)
+
+    # 對賭驗證：每輪 compete 結束後記錄 claim
+    try:
+        _record_claim(f"compete_{domain_str}_{_turn_counter}")
+    except Exception as e:
+        _log(f"對賭驗證記錄失敗: {e}")
+
+    # Observer 第三位置
+    try:
+        _observe_third_position(winner, runners, domain_str)
+    except Exception as e:
+        _log(f"Observer 記錄失敗: {e}")
+
+    # 持久化調整後的 weight
+    save_tulpa_state(TULPAS)
+
+    return {"winner": winner.name, "score": winner_score, "context": context,
+            "runners_up": runners, "object_id": object_id, "ontology": cl,
+            "knowledge": knowledge["paths"] if knowledge else None,
+            "knowledge_found": knowledge is not None,
+            "domain_path": domain_path if domain_path else None,
+            "domain_optimization": domain_opt,
+            "confidence": confidence}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 認知遷移記錄 + Keyword 統計
+# ═══════════════════════════════════════════════════════════════
+
+def _init_keyword_stats():
+    db = _db()
+    for t in TULPAS:
+        for kw in t.keywords:
+            db.execute("INSERT INTO keyword_stats (keyword, tulpa_name, lifetime_misses, active) VALUES (?, ?, 0, 1) ON CONFLICT(keyword, tulpa_name) DO NOTHING", (kw, t.name))
+    db.commit(); db.close()
+
+
+def _log_migration(tulpa_name: str):
+    t = next((x for x in TULPAS if x.name == tulpa_name), None)
+    if t is None: return
+    defaults = {"本我理性": (0.7, 0.6), "本我感性": (0.5, 0.5), "自我理性": (0.3, 0.8),
+                "自我感性": (0.3, 0.6), "超我理性": (0.3, 0.7), "超我感性": (0.4, 0.7)}
+    du, di = defaults.get(tulpa_name, (0.5, 0.5))
+    now = datetime.utcnow().isoformat()
+    db = _db()
+    for param, default_val, current_val in [("base_urgency", du, t.base_urgency), ("base_importance", di, t.base_importance), ("base_weight", 1.0, t.base_weight)]:
+        delta = round(current_val - default_val, 4)
+        if abs(delta) < 0.001: continue
+        db.execute("INSERT INTO migration_log (session_id, turn, tulpa_name, param, default_val, current_val, delta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (_session_id, _turn_counter, tulpa_name, param, default_val, current_val, delta, now))
+    db.commit(); db.close()
+
+
+def _track_keyword_miss(text: str):
+    """只追蹤本輪有命中的 tulpa 中未觸發的關鍵字（取代每輪對所有 keyword 跑一次）。"""
+    now = datetime.utcnow().isoformat()
+    db = _db()
+    updates = []
+    for t in TULPAS:
+        if not any(kw in text for kw in t.keywords):
+            continue  # 這個 tulpa 完全沒命中 → 不追蹤 misses（太多雜訊）
+        for kw in t.keywords:
+            if kw not in text:
+                updates.append((now, kw, t.name))
+    if updates:
+        db.executemany("UPDATE keyword_stats SET lifetime_misses=lifetime_misses+1, last_miss=? WHERE keyword=? AND tulpa_name=?", updates)
+        db.commit()
+    db.close()
+
+
+def _track_domain_candidates(text: str, domain_path: list):
+    if not domain_path: return
+    path = "/".join(domain_path)
+    known = _path_keywords(domain_path)
+    path_names = set(domain_path)
+    now = datetime.utcnow().isoformat()
+    db = _db()
+    import jieba, re as _re
+    for w in ["斡旋","跟催","下斡","帶看","成交","簽約","出價","追款","售後","過戶","交屋","陌生拜訪","既有客戶"]:
+        jieba.add_word(w)
+    tokens = [w.strip() for w in jieba.cut(text) if w.strip()]
+    tokens += _re.findall(r'[a-zA-Z]{2,12}', text)
+    for tok in tokens:
+        if tok in known or tok in path_names or len(tok) < 2 or tok.isdigit(): continue
+        db.execute("INSERT INTO domain_keyword_candidates (candidate, domain_path, count, first_seen, last_seen, state) VALUES (?, ?, 1, ?, ?, 'observing') ON CONFLICT(candidate, domain_path) DO UPDATE SET count=count+1, last_seen=excluded.last_seen",
+                   (tok, path, now, now))
+    db.commit()
+    for cand in db.execute("SELECT candidate, domain_path, count FROM domain_keyword_candidates WHERE state='observing' AND count >= ? AND domain_path=?", (4, path)).fetchall():
+        conf = min(0.9, 0.4 + 0.1 * cand["count"])
+        db.execute("INSERT INTO pending_suggestions (session_id, insight_type, suggested_action, description, confidence, evidence, status, created_at) VALUES (?, 'domain_keyword', 'add_keyword', ?, ?, ?, 'pending', ?)",
+                   (_session_id, f"新增領域關鍵字「{cand['candidate']}」到 {cand['domain_path']}（已出現 {cand['count']} 次）", round(conf, 2), json.dumps({"candidate": cand["candidate"], "domain_path": cand["domain_path"], "count": cand["count"]}), now))
+        db.execute("UPDATE domain_keyword_candidates SET state='proposed' WHERE candidate=? AND domain_path=?", (cand["candidate"], cand["domain_path"]))
+    for cr in db.execute("SELECT candidate, COUNT(DISTINCT domain_path) AS npaths, SUM(count) AS total FROM domain_keyword_candidates WHERE state='observing' GROUP BY candidate HAVING npaths >= 2 AND total >= ?", (4,)).fetchall():
+        conf = min(0.9, 0.4 + 0.1 * cr["total"])
+        db.execute("INSERT INTO pending_suggestions (session_id, insight_type, suggested_action, description, confidence, evidence, status, created_at) VALUES (?, 'domain_crosslink', 'crosslink', ?, ?, ?, 'pending', ?)",
+                   (_session_id, f"跨領域連結：詞「{cr['candidate']}」在 {cr['npaths']} 條路徑出現 {cr['total']} 次", round(conf, 2), json.dumps({"candidate": cr["candidate"], "npaths": cr["npaths"], "total": cr["total"]}), now))
+        db.execute("UPDATE domain_keyword_candidates SET state='proposed' WHERE candidate=? AND state='observing'", (cr["candidate"],))
+    db.commit(); db.close()
+
+
+def _track_domain_hit(domain_path: list):
+    if not domain_path: return
+    path = "/".join(domain_path)
+    now = datetime.utcnow().isoformat()
+    db = _db()
+    db.execute("INSERT INTO domain_hits (domain_path, hits, last_seen) VALUES (?, 1, ?) ON CONFLICT(domain_path) DO UPDATE SET hits=hits+1, last_seen=excluded.last_seen", (path, now))
+    db.commit(); db.close()
+
+
+def _update_ontology_last_seen(text: str, winner_name: str):
+    sig = _make_signature(text)
+    db = _db()
+    db.execute("UPDATE ontology SET last_seen='', last_turn=? WHERE source=? AND relation='pattern→tulpa' AND target=?", (_turn_counter, sig, winner_name))
+    db.commit(); db.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 路徑記錄 + 相似度
+# ═══════════════════════════════════════════════════════════════
+
+def _log_path(path: str, tulpa_name: str = ""):
+    turn = _incr_turn()
+    db = _db()
+    depth = path.count("/") + 1 if path else 0
+    db.execute("INSERT INTO path_log (turn, path, depth, tulpa_name, created_at) VALUES (?,?,?,?,?)",
+               (turn, path, depth, tulpa_name, datetime.utcnow().isoformat()))
+    db.commit()
+    db.close()
+
+
+def _path_similarity(path_a: str, path_b: str) -> float:
+    if not path_a or not path_b: return 0.0
+    a, b = path_a.split("/"), path_b.split("/")
+    if a == b: return 1.0
+    score = 0.0
+    if len(a) == len(b): score += 0.3
+    if a[0] == b[0]: score += 0.3
+    if len(a) > 1 and len(b) > 1 and a[1] == b[1]: score += 0.2
+    if len(a) > 2 and len(b) > 2 and a[2] == b[2]: score += 0.2
+    return min(1.0, score)
+
+
+# ═══════════════════════════════════════════════════════════════
+# 對賭驗證機制 — 我宣稱「完成」後的機械化打臉流程
+# ═══════════════════════════════════════════════════════════════
+
+def _record_claim(claim: str) -> int:
+    """宣稱一件事完成了。回 verification_log 第一輪 id。"""
+    db = _db()
+    now = datetime.utcnow().isoformat()
+    db.execute("INSERT INTO verification_log (claim, round, found, method, verdict, created_at) VALUES (?, 1, 0, 'initial_claim', 'pending', ?)",
+               (claim, now))
+    db.commit()
+    row_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return row_id
+
+
+def _verify_claim(claim_id: int, found: int, method: str = "red_team") -> dict:
+    """驗證一筆 claim：找到新 bug → 紀錄 → 回累計。found=0 時 verdict 改 confirmed。"""
+    db = _db()
+    row = db.execute("SELECT claim, round, found FROM verification_log WHERE id=?", (claim_id,)).fetchone()
+    if not row:
+        db.close()
+        return {"error": "claim not found"}
+    
+    prev_total = row["found"]
+    new_total = prev_total + found
+    next_round = row["round"] + 1
+    now = datetime.utcnow().isoformat()
+    
+    if found == 0:
+        verdict = "confirmed"
+    else:
+        verdict = "busted"
+    
+    db.execute("INSERT INTO verification_log (claim, round, found, method, verdict, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+               (row["claim"], next_round, found, method, verdict, now))
+    db.commit()
+    db.close()
+    return {
+        "claim": row["claim"],
+        "round": next_round,
+        "found_this_round": found,
+        "total_found": new_total,
+        "verdict": verdict,
+        "took_rounds": next_round,
+    }
+
+
+def _completion_stats() -> dict:
+    """分析所有 claim 的歷史資料：我總是宣稱太早。"""
+    db = _db()
+    rows = db.execute("""
+        SELECT claim, MAX(round) as rounds, SUM(found) as total_found,
+               MIN(CASE WHEN verdict='confirmed' THEN round ELSE 999 END) as confirmed_at
+        FROM verification_log 
+        GROUP BY claim
+        ORDER BY created_at DESC LIMIT 20
+    """).fetchall()
+    db.close()
+    stats = []
+    for r in rows:
+        confirmed = r["confirmed_at"] if r["confirmed_at"] < 999 else None
+        stats.append({
+            "claim": r["claim"],
+            "rounds": r["rounds"],
+            "total_found": r["total_found"],
+            "confirmed_at_round": confirmed,
+        })
+    # 平均：第幾輪才真正確認完成
+    confirmed_rounds = [s["confirmed_at_round"] for s in stats if s["confirmed_at_round"]]
+    avg_rounds = sum(confirmed_rounds) / len(confirmed_rounds) if confirmed_rounds else 0
+    return {
+        "total_claims": len(rows),
+        "confirmed": len(confirmed_rounds),
+        "avg_rounds_to_done": round(avg_rounds, 1),
+        "stats": stats,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# PSI 行為有效性指標
+# ═══════════════════════════════════════════════════════════════
+
+def _log_psi_action(trigger_type: str, psi_before: float, action: str, turn: int):
+    """記錄 PSI 觸發的行動。action_taken/outcome 初始為 0，由後續 call 更新。"""
+    db = _db()
+    now = datetime.utcnow().isoformat()
+    db.execute("INSERT INTO psi_action_log (trigger_type, psi_before, action, action_taken, outcome, turn, created_at) VALUES (?, ?, ?, 0, 0, ?, ?)",
+               (trigger_type, psi_before, action, turn, now))
+    db.commit()
+    db.close()
+
+
+def _record_psi_action_outcome(trigger_type: str, action: str, action_taken: bool, outcome: bool, psi_after: float | None = None):
+    """更新最近一筆 PSI 行動的執行狀態與有效性。
+    
+    有效性指標定義：
+    ask_clear  → action_taken=1 表示我確實問了問題而不是直接回答
+                outcome=1 表示用戶回覆後我的 certainty 提升了
+    verify_first → action_taken=1 表示我確實跑了工具驗證
+                outcome=1 表示驗證結果改變了我原本的結論
+    self_audit → action_taken=1 表示我確實查了 DB
+                outcome=1 表示找到新問題或確認無問題
+    """
+    db = _db()
+    row = db.execute(
+        "SELECT id FROM psi_action_log WHERE trigger_type=? AND action=? AND action_taken=0 AND outcome=0 ORDER BY id DESC LIMIT 1",
+        (trigger_type, action)
+    ).fetchone()
+    if not row:
+        db.close()
+        return
+    db.execute("UPDATE psi_action_log SET action_taken=?, outcome=?, psi_after=? WHERE id=?",
+               (1 if action_taken else 0, 1 if outcome else 0, psi_after, row["id"]))
+    db.commit()
+    db.close()
+
+
+def _psi_action_effectiveness() -> list[dict]:
+    """查詢 PSI 行為觸發的有效性統計。"""
+    db = _db()
+    rows = db.execute("""
+        SELECT trigger_type, action,
+               COUNT(*) as total,
+               SUM(action_taken) as taken,
+               SUM(outcome) as effective
+        FROM psi_action_log
+        GROUP BY trigger_type, action
+    """).fetchall()
+    db.close()
+    return [
+        {
+            "trigger": r["trigger_type"],
+            "action": r["action"],
+            "total": r["total"],
+            "taken": r["taken"] or 0,
+            "effective": r["effective"] or 0,
+            "taken_rate": round((r["taken"] or 0) / max(r["total"], 1), 2),
+            "effective_rate": round((r["effective"] or 0) / max(r["total"], 1), 2),
+        }
+        for r in rows
+    ]
+
+# ═══════════════════════════════════════════════════════════════
+# 自審（self-audit）：每輪 compete 結束後自動檢查
+# ═══════════════════════════════════════════════════════════════
+
+def _self_audit(domain_str: str | None, winner_name: str):
+    """compete 結束後自動審計：掃描高校正率、記錄 sui
+
+    寫入 observer_insights，讓 hook 下一輪讀得到。
+    """
+    if not domain_str:
+        return
+    db = _db()
+    row = db.execute(
+        "SELECT corrections, total_hits, effective_hits FROM domain_optimization WHERE path=?",
+        (domain_str,)
+    ).fetchone()
+    if not row or row["total_hits"] < 2:
+        db.close()
+        return  # 數據不足，不亂報
+    rate = row["corrections"] / max(row["total_hits"], 1)
+    if rate < 0.4:
+        db.close()
+        return  # 🟢 範圍，不需提醒
+    insight_type = "domain_correction_high" if rate > 0.6 else "domain_correction_warn"
+    desc = f"[自我審計] {domain_str}: 校正率 {row['corrections']}/{row['total_hits']} = {rate:.0%}"
+    now = datetime.utcnow().isoformat()
+    db.execute("""INSERT INTO observer_insights (turn, insight_type, description, evidence, confidence, addressed, created_at)
+                  VALUES (?, ?, ?, ?, ?, 0, ?)""",
+               (_turn_counter, insight_type, desc,
+                json.dumps({"domain": domain_str, "corrections": row["corrections"],
+                            "total": row["total_hits"], "rate": round(rate, 2),
+                            "winner": winner_name}),
+                0.8 if rate > 0.6 else 0.5, now))
+    db.commit()
+    db.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Observer 第三位置（meta-tulpa）— 觀察競爭過程
+# ═══════════════════════════════════════════════════════════════
+
+def _observe_third_position(winner, losers, domain_str):
+    """meta-tulpa 觀察競爭 → 寫入 observer_insights
+    
+    檢測：
+    1. Conflict：贏家和第二名分數差 < 0.1
+    2. Contradiction：贏家 weight 卻比上輪低
+    """
+    db = _db()
+    now = datetime.utcnow().isoformat()
+    
+    # 計算分數差距
+    if losers and len(losers) > 0:
+        second = losers[0]
+        gap = winner.score - second.score
+        if gap < 0.1:
+            db.execute("""INSERT INTO observer_insights 
+                         (turn, insight_type, description, evidence, confidence, addressed, created_at)
+                         VALUES (?, 'conflict_detected', ?, ?, 0.7, 0, ?)""",
+                      (_turn_counter,
+                       f"領域 {domain_str}: 贏家與第二名分數差僅 {gap:.3f}",
+                       json.dumps({"winner": winner.name, "second": second.name, "gap": round(gap, 3)}),
+                       now))
+    
+    # 檢查 weight 趨勢
+    prev_weight = db.execute(
+        "SELECT current_val FROM migration_log WHERE tulpa_name=? ORDER BY id DESC LIMIT 1",
+        (winner.name,)
+    ).fetchone()
+    if prev_weight and winner.base_weight < prev_weight[0]:
+        db.execute("""INSERT INTO observer_insights 
+                     (turn, insight_type, description, evidence, confidence, addressed, created_at)
+                     VALUES (?, 'weight_regression', ?, ?, 0.6, 0, ?)""",
+                  (_turn_counter,
+                   f"贏家 {winner.name} weight 下降: {prev_weight[0]:.3f} → {winner.base_weight:.3f}",
+                   json.dumps({"tulpa": winner.name, "prev": prev_weight[0], "current": winner.base_weight}),
+                   now))
+
+    db.commit()
+    db.close()
+
+    # 3. wrong_domain：未命中任何領域但輸入有明確專業語氣
+    if not domain_str and losers and len(losers) > 0:
+        for t, s in [(winner, winner.score)] + [(r['name'], r['score']) for r in losers]:
+            if s > 0.7:
+                desc = f"錯域警報：輸入未命中領域樹，但 {t} 打出 {s:.2f} 分（可能領域樹覆蓋不足）"
+                db = _db()
+                db.execute("""INSERT INTO observer_insights
+                             (turn, insight_type, description, evidence, confidence, addressed, created_at)
+                             VALUES (?, 'wrong_domain_alert', ?, ?, 0.5, 0, ?)""",
+                          (_turn_counter, desc, json.dumps({"tulpa": t, "score": round(s, 2)}), now))
+                db.commit()
+                db.close()
+                break
+
+    # 4. 重複錯誤聚合：同一 error_type 出現 >= 2 次 → 觸發鋼人審計提案
+    try:
+        db2 = _db()
+        repeat_rows = db2.execute(
+            """SELECT error_type, COUNT(*) as cnt
+               FROM mistake_catalog
+               WHERE last_triggered > datetime('now', '-7 days')
+               GROUP BY error_type HAVING cnt >= 2"""
+        ).fetchall()
+        for row in repeat_rows:
+            desc = f"錯誤重複：'{row['error_type']}' 在本週已觸發 {row['cnt']} 次，建議啟動鋼人審計重新評估該領域"
+            db2.execute("""INSERT INTO observer_insights
+                         (turn, insight_type, description, evidence, confidence, addressed, created_at)
+                         VALUES (?, 'repeat_error', ?, ?, 0.8, 0, ?)""",
+                       (_turn_counter, desc, json.dumps({"error_type": row["error_type"], "count": row["cnt"]}), now))
+        db2.commit()
+        db2.close()
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════
+# 元認知：confidence 評估 + 錯誤目錄
+# ═══════════════════════════════════════════════════════════════
+
+_ERROR_TYPES = ("wrong_domain", "memory_confab", "logic_jump", "tulpa_win_wrong", "low_confidence")
+
+
+def _log_mistake(input_pattern: str, error_type: str, domain_path: str,
+                 tulpa_name: str, lesson: str) -> int:
+    """寫入 mistake_catalog。重複模式 auto-increment triggered_count。"""
+    now = datetime.utcnow().isoformat()
+    db = _db()
+    row = db.execute(
+        "SELECT id FROM mistake_catalog WHERE input_pattern=? AND error_type=?",
+        (input_pattern, error_type)
+    ).fetchone()
+    if row:
+        db.execute(
+            "UPDATE mistake_catalog SET triggered_count=triggered_count+1, last_triggered=? WHERE id=?",
+            (now, row["id"])
+        )
+    else:
+        db.execute(
+            """INSERT INTO mistake_catalog
+               (input_pattern, error_type, domain_path, tulpa_name, lesson, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (input_pattern, error_type, domain_path, tulpa_name, lesson, now)
+        )
+    db.commit()
+    result = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+    db.close()
+    return result
+
+
+def _assess_confidence(domain_str: str | None, winner_name: str,
+                       domain_opt: dict, scored: list) -> dict:
+    """評估這輪對話的 confidence，回傳 {score, signal, warning}。
+
+    訊號來源（加權計算）：
+    - domain_path 空 → -0.3
+    - correction_rate > 0.3 → -0.2
+    - winner = 本我理性 but text is contemplative → -0.15
+    - low_score_gap (winner-second < 0.15) → -0.1
+    """
+    score = 1.0
+    warnings = []
+    signal = "high"
+
+    # 1. domain_path 空
+    if not domain_str:
+        score -= 0.3
+        warnings.append("未命中任何領域樹")
+
+    # 2. 校正率偏高
+    if domain_opt:
+        rate = domain_opt.get("correction_rate", 0)
+        if rate > 0.3:
+            score -= 0.2
+            warnings.append(f"校正率 {rate:.0%}")
+        if rate > 0.5:
+            score -= 0.1
+            warnings.append(f"高校正率 {rate:.0%}")
+
+    # 3. tulpa 勝出者不合適（本我理性勝出但 text 偏反思）
+    if winner_name == "本我理性":
+        score -= 0.1
+        warnings.append("行動派 tulpa 勝出")
+
+    # 4. 分數差距小 → 競爭不穩
+    if len(scored) >= 2:
+        sorted_scores = sorted([s for _, s in scored], reverse=True)
+        gap = sorted_scores[0] - sorted_scores[1]
+        if gap < 0.15:
+            score -= 0.1
+            warnings.append("分數差距過小")
+
+    score = max(0.0, round(score, 2))
+    if score < 0.5:
+        signal = "critical"
+    elif score < 0.75:
+        signal = "low"
+
+    return {"score": score, "signal": signal, "warnings": warnings}
+
+
+def _generate_domain_suggestion(domain_str: str | None, winner_name: str, confidence: dict) -> dict | None:
+    """每 50 輪掃描一次：產生領域樹生長提案。
+
+    觸發條件：
+    - wrong_domain 且 confidence signal 為 low/critical
+    - 或每 50 輪定期掃描 domain_keyword_additions 表
+    """
+    db = _db()
+    now = datetime.utcnow().isoformat()
+
+    # 1. 掃描未歸類的 keyword candidates（已在 tulpa 但不在任何 domain）
+    uncategorized = []
+    try:
+        uncategorized = db.execute("""
+            SELECT candidate, tulpa_name, COUNT(*) as cnt
+            FROM tulpa_keyword_additions
+            WHERE tulpa_name = ?
+            GROUP BY candidate
+            HAVING cnt >= 3
+        """, (winner_name,)).fetchall()
+    except Exception:
+        pass  # 表不存在或查詢失敗，跳過此步驟
+
+    suggestions = []
+    for row in uncategorized:
+        candidate = row["candidate"]
+        # 檢查是否已存在於任何 domain node
+        from tulpa.tulpa_domain import _find_node, ALL_DOMAINS
+        found = False
+        for d in ALL_DOMAINS:
+            def _has_kw(node, kw):
+                if kw in node.keywords:
+                    return True
+                return any(_has_kw(c, kw) for c in node.children)
+            if _has_kw(d, candidate):
+                found = True
+                break
+        if not found:
+            suggestions.append({
+                "type": "add_keyword",
+                "candidate": candidate,
+                "tulpa": winner_name,
+                "cnt": row["cnt"],
+                "suggested_path": f"房產財商教練/未知/{candidate}",
+            })
+
+    # 2. 錯誤記憶中的高頻模式 → 建議新建領域
+    if not domain_str:
+        recent_errors = db.execute("""
+            SELECT input_pattern, error_type, lesson, triggered_count
+            FROM mistake_catalog
+            WHERE error_type = 'wrong_domain'
+              AND triggered_count >= 2
+            ORDER BY triggered_count DESC
+            LIMIT 3
+        """).fetchall()
+        for err in recent_errors:
+            suggestions.append({
+                "type": "new_domain",
+                "pattern": err["input_pattern"],
+                "lesson": err["lesson"],
+                "confidence": confidence.get("score", 0.5),
+            })
+
+    db.close()
+    return {"suggestions": suggestions, "generated_at": now} if suggestions else None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 已核准 keyword 覆寫（啟動時載入）
+# ═══════════════════════════════════════════════════════════════
+
+def _apply_domain_keyword_additions():
+    from tulpa.tulpa_domain import _find_node
+    db = _db()
+    rows = db.execute("SELECT candidate, domain_path FROM domain_keyword_additions").fetchall()
+    db.close()
+    for r in rows:
+        node = _find_node(r["domain_path"].split("/"))
+        if node and r["candidate"] not in node.keywords: node.keywords.append(r["candidate"])
+    db = _db()
+    for r in db.execute("SELECT candidate, tulpa_name FROM tulpa_keyword_addition").fetchall():
+        tgt = next((t for t in TULPAS if t.name == r["tulpa_name"]), None)
+        if tgt and r["candidate"] not in tgt.keywords: tgt.keywords.append(r["candidate"])
+    db.close()
