@@ -109,3 +109,15 @@ backups/
 *.db-wal
 # 空臨時檔
 .hermes-tmp.*
+# DB 檔案(不進版控)
+data/*.db
+data/*.db-shm
+data/*.db-wal
+# 報告/半成品
+data/reports/
+data/backup_verification_log*.json
+data/learning-curve.json
+data/audit-ledger.jsonl
+# tulpa 產物(不進版控)
+tulpa/*.db
+tulpa/*.bak-*
